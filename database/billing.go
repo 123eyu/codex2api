@@ -119,12 +119,6 @@ var (
 		{model: "gpt-4-turbo", pricing: ModelPricing{InputPricePerMToken: 10.0, OutputPricePerMToken: 30.0}},
 		{model: "gpt-4", pricing: ModelPricing{InputPricePerMToken: 30.0, OutputPricePerMToken: 60.0}},
 		{model: "gpt-3.5-turbo", pricing: ModelPricing{InputPricePerMToken: 0.5, OutputPricePerMToken: 1.5}},
-		{model: "gpt-4.1", pricing: ModelPricing{InputPricePerMToken: 2.0, CacheReadPricePerMToken: 0.5, OutputPricePerMToken: 8.0}},
-		{model: "gpt-4.1-mini", pricing: ModelPricing{InputPricePerMToken: 0.4, CacheReadPricePerMToken: 0.1, OutputPricePerMToken: 1.6}},
-		{model: "gpt-4.1-nano", pricing: ModelPricing{InputPricePerMToken: 0.1, CacheReadPricePerMToken: 0.025, OutputPricePerMToken: 0.4}},
-		{model: "o3", pricing: ModelPricing{InputPricePerMToken: 2.0, CacheReadPricePerMToken: 0.5, OutputPricePerMToken: 8.0}},
-		{model: "o4-mini", pricing: ModelPricing{InputPricePerMToken: 1.1, CacheReadPricePerMToken: 0.275, OutputPricePerMToken: 4.4}},
-		{model: "o3-mini", pricing: ModelPricing{InputPricePerMToken: 1.1, CacheReadPricePerMToken: 0.55, OutputPricePerMToken: 4.4}},
 	}
 )
 
