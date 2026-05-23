@@ -651,6 +651,7 @@ export interface CreateAPIKeyRequest {
   expires_at?: string
   expires_in_days?: number
   allowed_group_ids?: number[]
+  limits?: APIKeyLimits
 }
 
 export interface UpdateAPIKeyRequest {
@@ -660,6 +661,7 @@ export interface UpdateAPIKeyRequest {
   expires_at?: string | null
   expires_in_days?: number
   allowed_group_ids?: number[]
+  limits?: APIKeyLimits
 }
 
 export interface CreateAPIKeyResponse {
