@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -131,20 +132,28 @@ func (db *DB) ListAPIKeyTokenStats(ctx context.Context, rangeStart, rangeEnd tim
 	return items, nil
 }
 
+// APIKeyAccountGroup 是上游账号所属分组的精简展示项（Token 用量明细用）。
+type APIKeyAccountGroup struct {
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}
+
 // APIKeyAccountStat 是单个 API Key 在某时间区间内、按上游账号拆分的用量项。
 // 与 AccountKeyStat（账号 → 各 Key）互为转置：这里是 Key → 各账号。
 type APIKeyAccountStat struct {
-	AccountID     int64   `json:"account_id"`
-	AccountName   string  `json:"account_name"`
-	AccountEmail  string  `json:"account_email"`
-	Requests      int64   `json:"requests"`
-	InputTokens   int64   `json:"input_tokens"`
-	OutputTokens  int64   `json:"output_tokens"`
-	CachedTokens  int64   `json:"cached_tokens"`
-	TotalTokens   int64   `json:"total_tokens"`
-	ErrorCount    int64   `json:"error_count"`
-	AccountBilled float64 `json:"account_billed"`
-	UserBilled    float64 `json:"user_billed"`
+	AccountID     int64                `json:"account_id"`
+	AccountName   string               `json:"account_name"`
+	AccountEmail  string               `json:"account_email"`
+	Groups        []APIKeyAccountGroup `json:"groups,omitempty"`
+	Requests      int64                `json:"requests"`
+	InputTokens   int64                `json:"input_tokens"`
+	OutputTokens  int64                `json:"output_tokens"`
+	CachedTokens  int64                `json:"cached_tokens"`
+	TotalTokens   int64                `json:"total_tokens"`
+	ErrorCount    int64                `json:"error_count"`
+	AccountBilled float64              `json:"account_billed"`
+	UserBilled    float64              `json:"user_billed"`
 }
 
 // ListAPIKeyAccountStats 返回某个 API Key 在 [rangeStart, rangeEnd) 内按上游账号聚合的用量。
@@ -213,7 +222,75 @@ func (db *DB) ListAPIKeyAccountStats(ctx context.Context, apiKeyID int64, rangeS
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := db.attachAPIKeyAccountGroups(ctx, items); err != nil {
+		return nil, err
+	}
 	return items, nil
+}
+
+// attachAPIKeyAccountGroups 批量补齐上游账号的分组标签，避免 N+1。
+func (db *DB) attachAPIKeyAccountGroups(ctx context.Context, items []APIKeyAccountStat) error {
+	if len(items) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(items))
+	seen := make(map[int64]struct{}, len(items))
+	for _, item := range items {
+		if item.AccountID <= 0 {
+			continue
+		}
+		if _, ok := seen[item.AccountID]; ok {
+			continue
+		}
+		seen[item.AccountID] = struct{}{}
+		ids = append(ids, item.AccountID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		if db.isSQLite() {
+			placeholders[i] = "?"
+		} else {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+		}
+		args[i] = id
+	}
+	query := fmt.Sprintf(`
+		SELECT m.account_id, g.id, g.name, COALESCE(g.color, '')
+		FROM account_group_members m
+		INNER JOIN account_groups g ON g.id = m.group_id
+		WHERE m.account_id IN (%s)
+		ORDER BY m.account_id, g.sort_order, g.name`, strings.Join(placeholders, ","))
+
+	groupRows, err := db.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer groupRows.Close()
+
+	byAccount := make(map[int64][]APIKeyAccountGroup, len(ids))
+	for groupRows.Next() {
+		var accountID int64
+		var group APIKeyAccountGroup
+		if err := groupRows.Scan(&accountID, &group.ID, &group.Name, &group.Color); err != nil {
+			return err
+		}
+		byAccount[accountID] = append(byAccount[accountID], group)
+	}
+	if err := groupRows.Err(); err != nil {
+		return err
+	}
+
+	for i := range items {
+		if groups := byAccount[items[i].AccountID]; len(groups) > 0 {
+			items[i].Groups = groups
+		}
+	}
+	return nil
 }
 
 // emailFromCredentialsJSON 从账号 credentials JSON 文本里取展示用邮箱；

@@ -1,8 +1,12 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import { useToast } from "../hooks/useToast";
-import type { APIKeyAccountStat, APIKeyTokenStat } from "../types";
+import type {
+  APIKeyAccountGroup,
+  APIKeyAccountStat,
+  APIKeyTokenStat,
+} from "../types";
 import { formatCompactEmail } from "../lib/utils";
 import { formatUsageNumber } from "../lib/usageFormat";
 import { getErrorMessage } from "../utils/error";
@@ -632,9 +636,64 @@ function accountPrimaryLabel(a: APIKeyAccountStat): string {
   return a.account_email?.trim() || a.account_name?.trim() || `#${a.account_id}`;
 }
 
+const FALLBACK_GROUP_COLOR = "#2563eb";
+
+function normalizeGroupColor(color?: string): string {
+  const value = (color || "").trim();
+  return /^#[0-9a-fA-F]{6}$/.test(value) ? value : FALLBACK_GROUP_COLOR;
+}
+
+/** Compact group chips next to upstream account email (matches Accounts page chips). */
+function AccountGroupChips({ groups }: { groups?: APIKeyAccountGroup[] }) {
+  if (!groups || groups.length === 0) return null;
+  const visible = groups.slice(0, 3);
+  const hidden = groups.length - visible.length;
+  return (
+    <>
+      {visible.map((group) => {
+        const color = normalizeGroupColor(group.color);
+        return (
+          <span
+            key={group.id}
+            className="inline-flex max-w-[7.5rem] items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold"
+            style={{
+              backgroundColor: `${color}14`,
+              color,
+              boxShadow: `inset 0 0 0 1px ${color}33`,
+            }}
+            title={group.name}
+          >
+            <span className="size-1.5 shrink-0 rounded-full bg-current" />
+            <span className="truncate">{group.name}</span>
+          </span>
+        );
+      })}
+      {hidden > 0 ? (
+        <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+          +{hidden}
+        </span>
+      ) : null}
+    </>
+  );
+}
+
 function formatPercent(value: number): string {
   const n = Number(value || 0);
   return `${n.toFixed(n >= 10 ? 1 : 2)}%`;
+}
+
+type AccountBreakdownSortKey = "usage" | "group";
+type AccountBreakdownSortDir = "asc" | "desc";
+
+function accountGroupSortKey(a: APIKeyAccountStat): string {
+  const groups = a.groups ?? [];
+  if (groups.length === 0) {
+    // Ungrouped last when ascending.
+    return "\uFFFF";
+  }
+  return groups
+    .map((group) => group.name)
+    .join("\0");
 }
 
 // KeyAccountBreakdown 渲染某个 Key 展开后的"各上游账号"明细：
@@ -653,6 +712,33 @@ function KeyAccountBreakdown({
   locale: string;
 }) {
   const { t } = useTranslation();
+  const [sortKey, setSortKey] = useState<AccountBreakdownSortKey>("usage");
+  const [sortDir, setSortDir] = useState<AccountBreakdownSortDir>("desc");
+
+  const sortedRows = useMemo(() => {
+    if (!rows || rows.length === 0) return [];
+    return [...rows].sort((a, b) => {
+      if (sortKey === "group") {
+        const nameDiff = accountGroupSortKey(a).localeCompare(
+          accountGroupSortKey(b),
+          "zh",
+        );
+        if (nameDiff !== 0) {
+          return sortDir === "asc" ? nameDiff : -nameDiff;
+        }
+        // Within the same group cluster, keep higher usage first for scanability.
+        const tokenDiff = b.total_tokens - a.total_tokens;
+        if (tokenDiff !== 0) return tokenDiff;
+        return a.account_id - b.account_id;
+      }
+
+      // usage: total tokens, then requests
+      let diff = a.total_tokens - b.total_tokens;
+      if (diff === 0) diff = a.requests - b.requests;
+      if (diff === 0) return a.account_id - b.account_id;
+      return sortDir === "asc" ? diff : -diff;
+    });
+  }, [rows, sortDir, sortKey]);
 
   if (loading) {
     return (
@@ -696,20 +782,69 @@ function KeyAccountBreakdown({
   const totalTokens = rows.reduce((sum, a) => sum + a.total_tokens, 0);
   const totalBilled = rows.reduce((sum, a) => sum + a.user_billed, 0);
 
+  const toggleSort = (key: AccountBreakdownSortKey) => {
+    if (sortKey === key) {
+      setSortDir((current) => (current === "desc" ? "asc" : "desc"));
+      return;
+    }
+    setSortKey(key);
+    // Usage defaults to high→low; group defaults to A→Z / clustered.
+    setSortDir(key === "usage" ? "desc" : "asc");
+  };
+
+  const sortArrow = (key: AccountBreakdownSortKey): ReactNode => {
+    if (sortKey !== key) return null;
+    return (
+      <span aria-hidden="true" className="tabular-nums">
+        {sortDir === "desc" ? "↓" : "↑"}
+      </span>
+    );
+  };
+
   return (
     <div className="space-y-3 px-3 py-3.5 sm:px-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className="flex size-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
             <Server className="size-3.5" />
           </span>
-          <div>
+          <div className="min-w-0">
             <div className="text-xs font-semibold text-foreground">
               {t("apiKeys.keyAccountsTitle")}
             </div>
             <div className="text-[11px] text-muted-foreground">
               {t("apiKeys.keyAccountsCount", { count: rows.length })}
             </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1">
+            <button
+              type="button"
+              title={t("apiKeys.keyAccountsSortUsageHint")}
+              aria-pressed={sortKey === "usage"}
+              onClick={() => toggleSort("usage")}
+              className={`inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors ${
+                sortKey === "usage"
+                  ? "border-primary/30 bg-primary/10 text-primary"
+                  : "border-border bg-background text-muted-foreground hover:border-primary/25 hover:bg-accent/50 hover:text-foreground"
+              }`}
+            >
+              {t("apiKeys.keyAccountsSortUsage")}
+              {sortArrow("usage")}
+            </button>
+            <button
+              type="button"
+              title={t("apiKeys.keyAccountsSortGroupHint")}
+              aria-pressed={sortKey === "group"}
+              onClick={() => toggleSort("group")}
+              className={`inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors ${
+                sortKey === "group"
+                  ? "border-primary/30 bg-primary/10 text-primary"
+                  : "border-border bg-background text-muted-foreground hover:border-primary/25 hover:bg-accent/50 hover:text-foreground"
+              }`}
+            >
+              {t("apiKeys.keyAccountsSortGroup")}
+              {sortArrow("group")}
+            </button>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -726,7 +861,7 @@ function KeyAccountBreakdown({
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2">
-        {rows.map((a, i) => {
+        {sortedRows.map((a, i) => {
           const share =
             totalRequests > 0 ? Math.min(100, (a.requests / totalRequests) * 100) : 0;
           const color = ACCOUNT_COLORS[i % ACCOUNT_COLORS.length];
@@ -740,8 +875,11 @@ function KeyAccountBreakdown({
                   className="size-2.5 shrink-0 rounded-full ring-2 ring-background"
                   style={{ background: color }}
                 />
-                <div className="min-w-0 truncate text-sm font-medium text-foreground">
-                  {accountPrimaryLabel(a)}
+                <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1">
+                  <span className="min-w-0 truncate text-sm font-medium text-foreground">
+                    {accountPrimaryLabel(a)}
+                  </span>
+                  <AccountGroupChips groups={a.groups} />
                 </div>
                 <span className="shrink-0 tabular-nums text-xs font-semibold text-muted-foreground">
                   {formatPercent(share)}

@@ -82,6 +82,7 @@ import {
   Search,
   Fingerprint,
   FolderOpen,
+  Layers,
   Cloud,
   Lock,
   Unlock,
@@ -761,7 +762,7 @@ export default function Accounts() {
     "all" | "pro" | "prolite" | "plus" | "team" | "k12" | "free"
   >("all");
   const [sortKey, setSortKey] = useState<
-    "requests" | "usage" | "importTime" | "schedulerPriority" | null
+    "requests" | "usage" | "importTime" | "schedulerPriority" | "group" | null
   >(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [addForm, setAddForm] = useState<AddAccountRequest>({
@@ -1821,10 +1822,18 @@ export default function Accounts() {
       } else if (sortKey === "schedulerPriority") {
         diff = getSchedulerPriority(a) - getSchedulerPriority(b);
         if (diff === 0) return a.id - b.id;
+      } else if (sortKey === "group") {
+        const aMeta = getAccountGroupSortMeta(a, allGroups);
+        const bMeta = getAccountGroupSortMeta(b, allGroups);
+        diff = aMeta.order - bMeta.order;
+        if (diff === 0) {
+          diff = aMeta.key.localeCompare(bMeta.key, "zh");
+        }
+        if (diff === 0) return a.id - b.id;
       }
       return sortDir === "asc" ? diff : -diff;
     });
-  }, [filteredAccounts, sortDir, sortKey]);
+  }, [allGroups, filteredAccounts, sortDir, sortKey]);
 
   const totalPages = Math.max(1, Math.ceil(sortedAccounts.length / pageSize));
   const currentPage = Math.min(page, totalPages);
@@ -4044,6 +4053,29 @@ export default function Accounts() {
     setAllGroups(res.groups ?? []);
   };
 
+  /** Inline create from multi-select (batch / quick / account editor). Returns new group id. */
+  const handleCreateGroupInline = async (
+    name: string,
+  ): Promise<number | null> => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      showToast(t("accounts.groupNameRequired"), "error");
+      return null;
+    }
+    try {
+      const res = await api.createAccountGroup({
+        name: trimmed,
+        color: ACCOUNT_GROUP_COLORS[allGroups.length % ACCOUNT_GROUP_COLORS.length],
+      });
+      await reloadGroups();
+      showToast(t("accounts.groupCreated"));
+      return res.id;
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+      return null;
+    }
+  };
+
   const parsedGroupBaseConcurrency = parseIntegerInput(
     groupDraft.baseConcurrencyInput,
   );
@@ -4766,6 +4798,35 @@ export default function Accounts() {
                   variant="outline"
                   size="sm"
                   className="min-w-0"
+                  aria-pressed={sortKey === "group"}
+                  title={t("accounts.groupSortHint")}
+                  onClick={() => {
+                    if (sortKey === "group") {
+                      setSortDir((current) =>
+                        current === "desc" ? "asc" : "desc",
+                      );
+                    } else {
+                      setSortKey("group");
+                      setSortDir("asc");
+                    }
+                    setPage(1);
+                  }}
+                >
+                  <Layers className="size-3.5" />
+                  <span className="truncate">
+                    {t("accounts.groupSort")}
+                  </span>
+                  {sortKey === "group" ? (
+                    <span aria-hidden="true">
+                      {sortDir === "desc" ? "↓" : "↑"}
+                    </span>
+                  ) : null}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="min-w-0"
                   aria-pressed={sortKey === "schedulerPriority"}
                   title={t("accounts.schedulerPrioritySortHint")}
                   onClick={() => {
@@ -5225,8 +5286,26 @@ export default function Accounts() {
                           </TableHead>
                         )}
                         {visibleColumns.groups && (
-                          <TableHead className="text-[13px] font-semibold">
-                            {t("accounts.groupsLabel")}
+                          <TableHead
+                            className="cursor-pointer select-none text-[13px] font-semibold transition-colors hover:text-primary"
+                            onClick={() => {
+                              if (sortKey === "group") {
+                                setSortDir((current) =>
+                                  current === "asc" ? "desc" : "asc",
+                                );
+                              } else {
+                                setSortKey("group");
+                                setSortDir("asc");
+                              }
+                              setPage(1);
+                            }}
+                          >
+                            {t("accounts.groupsLabel")}{" "}
+                            {sortKey === "group"
+                              ? sortDir === "desc"
+                                ? "↓"
+                                : "↑"
+                              : ""}
                           </TableHead>
                         )}
                         {visibleColumns.priority && (
@@ -7753,6 +7832,11 @@ export default function Accounts() {
                             placeholder={t("accounts.groupsPlaceholder")}
                             emptyLabel={t("accounts.groupsNone")}
                             emptyHint={t("accounts.groupsSelectHint")}
+                            onCreateGroup={handleCreateGroupInline}
+                            createLabel={t("accounts.groupCreate")}
+                            createPlaceholder={t("accounts.groupNamePlaceholder")}
+                            creatingLabel={t("accounts.groupCreating")}
+                            createEmptyHint={t("accounts.groupCreateInlineEmptyHint")}
                           />
                         </div>
                       </div>
@@ -7834,6 +7918,18 @@ export default function Accounts() {
                 </div>
                 <div className="mt-1">{t("accounts.groupQuickDesc")}</div>
               </div>
+              <div className="flex items-center justify-end">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  disabled={quickGroupSubmitting}
+                  onClick={() => setShowGroupManager(true)}
+                >
+                  <FolderOpen className="size-3" />
+                  {t("accounts.groupManage")}
+                </Button>
+              </div>
               <AccountGroupMultiSelect
                 groups={allGroups}
                 value={quickGroupIds}
@@ -7846,6 +7942,11 @@ export default function Accounts() {
                 emptyLabel={t("accounts.groupsNone")}
                 emptyHint={t("accounts.groupsSelectHint")}
                 disabled={quickGroupSubmitting}
+                onCreateGroup={handleCreateGroupInline}
+                createLabel={t("accounts.groupCreate")}
+                createPlaceholder={t("accounts.groupNamePlaceholder")}
+                creatingLabel={t("accounts.groupCreating")}
+                createEmptyHint={t("accounts.groupCreateInlineEmptyHint")}
               />
             </div>
           </Modal>
@@ -8211,22 +8312,35 @@ export default function Accounts() {
                       )}
                     </div>
                   </div>
-                  {batchMetaMode === "all" ? (
-                    <label className="flex shrink-0 items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <span>
-                        {t(
-                          batchUpdateGroups
-                            ? "common.enabled"
-                            : "common.disabled",
-                        )}
-                      </span>
-                      <Switch
-                        checked={batchUpdateGroups}
-                        onCheckedChange={setBatchUpdateGroups}
-                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.groupsLabel")}`}
-                      />
-                    </label>
-                  ) : null}
+                  <div className="flex shrink-0 items-center gap-2">
+                    {batchUpdateGroups ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="xs"
+                        onClick={() => setShowGroupManager(true)}
+                      >
+                        <FolderOpen className="size-3" />
+                        {t("accounts.groupManage")}
+                      </Button>
+                    ) : null}
+                    {batchMetaMode === "all" ? (
+                      <label className="flex shrink-0 items-center gap-2 text-xs font-medium text-muted-foreground">
+                        <span>
+                          {t(
+                            batchUpdateGroups
+                              ? "common.enabled"
+                              : "common.disabled",
+                          )}
+                        </span>
+                        <Switch
+                          checked={batchUpdateGroups}
+                          onCheckedChange={setBatchUpdateGroups}
+                          aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.groupsLabel")}`}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="mt-3">
                   <AccountGroupMultiSelect
@@ -8253,6 +8367,13 @@ export default function Accounts() {
                         : "accounts.batchMetaFieldHint",
                     )}
                     disabled={!batchUpdateGroups}
+                    onCreateGroup={
+                      batchUpdateGroups ? handleCreateGroupInline : undefined
+                    }
+                    createLabel={t("accounts.groupCreate")}
+                    createPlaceholder={t("accounts.groupNamePlaceholder")}
+                    creatingLabel={t("accounts.groupCreating")}
+                    createEmptyHint={t("accounts.groupCreateInlineEmptyHint")}
                   />
                 </div>
               </div>
@@ -11201,6 +11322,26 @@ function resolveAccountGroups(
   if (ids.length === 0 || groups.length === 0) return [];
   const byID = new Map(groups.map((group) => [group.id, group]));
   return ids.map((id) => byID.get(id)).filter(Boolean) as AccountGroup[];
+}
+
+/** Sort key for clustering accounts that share the same group membership. */
+function getAccountGroupSortMeta(
+  account: { group_ids?: number[] | null },
+  groups: AccountGroup[],
+): { order: number; key: string } {
+  const resolved = resolveAccountGroups(account.group_ids ?? [], groups);
+  if (resolved.length === 0) {
+    // Ungrouped accounts sort after every named group in ascending order.
+    return { order: Number.MAX_SAFE_INTEGER, key: "" };
+  }
+  const sorted = [...resolved].sort((a, b) => {
+    if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order;
+    return a.name.localeCompare(b.name, "zh");
+  });
+  return {
+    order: sorted[0].sort_order,
+    key: sorted.map((group) => group.name).join("\0"),
+  };
 }
 
 function GroupChipList({
