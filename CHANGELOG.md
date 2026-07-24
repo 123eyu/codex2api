@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.6.3 - 2026-07-25
+
+### Features
+
+- **Account groups become a first-class axis in account management and key usage analysis.** The Accounts page gains a **group clustering sort** — a toggleable asc/desc sort mode (in both the toolbar and the table header) that clusters accounts by their group's configured order, so a mixed pool reads as contiguous group blocks instead of an interleaved list. The group multi-select picker now supports **inline group creation**: typing a name that doesn't exist yet offers a create action right in the dropdown (available from the account editor, quick add, and batch import forms), auto-assigning a palette color — no round-trip to the group manager. The picker's dropdown is also portaled so it renders correctly inside dialogs and sheets instead of being clipped by the container. On the analysis side, the API key Token Usage panel's per-account breakdown rows now carry the account's **group chips** (name + color, batch-fetched server-side to avoid N+1 queries) plus usage/group sort controls, so a key's traffic can be read per group at a glance.
+
 ## v2.6.2 - 2026-07-24
 
 ### Features
