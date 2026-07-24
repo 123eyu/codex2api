@@ -5608,6 +5608,11 @@ func promptFilterConfigFromSettings(settings *database.SystemSettings) (promptfi
 
 func (s *Store) SetPromptFilterConfig(cfg promptfilter.Config) {
 	normalized := promptfilter.NormalizeConfig(cfg)
+	// Persisted custom rules are administrator-controlled input and may come
+	// from an older build that accepted invalid or over-broad regexes. Sanitize
+	// only when publishing a Store snapshot so request-time NormalizeConfig does
+	// not repeatedly compile/audit every rule.
+	normalized.CustomPatterns, _ = promptfilter.SanitizeCustomPatterns(normalized.CustomPatterns)
 	advancedRaw := promptfilter.MarshalAdvancedConfig(normalized.Advanced)
 	if current, ok := s.promptFilterConfig.Load().(promptFilterConfigState); ok {
 		if merged, err := promptfilter.MarshalAdvancedConfigDocument(current.AdvancedRaw, normalized.Advanced); err == nil {
@@ -5622,6 +5627,7 @@ func (s *Store) SetPromptFilterConfig(cfg promptfilter.Config) {
 // The caller must persist successfully before invoking this method.
 func (s *Store) SetPromptFilterConfigWithAdvancedRaw(cfg promptfilter.Config, raw string) error {
 	normalized := promptfilter.NormalizeConfig(cfg)
+	normalized.CustomPatterns, _ = promptfilter.SanitizeCustomPatterns(normalized.CustomPatterns)
 	advancedRaw, err := promptfilter.MarshalAdvancedConfigDocument(raw, normalized.Advanced)
 	if err != nil {
 		return err

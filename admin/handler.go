@@ -7921,6 +7921,19 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "response_cache_config_generation 为只读字段")
 		return
 	}
+	var submittedPromptFilterCustomPatterns []promptfilter.PatternConfig
+	if req.PromptFilterCustomPatterns != nil {
+		patterns, err := promptfilter.ParseCustomPatterns(*req.PromptFilterCustomPatterns)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "Prompt 检查自定义规则 JSON 无效: "+err.Error())
+			return
+		}
+		if err := promptfilter.ValidateCustomPatterns(patterns); err != nil {
+			writeError(c, http.StatusBadRequest, "Prompt 检查自定义规则未通过安全校验: "+err.Error())
+			return
+		}
+		submittedPromptFilterCustomPatterns = patterns
+	}
 	if req.AutoPause5hThreshold != nil {
 		if err := validateAutoPauseThreshold("auto_pause_5h_threshold", *req.AutoPause5hThreshold); err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())
@@ -8730,12 +8743,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		promptFilterChanged = true
 	}
 	if req.PromptFilterCustomPatterns != nil {
-		patterns, err := promptfilter.ParseCustomPatterns(*req.PromptFilterCustomPatterns)
-		if err != nil {
-			writeError(c, http.StatusBadRequest, "Prompt 检查自定义规则 JSON 无效: "+err.Error())
-			return
-		}
-		promptFilterCfg.CustomPatterns = patterns
+		promptFilterCfg.CustomPatterns = submittedPromptFilterCustomPatterns
 		promptFilterChanged = true
 	}
 	if req.PromptFilterDisabledPatterns != nil {
