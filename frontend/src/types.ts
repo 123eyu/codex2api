@@ -263,6 +263,8 @@ export interface AddAccountRequest {
   proxy_url: string
   allow_duplicate?: boolean
   custom_headers?: Record<string, string> | null
+  /** 添加/导入时直接绑定的账号分组；命中已存在账号时不改其分组。 */
+  group_ids?: number[]
 }
 
 export interface AddATAccountRequest {
@@ -271,6 +273,8 @@ export interface AddATAccountRequest {
   proxy_url: string
   allow_duplicate?: boolean
   custom_headers?: Record<string, string> | null
+  /** 添加/导入时直接绑定的账号分组；命中已存在账号时不改其分组。 */
+  group_ids?: number[]
 }
 
 // Codex Agent Identity auth.json 导入（auth_mode=agentIdentity，动态签名，不存 AT/RT）。
@@ -351,6 +355,8 @@ export interface AddGrokAccountRequest {
   models?: string[]
   model_mapping?: string
   proxy_url?: string
+  /** 添加/导入时直接绑定的账号分组；命中已存在账号时不改其分组。 */
+  group_ids?: number[]
 }
 
 export type UpdateGrokAccountRequest = AddGrokAccountRequest
@@ -400,6 +406,8 @@ export interface GrokSSOImportRequest {
   base_url?: string
   models?: string[]
   proxy_url?: string
+  /** 添加/导入时直接绑定的账号分组；命中已存在账号时不改其分组。 */
+  group_ids?: number[]
 }
 
 export interface GrokSSOImportItem {
@@ -423,6 +431,8 @@ export interface GrokBatchImportRequest {
   base_url?: string
   models?: string[]
   proxy_url?: string
+  /** 添加/导入时直接绑定的账号分组；命中已存在账号时不改其分组。 */
+  group_ids?: number[]
 }
 
 // 结果结构与 SSO 导入一致，复用 GrokSSOImportItem。

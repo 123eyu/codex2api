@@ -2126,6 +2126,8 @@ type addAccountReq struct {
 	ProxyURL       string            `json:"proxy_url"`
 	CustomHeaders  map[string]string `json:"custom_headers"`
 	AllowDuplicate bool              `json:"allow_duplicate"`
+	// GroupIDs 让添加时就把新账号绑进指定分组；重复跳过的账号不受影响。
+	GroupIDs json.RawMessage `json:"group_ids"`
 }
 
 func splitAccountCredentialLines(raw string, sanitize bool) []string {
@@ -2270,8 +2272,17 @@ func (h *Handler) AddAccount(c *gin.Context) {
 		return
 	}
 
+	// 分组校验放在插账号之前：分组 ID 打错时不该留下一半已入库的账号。
+	groupCtx, groupCancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	groupIDs, err := h.resolveImportGroupIDsJSON(groupCtx, req.GroupIDs)
+	groupCancel()
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	if strings.EqualFold(c.Query("stream"), "true") {
-		h.streamAddAccounts(c, req, seeds)
+		h.streamAddAccounts(c, req, seeds, groupIDs)
 		return
 	}
 
@@ -2281,6 +2292,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 	successCount := 0
 	failCount := 0
 	duplicateCount := 0
+	createdIDs := &importedAccountIDs{}
 
 	var dedup *accountCredentialDedup
 	if !req.AllowDuplicate {
@@ -2309,6 +2321,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 		}
 
 		successCount++
+		createdIDs.add(id)
 		h.db.InsertAccountEventAsync(id, "added", "manual")
 
 		// 热加载：直接加入内存池
@@ -2335,16 +2348,24 @@ func (h *Handler) AddAccount(c *gin.Context) {
 	if failCount > 0 {
 		msg += fmt.Sprintf("，%d 个失败", failCount)
 	}
+	boundGroups := len(groupIDs) > 0
+	if err := h.bindImportedAccountGroups(ctx, createdIDs.snapshot(), groupIDs); err != nil {
+		// 账号已入库，只是分组没绑上——必须说出来，否则用户以为绑好了。
+		boundGroups = false
+		msg += "，但分组绑定失败: " + err.Error()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":   msg,
-		"success":   successCount,
-		"duplicate": duplicateCount,
-		"failed":    failCount,
+		"message":      msg,
+		"success":      successCount,
+		"duplicate":    duplicateCount,
+		"failed":       failCount,
+		"bound_groups": boundGroups,
+		"group_ids":    groupIDs,
 	})
 }
 
-func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []tokenCredentialSeed) {
+func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []tokenCredentialSeed, groupIDs []int64) {
 	setupSSE(c)
 
 	total := len(seeds)
@@ -2363,6 +2384,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 	if !req.AllowDuplicate {
 		dedup = h.newAccountCredentialDedup(ctx)
 	}
+	createdIDs := &importedAccountIDs{}
 
 	for i, seed := range seeds {
 		name := req.Name
@@ -2393,6 +2415,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 		}
 
 		successCount++
+		createdIDs.add(id)
 		h.db.InsertAccountEventAsync(id, "added", "manual")
 
 		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
@@ -2413,6 +2436,14 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 	}
 
 	security.SecurityAuditLog("ACCOUNTS_ADDED", fmt.Sprintf("success=%d duplicate=%d failed=%d ip=%s", successCount, duplicateCount, failCount, c.ClientIP()))
+	// 绑定必须在 complete 事件之前完成：前端收到 complete 就会刷新列表。
+	if err := h.bindImportedAccountGroups(ctx, createdIDs.snapshot(), groupIDs); err != nil {
+		sendImportEvent(c, importEvent{
+			Type: "progress", Current: total, Total: total,
+			Success: successCount, Duplicate: duplicateCount, Failed: failCount,
+			Warning: "账号已添加，但分组绑定失败: " + err.Error(),
+		})
+	}
 	sendImportEvent(c, importEvent{
 		Type: "complete", Current: total, Total: total,
 		Success: successCount, Duplicate: duplicateCount, Failed: failCount,
@@ -2426,6 +2457,8 @@ type addATAccountReq struct {
 	ProxyURL       string            `json:"proxy_url"`
 	CustomHeaders  map[string]string `json:"custom_headers"`
 	AllowDuplicate bool              `json:"allow_duplicate"`
+	// GroupIDs 让添加时就把新账号绑进指定分组；重复跳过与命中已有身份被更新的账号不受影响。
+	GroupIDs json.RawMessage `json:"group_ids"`
 }
 
 // AddATAccount 添加 AT-only 账号（支持批量：access_token 按行分割）
@@ -2485,8 +2518,16 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		return
 	}
 
+	groupCtx, groupCancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	groupIDs, err := h.resolveImportGroupIDsJSON(groupCtx, req.GroupIDs)
+	groupCancel()
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	if strings.EqualFold(c.Query("stream"), "true") {
-		h.streamAddATAccounts(c, req, tokens)
+		h.streamAddATAccounts(c, req, tokens, groupIDs)
 		return
 	}
 
@@ -2497,6 +2538,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 	failCount := 0
 	updatedCount := 0
 	duplicateCount := 0
+	createdIDs := &importedAccountIDs{}
 
 	// AT 去重：非身份型 AT-only（无法从 JWT 解出 email + workspace_id，如 codex_at）
 	// 按 access_token 原文去重；身份型 AT 由 upsertOAuthIdentityAccount 按 OAuth 身份
@@ -2537,6 +2579,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 				log.Printf("AT 账号 %d 命中已有身份并更新凭证 (id=%d)", i+1, id)
 			} else {
 				successCount++
+				createdIDs.add(id)
 				log.Printf("AT 账号 %d 已加入号池 (id=%d)", i+1, id)
 			}
 			continue
@@ -2559,6 +2602,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		}
 
 		successCount++
+		createdIDs.add(id)
 		h.db.InsertAccountEventAsync(id, "added", "manual_at")
 
 		// 热加载到内存池（AT-only，无 RT）。codex_at 不走 JWT 解码，
@@ -2590,18 +2634,25 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 	if failCount > 0 {
 		msg += fmt.Sprintf("，%d 个失败", failCount)
 	}
+	boundGroups := len(groupIDs) > 0
+	if err := h.bindImportedAccountGroups(ctx, createdIDs.snapshot(), groupIDs); err != nil {
+		boundGroups = false
+		msg += "，但分组绑定失败: " + err.Error()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":   msg,
-		"success":   successCount,
-		"updated":   updatedCount,
-		"duplicate": duplicateCount,
-		"failed":    failCount,
+		"message":      msg,
+		"success":      successCount,
+		"updated":      updatedCount,
+		"duplicate":    duplicateCount,
+		"failed":       failCount,
+		"bound_groups": boundGroups,
+		"group_ids":    groupIDs,
 	})
 }
 
 // streamAddATAccounts 以 SSE 流式推送 AT 批量添加进度（与 streamAddAccounts 对齐）。
-func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, tokens []string) {
+func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, tokens []string, groupIDs []int64) {
 	setupSSE(c)
 
 	total := len(tokens)
@@ -2633,6 +2684,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 			Success: successCount, Updated: updatedCount, Duplicate: duplicateCount, Failed: failCount,
 		})
 	}
+	createdIDs := &importedAccountIDs{}
 
 	for i, at := range tokens {
 		name := req.Name
@@ -2654,6 +2706,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 				log.Printf("AT 账号 %d 命中已有身份并更新凭证 (id=%d)", i+1, id)
 			} else {
 				successCount++
+				createdIDs.add(id)
 				log.Printf("AT 账号 %d 已加入号池 (id=%d)", i+1, id)
 			}
 			progress(i + 1)
@@ -2678,6 +2731,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 		}
 
 		successCount++
+		createdIDs.add(id)
 		h.db.InsertAccountEventAsync(id, "added", "manual_at")
 		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
 		h.store.AddAccount(newAcc)
@@ -2692,6 +2746,14 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 	}
 
 	security.SecurityAuditLog("AT_ACCOUNTS_ADDED", fmt.Sprintf("success=%d updated=%d duplicate=%d failed=%d ip=%s", successCount, updatedCount, duplicateCount, failCount, c.ClientIP()))
+	// 绑定必须在 complete 事件之前完成：前端收到 complete 就会刷新列表。
+	if err := h.bindImportedAccountGroups(ctx, createdIDs.snapshot(), groupIDs); err != nil {
+		sendImportEvent(c, importEvent{
+			Type: "progress", Current: total, Total: total,
+			Success: successCount, Updated: updatedCount, Duplicate: duplicateCount, Failed: failCount,
+			Warning: "账号已添加，但分组绑定失败: " + err.Error(),
+		})
+	}
 	sendImportEvent(c, importEvent{
 		Type: "complete", Current: total, Total: total,
 		Success: successCount, Updated: updatedCount, Duplicate: duplicateCount, Failed: failCount,
@@ -3638,6 +3700,15 @@ func (h *Handler) ImportAccounts(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	// 分组校验放在解析文件之前：分组 ID 打错时一个账号都不该被导入。
+	groupCtx, groupCancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	groupIDs, err := h.resolveImportGroupIDsForm(groupCtx, c.PostForm(importGroupIDsField))
+	groupCancel()
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	c.Set(importGroupIDsContextKey, groupIDs)
 
 	switch format {
 	case "json":
@@ -3871,6 +3942,9 @@ type importEvent struct {
 	Updated   int    `json:"updated"`
 	Duplicate int    `json:"duplicate"`
 	Failed    int    `json:"failed"`
+	// Warning 用于「账号已入库、但收尾动作出了问题」这类必须告知却不该当成失败的情况，
+	// 例如导入成功但分组绑定失败。空值时序列化省略，老前端不受影响。
+	Warning string `json:"warning,omitempty"`
 }
 
 func sendImportEvent(c *gin.Context, e importEvent) {
@@ -3913,9 +3987,10 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 		}
 	}
 	agentSuccess, agentDuplicate, agentFailed := 0, 0, 0
+	var agentCreatedIDs []int64
 	if len(agentTokens) > 0 {
 		agentCtx, agentCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		agentSuccess, agentDuplicate, agentFailed = h.importAgentIdentityTokens(agentCtx, agentTokens, proxyURL, allowDuplicate)
+		agentSuccess, agentDuplicate, agentFailed, agentCreatedIDs = h.importAgentIdentityTokens(agentCtx, agentTokens, proxyURL, allowDuplicate)
 		agentCancel()
 		log.Printf("导入: Agent Identity 条目 %d 个（新增 %d，跳过 %d，失败 %d）", len(agentTokens), agentSuccess, agentDuplicate, agentFailed)
 	}
@@ -4132,6 +4207,9 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 
 	if len(newTokens) == 0 {
 		// 无常规 token 待导入（可能是纯 Agent Identity 文件）；反映 agent 计数。
+		if err := h.bindImportedAccountGroups(c.Request.Context(), agentCreatedIDs, importGroupIDsFromContext(c)); err != nil {
+			log.Printf("导入: Agent Identity 账号分组绑定失败: %v", err)
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"message":   fmt.Sprintf("导入完成：新增 %d 个，跳过 %d 个，失败 %d 个", agentSuccess, duplicateCount, agentFailed),
 			"success":   agentSuccess,
@@ -4149,6 +4227,8 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 	var updatedCount int64
 	var failCount int64
 	var current int64
+	// 本次真正新建的账号，收尾时统一绑分组（命中已有账号的分组不动）。
+	createdIDs := &importedAccountIDs{}
 	sem := make(chan struct{}, 20) // 并发插入上限
 	var wg sync.WaitGroup
 
@@ -4210,10 +4290,11 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				if updated {
-					// 已有账号只更新凭证，不计入"新增"。
+					// 已有账号只更新凭证，不计入"新增"，分组也保持原样。
 					atomic.AddInt64(&updatedCount, 1)
 				} else {
 					atomic.AddInt64(&successCount, 1)
+					createdIDs.add(id)
 				}
 				atomic.AddInt64(&current, 1)
 				if h.store != nil {
@@ -4247,6 +4328,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				atomic.AddInt64(&successCount, 1)
+				createdIDs.add(id)
 				atomic.AddInt64(&current, 1)
 				h.db.InsertAccountEventAsync(id, "added", "import_at")
 
@@ -4285,6 +4367,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				atomic.AddInt64(&successCount, 1)
+				createdIDs.add(id)
 				atomic.AddInt64(&current, 1)
 				h.db.InsertAccountEventAsync(id, "added", "import")
 
@@ -4318,6 +4401,17 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 	suc := int(atomic.LoadInt64(&successCount)) + agentSuccess
 	upd := int(atomic.LoadInt64(&updatedCount))
 	fai := int(atomic.LoadInt64(&failCount)) + agentFailed
+	// 分组绑定要在 complete 之前完成：前端收到 complete 就会刷新列表，
+	// 晚一步绑定会让人以为没生效。Agent Identity 条目一起绑，避免同一次导入
+	// 只有一半账号进了分组。
+	newAccountIDs := append(createdIDs.snapshot(), agentCreatedIDs...)
+	if err := h.bindImportedAccountGroups(c.Request.Context(), newAccountIDs, importGroupIDsFromContext(c)); err != nil {
+		sendImportEvent(c, importEvent{
+			Type: "progress", Current: total, Total: total,
+			Success: suc, Updated: upd, Duplicate: duplicateCount, Failed: fai,
+			Warning: "账号已导入，但分组绑定失败: " + err.Error(),
+		})
+	}
 	sendImportEvent(c, importEvent{
 		Type: "complete", Current: total, Total: total,
 		Success: suc, Updated: upd, Duplicate: duplicateCount, Failed: fai,

@@ -354,6 +354,27 @@ func (db *DB) SetAccountGroups(ctx context.Context, accountID int64, groupIDs []
 	return tx.Commit()
 }
 
+// BatchSetAccountGroups 在单个事务里把一批账号的分组归属整体替换成 groupIDs。
+// 导入时给「本次新建的账号」统一绑定分组用它，比逐个 SetAccountGroups 少 N 次事务。
+// accountIDs 或 groupIDs 为空时直接返回（空分组表示"不绑"，不是"清空"，
+// 因为导入路径不该顺手抹掉别处刚设好的归属）。
+func (db *DB) BatchSetAccountGroups(ctx context.Context, accountIDs []int64, groupIDs []int64) error {
+	accountIDs = normalizeIDSlice(accountIDs)
+	groupIDs = normalizeIDSlice(groupIDs)
+	if len(accountIDs) == 0 || len(groupIDs) == 0 {
+		return nil
+	}
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := db.batchReplaceAccountGroups(ctx, tx, accountIDs, groupIDs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (db *DB) GetAccountGroupIDs(ctx context.Context, accountID int64) ([]int64, error) {
 	query := "SELECT group_id FROM account_group_members WHERE account_id = $1 ORDER BY group_id"
 	if db.isSQLite() {

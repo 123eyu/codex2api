@@ -1225,7 +1225,10 @@
     "creditEnabledHint": "标记该账号拥有额外信用",
     "creditSkipWindow": "跳过用量窗口惩罚",
     "creditSkipWindowHint": "调度时不使用 7d/5h 用量窗口降权",
-    "billed": "成本"
+    "billed": "成本",
+    "importGroupsLabel": "绑定账号分组",
+    "importGroupsPlaceholder": "选择要绑定的分组（可不选）",
+    "importGroupsHint": "本次新增的账号会直接进入所选分组；命中重复的已有账号分组保持不变。不选则不绑定。"
   },
   "invite": {
     "entry": "Codex 邀请",
