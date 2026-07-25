@@ -539,6 +539,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/keys", h.ListAPIKeys)
 	api.POST("/keys", h.CreateAPIKey)
 	api.PATCH("/keys/:id", h.UpdateAPIKey)
+	api.GET("/keys/:id/scope-usage", h.GetAPIKeyScopeUsage)
+	api.GET("/keys-scope-summary", h.GetAPIKeysScopeSummary)
+	api.POST("/keys/:id/scope-quota/reset", h.ResetAPIKeyScopeQuota)
 	api.DELETE("/keys/:id", h.DeleteAPIKey)
 	api.GET("/account-groups", h.ListAccountGroups)
 	api.POST("/account-groups", h.CreateAccountGroup)
@@ -6162,6 +6165,10 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 	var limits database.APIKeyLimits
 	if req.Limits != nil {
 		limits = sanitizeAPIKeyLimits(*req.Limits)
+		if err := h.validateAPIKeyScopeLimits(ctx, limits.ScopeLimits); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	id, err := h.db.InsertAPIKeyWithOptions(ctx, database.APIKeyInput{
@@ -6185,6 +6192,8 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 	if h.store != nil {
 		h.store.SetAPIKeyAllowedPlans(id, limits.PlanAllow)
 	}
+	// 新配的累计额度要立刻开始记账，不等落库侧的 60s 缓存过期。
+	h.db.InvalidateScopeQuotaKeyCache()
 	h.invalidateAPIKeyRuntimeCaches(ctx, key)
 
 	// 记录安全审计日志
@@ -6310,6 +6319,10 @@ func (h *Handler) UpdateAPIKey(c *gin.Context) {
 	}
 	if req.Limits != nil {
 		update.Limits = sanitizeAPIKeyLimits(*req.Limits)
+		if err := h.validateAPIKeyScopeLimits(ctx, update.Limits.ScopeLimits); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		update.LimitsSet = true
 	}
 	if err := h.db.UpdateAPIKey(ctx, id, update); err != nil {
@@ -6321,6 +6334,9 @@ func (h *Handler) UpdateAPIKey(c *gin.Context) {
 	}
 	if update.LimitsSet && h.store != nil {
 		h.store.SetAPIKeyAllowedPlans(id, update.Limits.PlanAllow)
+	}
+	if update.LimitsSet {
+		h.db.InvalidateScopeQuotaKeyCache()
 	}
 	h.invalidateAPIKeyRuntimeCaches(ctx, row.Key)
 	writeMessage(c, http.StatusOK, "API Key 已更新")
@@ -6366,6 +6382,7 @@ func sanitizeAPIKeyLimits(in database.APIKeyLimits) database.APIKeyLimits {
 		ImageGenerationPolicy:  sanitizeImageGenerationPolicy(in),
 		AutoCompactOnOverflow:  in.AutoCompactOnOverflow,
 		UpstreamChannel:        in.ResolveUpstreamChannel(),
+		ScopeLimits:            database.NormalizeAPIKeyScopeLimits(in.ScopeLimits),
 	}
 	// 归一后旧 bool 与新 policy 保持一致，避免两处配置漂移。
 	out.DisableImageGeneration = out.ImageGenerationPolicy == database.ImageGenerationPolicyBlock
@@ -6373,6 +6390,53 @@ func sanitizeAPIKeyLimits(in database.APIKeyLimits) database.APIKeyLimits {
 		out.ImageGenerationPolicy = ""
 	}
 	return out
+}
+
+// validateAPIKeyScopeLimits 校验分组 / 账号维度限额指向的 scope 真实存在（issue #439）。
+// 分组查 DB;账号查运行时账号池（回收站里的账号视为不存在）。指向错误的 ID 会让限额
+// 永远不触发，所以这里直接 400 而不是静默丢弃。
+func (h *Handler) validateAPIKeyScopeLimits(ctx context.Context, scopes []database.APIKeyScopeLimit) error {
+	if len(scopes) == 0 {
+		return nil
+	}
+	groupIDs := make([]int64, 0, len(scopes))
+	accountIDs := make([]int64, 0, len(scopes))
+	for _, scope := range scopes {
+		if scope.ResolveScopeType() == database.APIKeyScopeTypeAccount {
+			accountIDs = append(accountIDs, scope.ScopeID)
+			continue
+		}
+		groupIDs = append(groupIDs, scope.ScopeID)
+	}
+	if len(groupIDs) > 0 {
+		missing, err := h.db.VerifyAccountGroupIDs(ctx, groupIDs)
+		if err != nil {
+			return err
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("limits.scope_limits 包含不存在的分组 ID: %s", joinInt64s(missing))
+		}
+	}
+	if len(accountIDs) > 0 && h.store != nil {
+		missing := make([]int64, 0)
+		for _, id := range accountIDs {
+			if h.store.FindByID(id) == nil {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("limits.scope_limits 包含不存在的账号 ID: %s", joinInt64s(missing))
+		}
+	}
+	return nil
+}
+
+func joinInt64s(values []int64) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.FormatInt(value, 10))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // sanitizeImageGenerationPolicy 归一图片工具策略取值（allow/strip/block），并兼容旧的

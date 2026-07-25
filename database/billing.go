@@ -196,6 +196,36 @@ func CalculateCost(inputTokens, outputTokens, cachedTokens int, model string, se
 	return CalculateCostBreakdown(inputTokens, outputTokens, cachedTokens, model, serviceTier).TotalCost
 }
 
+// usageLogBillingServiceTier 解析一条待写入用量事件的计费 service tier:
+// 显式 BillingServiceTier 优先,其次上游实际 tier,最后请求 tier。
+func usageLogBillingServiceTier(log *UsageLogInput) string {
+	if log == nil {
+		return ""
+	}
+	if tier := log.BillingServiceTier; tier != "" {
+		return tier
+	}
+	if tier := log.ActualServiceTier; tier != "" {
+		return tier
+	}
+	return log.ServiceTier
+}
+
+// UsageLogBilledCost 返回一条待写入用量事件的计费金额(美元),与 InsertUsageLog 落库时
+// 写进 account_billed / user_billed 的口径完全一致。热路径上需要在日志落库前就拿到
+// 这笔消耗时(如 scope 维度限额的本地增量修正)调用它,避免两处计费逻辑漂移。
+func UsageLogBilledCost(log *UsageLogInput) float64 {
+	if log == nil {
+		return 0
+	}
+	// 使用 EffectiveModel 作为计费模型（如果有映射则使用映射后的模型）
+	billingModel := log.EffectiveModel
+	if billingModel == "" {
+		billingModel = log.Model
+	}
+	return calculateCost(log.InputTokens, log.OutputTokens, log.CachedTokens, billingModel, usageLogBillingServiceTier(log))
+}
+
 func CalculateCostBreakdown(inputTokens, outputTokens, cachedTokens int, model string, serviceTier string) CostBreakdown {
 	pricing := GetModelPricing(model)
 	isLong := inputTokens > longContextThreshold
