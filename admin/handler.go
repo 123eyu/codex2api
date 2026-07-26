@@ -633,9 +633,6 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/prompt-filter/test", h.TestPromptFilter)
 	api.POST("/prompt-filter/rules/test", h.TestPromptFilterRulePattern)
 	api.GET("/prompt-filter/rules", h.GetPromptFilterRules)
-	api.GET("/prompt-filter/newapi-secret", h.GetPromptFilterNewAPISecretStatus)
-	api.POST("/prompt-filter/newapi-secret/generate", h.GeneratePromptFilterNewAPISecret)
-	api.PUT("/prompt-filter/newapi-secret", h.ReplacePromptFilterNewAPISecret)
 	api.GET("/prompt-filter/newapi-bindings", h.ListPromptFilterNewAPIBindings)
 	api.POST("/prompt-filter/newapi-bindings", h.CreatePromptFilterNewAPIBinding)
 	api.GET("/prompt-filter/newapi-bindings/:api_key_id", h.GetPromptFilterNewAPIBinding)
@@ -8696,7 +8693,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 	promptFilterCfg := h.store.GetPromptFilterConfig()
 	promptFilterAdvancedRaw := h.store.GetPromptFilterAdvancedConfig()
-	promptFilterNewAPISecret := promptFilterCfg.Advanced.NewAPI.Secret
 	// The database is authoritative for the persisted JSON in multi-instance
 	// deployments. Invalid persisted JSON must not replace the Store's last
 	// valid raw/effective pair.
@@ -8704,7 +8700,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		if document, err := promptfilter.ParseAdvancedConfigDocument(existingSettings.PromptFilterAdvancedConfig); err == nil {
 			promptFilterAdvancedRaw = document.Raw
 			promptFilterCfg.Advanced = document.Effective
-			promptFilterCfg.Advanced.NewAPI.Secret = promptFilterNewAPISecret
 		}
 	}
 	promptFilterChanged := false
@@ -8736,7 +8731,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 		promptFilterAdvancedRaw = document.Raw
 		promptFilterCfg.Advanced = document.Effective
-		promptFilterCfg.Advanced.NewAPI.Secret = promptFilterNewAPISecret
 		promptFilterChanged = true
 	}
 	if req.PromptFilterLogMatches != nil {
