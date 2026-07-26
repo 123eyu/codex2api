@@ -2694,7 +2694,7 @@
     "usageLogErrors": "仅错误",
     "usageLogOff": "关闭写入",
     "usageLogBatchSize": "日志批量大小",
-    "usageLogBatchSizeDesc": "缓冲达到该条数后批量写入数据库（1~10000）。",
+    "usageLogBatchSizeDesc": "缓冲达到该条数后批量写入数据库（1~1000，5kRPM 建议 200~500）。",
     "usageLogFlushInterval": "日志刷新间隔",
     "usageLogFlushIntervalDesc": "未达到批量大小时，最多等待多少秒写入一次（1~300）。",
     "billingTierPolicy": "Tier 计费策略",
