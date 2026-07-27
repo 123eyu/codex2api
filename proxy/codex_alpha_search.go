@@ -156,7 +156,8 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 	}
 
 	// 复用网关同款 transport（支持 uTLS Chrome 指纹），与 /responses、清单透传一致。
-	client := &http.Client{Transport: newCodexTransport(proxyURL)}
+	// 池化而非每次新建，避免一次性 uTLS transport 泄漏连接（issue #446）。
+	client := getCodexMaintenanceClient(account, proxyURL)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("codex search request: %w", err)

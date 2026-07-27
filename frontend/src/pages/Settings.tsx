@@ -1160,6 +1160,7 @@ export default function Settings() {
     overflow_auto_compact_enabled: false,
     codex_preflight_sse_passthrough_enabled: false,
     codex_continue_max_rounds: 8,
+    utls_shutdown_timeout_minutes: 30,
     scheduler_mode: 'round_robin',
     affinity_mode: 'bounded',
     grok_affinity_mode: 'strict',
@@ -2594,6 +2595,25 @@ export default function Settings() {
                     </div>
                   </div>
                 </div>
+                <SettingField label={t('settings.utlsShutdownTimeout')} description={t('settings.utlsShutdownTimeoutDesc')}>
+                  <div className="relative">
+                    <DraftNumberInput
+                      min={1}
+                      max={240}
+                      className="pr-12 tabular-nums"
+                      value={settingsForm.utls_shutdown_timeout_minutes}
+                      onValueChange={(value) => setSettingsForm(f => ({ ...f, utls_shutdown_timeout_minutes: value }))}
+                      onValueCommit={(value) => {
+                        void autoSaveSettingsPatch({
+                          utls_shutdown_timeout_minutes: value,
+                        })
+                      }}
+                    />
+                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium text-muted-foreground">
+                      {t('settings.unit.min')}
+                    </span>
+                  </div>
+                </SettingField>
                 <SettingField className="sm:col-span-2 xl:col-span-3" label={t('settings.codexUserAgentRaw')} description={t('settings.codexUserAgentRawDesc')}>
                   <Input
                     className="font-mono text-xs"

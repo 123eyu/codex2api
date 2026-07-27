@@ -6758,6 +6758,7 @@ type settingsResponse struct {
 	FirstTokenExcludesWsAcquire         bool    `json:"first_token_excludes_ws_acquire"`
 	CodexContinueThinkingEnabled        bool    `json:"codex_continue_thinking_enabled"`
 	CodexContinueMaxRounds              int     `json:"codex_continue_max_rounds"`
+	UTLSShutdownTimeoutMinutes          int     `json:"utls_shutdown_timeout_minutes"`
 	CodexCLIVersionSyncEnabled          bool    `json:"codex_cli_version_sync_enabled"`
 	CodexCLIVersionSyncIntervalHours    int     `json:"codex_cli_version_sync_interval_hours"`
 	CodexSyncedCLIVersion               string  `json:"codex_synced_cli_version"`
@@ -6881,6 +6882,7 @@ type updateSettingsReq struct {
 	FirstTokenExcludesWsAcquire         *bool    `json:"first_token_excludes_ws_acquire"`
 	CodexContinueThinkingEnabled        *bool    `json:"codex_continue_thinking_enabled"`
 	CodexContinueMaxRounds              *int     `json:"codex_continue_max_rounds"`
+	UTLSShutdownTimeoutMinutes          *int     `json:"utls_shutdown_timeout_minutes"`
 	CodexCLIVersionSyncEnabled          *bool    `json:"codex_cli_version_sync_enabled"`
 	CodexCLIVersionSyncIntervalHours    *int     `json:"codex_cli_version_sync_interval_hours"`
 	SchedulerMode                       *string  `json:"scheduler_mode"`
@@ -7489,9 +7491,12 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	runtimeCfg := proxy.CurrentRuntimeSettings()
 	autoResetCreditsEnabled := runtimeCfg.AutoResetCreditsEnabled
 	autoResetCreditsBeforeExpiryMin := runtimeCfg.AutoResetCreditsBeforeExpiryMin
+	// uTLS 优雅关闭等待上限（issue #446）：与自动消费同款，数据库是多实例下的权威来源。
+	utlsShutdownTimeoutMinutes := runtimeCfg.UTLSShutdownTimeoutMin
 	if dbSettings != nil {
 		autoResetCreditsEnabled = dbSettings.AutoResetCreditsEnabled
 		autoResetCreditsBeforeExpiryMin = dbSettings.AutoResetCreditsBeforeExpiryMin
+		utlsShutdownTimeoutMinutes = database.NormalizeUTLSShutdownTimeoutMinutes(dbSettings.UTLSShutdownTimeoutMinutes)
 	}
 	imgCfg := imagestore.CurrentConfig()
 	imgPrefix := strings.TrimSuffix(imgCfg.Prefix, "/")
@@ -7547,6 +7552,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		FirstTokenExcludesWsAcquire:         h.store.FirstTokenExcludesWsAcquire(),
 		CodexContinueThinkingEnabled:        h.store.CodexContinueThinkingEnabled(),
 		CodexContinueMaxRounds:              h.store.CodexContinueMaxRounds(),
+		UTLSShutdownTimeoutMinutes:          utlsShutdownTimeoutMinutes,
 		CodexCLIVersionSyncEnabled:          h.store.CodexCLIVersionSyncEnabled(),
 		CodexCLIVersionSyncIntervalHours:    h.store.CodexCLIVersionSyncIntervalHours(),
 		CodexSyncedCLIVersion:               proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
@@ -7690,6 +7696,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	modelPricingSyncURL := ""
 	persistedAutoResetCreditsEnabled := false
 	persistedAutoResetCreditsBeforeExpiryMin := 60
+	persistedUTLSShutdownTimeoutMinutes := database.NormalizeUTLSShutdownTimeoutMinutes(0)
 	existingSettings, settingsErr := h.db.GetSystemSettings(c.Request.Context())
 	if settingsErr != nil {
 		writeError(c, http.StatusInternalServerError, "读取现有设置失败："+settingsErr.Error())
@@ -7708,6 +7715,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		modelPricingSyncURL = existingSettings.ModelPricingSyncURL
 		persistedAutoResetCreditsEnabled = existingSettings.AutoResetCreditsEnabled
 		persistedAutoResetCreditsBeforeExpiryMin = existingSettings.AutoResetCreditsBeforeExpiryMin
+		persistedUTLSShutdownTimeoutMinutes = database.NormalizeUTLSShutdownTimeoutMinutes(existingSettings.UTLSShutdownTimeoutMinutes)
 	}
 	if req.AdminSecret != nil {
 		if h.adminSecretEnv == "" {
@@ -7763,6 +7771,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	// 避免旧实例保存无关字段时把自动消费配置回滚成自己的陈旧快照。
 	runtimeCfg.AutoResetCreditsEnabled = persistedAutoResetCreditsEnabled
 	runtimeCfg.AutoResetCreditsBeforeExpiryMin = persistedAutoResetCreditsBeforeExpiryMin
+	runtimeCfg.UTLSShutdownTimeoutMin = persistedUTLSShutdownTimeoutMinutes
+	utlsShutdownTimeoutMinutes := persistedUTLSShutdownTimeoutMinutes
 	autoResetCreditsChanged := (req.AutoResetCreditsEnabled != nil && *req.AutoResetCreditsEnabled != persistedAutoResetCreditsEnabled) ||
 		(req.AutoResetCreditsBeforeExpiryMin != nil && *req.AutoResetCreditsBeforeExpiryMin != persistedAutoResetCreditsBeforeExpiryMin)
 	usageLogMode := h.db.GetUsageLogMode()
@@ -8048,6 +8058,13 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetCodexContinueMaxRounds(v)
 		runtimeCfg.CodexContinueMaxRounds = v
 		log.Printf("设置已更新: codex_continue_max_rounds = %d", v)
+	}
+
+	if req.UTLSShutdownTimeoutMinutes != nil {
+		v := database.NormalizeUTLSShutdownTimeoutMinutes(*req.UTLSShutdownTimeoutMinutes)
+		runtimeCfg.UTLSShutdownTimeoutMin = v
+		utlsShutdownTimeoutMinutes = v
+		log.Printf("设置已更新: utls_shutdown_timeout_minutes = %d", v)
 	}
 
 	if req.CodexCLIVersionSyncEnabled != nil {
@@ -8556,6 +8573,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		FirstTokenExcludesWsAcquire:         h.store.FirstTokenExcludesWsAcquire(),
 		CodexContinueThinkingEnabled:        h.store.CodexContinueThinkingEnabled(),
 		CodexContinueMaxRounds:              h.store.CodexContinueMaxRounds(),
+		UTLSShutdownTimeoutMinutes:          utlsShutdownTimeoutMinutes,
 		CodexCLIVersionSyncEnabled:          h.store.CodexCLIVersionSyncEnabled(),
 		CodexCLIVersionSyncIntervalHours:    h.store.CodexCLIVersionSyncIntervalHours(),
 		CodexSyncedCLIVersion:               proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
@@ -8711,6 +8729,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		FirstTokenExcludesWsAcquire:         h.store.FirstTokenExcludesWsAcquire(),
 		CodexContinueThinkingEnabled:        h.store.CodexContinueThinkingEnabled(),
 		CodexContinueMaxRounds:              h.store.CodexContinueMaxRounds(),
+		UTLSShutdownTimeoutMinutes:          utlsShutdownTimeoutMinutes,
 		CodexCLIVersionSyncEnabled:          h.store.CodexCLIVersionSyncEnabled(),
 		CodexCLIVersionSyncIntervalHours:    h.store.CodexCLIVersionSyncIntervalHours(),
 		CodexSyncedCLIVersion:               proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,

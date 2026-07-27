@@ -396,5 +396,6 @@ func defaultBootstrapSettings() *database.SystemSettings {
 		SmartPacingMinConcurrency:         1,
 		SmartPacingWindows:                "5h,7d",
 		AutoResetCreditsBeforeExpiryMin:   60,
+		UTLSShutdownTimeoutMinutes:        30,
 	}
 }

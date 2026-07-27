@@ -1010,6 +1010,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS ignore_usage_limit_status BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_before_expiry_min INT DEFAULT 60;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS utls_shutdown_timeout_minutes INT DEFAULT 30;
 
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_5h_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_7d_threshold DOUBLE PRECISION DEFAULT 0;
@@ -1728,6 +1729,7 @@ type SystemSettings struct {
 	FirstTokenExcludesWsAcquire         bool // 落库 first_token_ms 扣除 WS 取连耗时，默认 false（原始值 = first_token_ms + ws_acquire_ms）
 	CodexContinueThinkingEnabled        bool // 检测到上游截断思考时自动续想并折叠成单响应，默认 false
 	CodexContinueMaxRounds              int  // 单次请求最大续想轮数（含首轮），默认 8
+	UTLSShutdownTimeoutMinutes          int  // uTLS 连接被摘出池后等待在途 stream 收尾的上限（分钟，默认 30，范围 1-240，issue #446）
 	AutoPause5hThreshold                float64
 	AutoPause7dThreshold                float64
 	AutoPause5hGuardBandPercent         float64
@@ -1917,7 +1919,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			       COALESCE(codex_ws_busy_patience_sec, 2),
 			       COALESCE(overflow_auto_compact_enabled, false),
 			       COALESCE(first_token_excludes_ws_acquire, false),
-			       COALESCE(codex_preflight_sse_passthrough_enabled, false)
+			       COALESCE(codex_preflight_sse_passthrough_enabled, false),
+			       COALESCE(utls_shutdown_timeout_minutes, 30)
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1980,6 +1983,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.OverflowAutoCompactEnabled,
 		&s.FirstTokenExcludesWsAcquire,
 		&s.CodexPreflightSSEPassthroughEnabled,
+		&s.UTLSShutdownTimeoutMinutes,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -2091,9 +2095,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_ws_busy_patience_sec,
 					overflow_auto_compact_enabled,
 					first_token_excludes_ws_acquire,
-					codex_preflight_sse_passthrough_enabled
+					codex_preflight_sse_passthrough_enabled,
+					utls_shutdown_timeout_minutes
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -2193,7 +2198,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_ws_busy_patience_sec = EXCLUDED.codex_ws_busy_patience_sec,
 					overflow_auto_compact_enabled = EXCLUDED.overflow_auto_compact_enabled,
 					first_token_excludes_ws_acquire = EXCLUDED.first_token_excludes_ws_acquire,
-					codex_preflight_sse_passthrough_enabled = EXCLUDED.codex_preflight_sse_passthrough_enabled
+					codex_preflight_sse_passthrough_enabled = EXCLUDED.codex_preflight_sse_passthrough_enabled,
+					utls_shutdown_timeout_minutes = EXCLUDED.utls_shutdown_timeout_minutes
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -2226,7 +2232,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		NormalizeCodexWSBusyPatienceSec(s.CodexWSBusyPatienceSec),
 		s.OverflowAutoCompactEnabled,
 		s.FirstTokenExcludesWsAcquire,
-		s.CodexPreflightSSEPassthroughEnabled)
+		s.CodexPreflightSSEPassthroughEnabled,
+		NormalizeUTLSShutdownTimeoutMinutes(s.UTLSShutdownTimeoutMinutes))
 	return err
 }
 
@@ -2337,6 +2344,28 @@ func normalizeCodexWSSilentMaxRetries(retries int) int {
 		return 10
 	}
 	return retries
+}
+
+// UTLS 优雅关闭等待上限的边界（分钟，issue #446）。
+const (
+	defaultUTLSShutdownTimeoutMinutes = 30
+	minUTLSShutdownTimeoutMinutes     = 1
+	maxUTLSShutdownTimeoutMinutes     = 240
+)
+
+// NormalizeUTLSShutdownTimeoutMinutes 把 uTLS 连接优雅关闭的等待上限夹到
+// 1-240 分钟，非正值回落默认 30。
+func NormalizeUTLSShutdownTimeoutMinutes(minutes int) int {
+	if minutes <= 0 {
+		return defaultUTLSShutdownTimeoutMinutes
+	}
+	if minutes < minUTLSShutdownTimeoutMinutes {
+		return minUTLSShutdownTimeoutMinutes
+	}
+	if minutes > maxUTLSShutdownTimeoutMinutes {
+		return maxUTLSShutdownTimeoutMinutes
+	}
+	return minutes
 }
 
 // NormalizeCodexContinueMaxRounds 把续想最大轮数限制在 1-32,非正值回落默认 8。

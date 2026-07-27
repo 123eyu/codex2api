@@ -105,10 +105,27 @@ func evictExpiredClients() {
 		entry := value.(*poolEntry)
 		if entry.lastUsed.Load() < cutoff {
 			clientPool.Delete(key)
-			entry.client.CloseIdleConnections()
+			releaseEvictedClient(entry.client)
 		}
 		return true
 	})
+}
+
+// releaseEvictedClient 彻底释放一个已从连接池逐出、后续不会再被取用的 Client。
+//
+// 普通 transport 用 CloseIdleConnections 即可（剩下的在途请求结束后由
+// IdleConnTimeout 回收）。但 uTLS transport 自管连接池，此处需要连带在途连接
+// 一起摘掉（在途 stream 走优雅关闭）：否则 entry 一旦从 map 删除，就再没有
+// 任何人持有该 transport，它名下的连接会泄漏到进程结束（issue #446）。
+func releaseEvictedClient(client *http.Client) {
+	if client == nil {
+		return
+	}
+	if rt, ok := client.Transport.(*utlsRoundTripper); ok {
+		rt.CloseAllConnections()
+		return
+	}
+	client.CloseIdleConnections()
 }
 
 const (
@@ -145,7 +162,7 @@ func shouldRecyclePooledClient(err error) bool {
 func recyclePooledClient(account *auth.Account, proxyURL string) {
 	key := clientPoolKey(account, proxyURL, codexTransportModeFromEnv())
 	if v, ok := clientPool.LoadAndDelete(key); ok {
-		v.(*poolEntry).client.CloseIdleConnections()
+		releaseEvictedClient(v.(*poolEntry).client)
 	}
 }
 

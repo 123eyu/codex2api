@@ -2881,6 +2881,8 @@
     "codexContinueThinkingDesc": "检测到上游按特征指纹截断思考（“516 降智”）时，自动携带已有思考续发请求并折叠成单次响应。每次续想都是一次真实上游请求，会成倍放大额度消耗，且属于显式绕过上游截断行为，风险自负。默认关闭。",
     "codexContinueMaxRounds": "最大续想轮数",
     "codexContinueMaxRoundsDesc": "单次请求允许的上游请求总轮数（含首轮），到达上限后按当前结果返回。范围 1-32，默认 8。",
+    "utlsShutdownTimeout": "uTLS 连接优雅关闭上限",
+    "utlsShutdownTimeoutDesc": "仅 CODEX_TRANSPORT_MODE=utls_chrome 生效。连接被摘出连接池后（收到 GOAWAY／连接报错／账号回收），等待其上在途请求收尾的上限；超时则强制关闭，避免异常挂死的请求把连接永久留住。正常请求结束即刻关闭，不会等到该上限。范围 1-240，默认 30 分钟。",
     "overflowAutoCompact": "超窗自动压缩（实验性）",
     "overflowAutoCompactDesc": "上游报上下文超窗（context_length_exceeded）时，网关自动把旧轮次摘要成一条上下文说明并重试一次，代替直接向客户端返回 400。",
     "overflowAutoCompactEnabled": "启用超窗自动压缩",
