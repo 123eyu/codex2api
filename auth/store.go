@@ -3004,6 +3004,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.SetGrokAffinityMode(grokAffinityModeFromConfig(settings.GrokConfig))
 	s.SetGrokProbeConfig(grokProbeConfigFromConfig(settings.GrokConfig))
 	s.SetGrokMaxRateLimitRetries(grokMaxRateLimitRetriesFromConfig(settings.GrokConfig))
+	SetConfiguredGrokOAuthClientID(grokOAuthClientIDFromConfig(settings.GrokConfig))
 	if settings.ModelMapping != "" {
 		s.modelMapping.Store(settings.ModelMapping)
 	}
@@ -5290,6 +5291,25 @@ func grokMaxRateLimitRetriesFromConfig(raw string) int {
 		return GrokMaxRateLimitRetriesUnset
 	}
 	return cfg.MaxRateLimitRetries
+}
+
+// GrokOAuthClientIDUnset 表示系统设置未配 client_id（回落到环境变量/内置默认）。
+const GrokOAuthClientIDUnset = ""
+
+// grokOAuthClientIDFromConfig 从 grok_config JSON 解析出 OAuth client_id。
+// 缺省/非法/含空白一律视为未配置，由 EffectiveGrokOAuthClientID 继续回落。
+func grokOAuthClientIDFromConfig(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return GrokOAuthClientIDUnset
+	}
+	var cfg struct {
+		OAuthClientID string `json:"oauth_client_id"`
+	}
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return GrokOAuthClientIDUnset
+	}
+	return NormalizeGrokOAuthClientID(cfg.OAuthClientID)
 }
 
 // SetGrokMaxRateLimitRetries 热更新 Grok 专属限流重试上限（<0 视为 0=跟随全局）。

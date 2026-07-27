@@ -1167,6 +1167,7 @@ export default function Settings() {
     grok_probe_enabled: false,
     grok_probe_interval_minutes: 30,
     grok_max_rate_limit_retries: 0,
+    grok_oauth_client_id: '',
     max_retries: 2,
     max_rate_limit_retries: 1,
     retry_interval_ms: 0,
@@ -2199,6 +2200,31 @@ export default function Settings() {
                   <Switch
                     checked={settingsForm.grok_probe_enabled}
                     onCheckedChange={(checked) => autoSaveBooleanField('grok_probe_enabled', checked)}
+                  />
+                </SettingField>
+              </div>
+              <div className={SETTINGS_FIELD_GRID_3}>
+                {/* client_id 同时可由环境变量 GROK_OAUTH_CLIENT_ID 指定，且环境变量优先级更高；
+                    被覆盖时这里禁用输入并说明当前生效值，避免用户以为改了却不起作用。 */}
+                <SettingField
+                  className="sm:col-span-2 xl:col-span-3"
+                  label={t('settings.grokOAuthClientId')}
+                  description={
+                    settingsForm.grok_oauth_client_id_env_override
+                      ? t('settings.grokOAuthClientIdEnvOverride', {
+                          value: settingsForm.grok_oauth_client_id_effective || '',
+                        })
+                      : t('settings.grokOAuthClientIdDesc')
+                  }
+                >
+                  <Input
+                    value={settingsForm.grok_oauth_client_id ?? ''}
+                    disabled={settingsForm.grok_oauth_client_id_env_override}
+                    placeholder={t('settings.grokOAuthClientIdPlaceholder')}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      setSettingsForm(f => ({ ...f, grok_oauth_client_id: e.target.value }))
+                    }
+                    onBlur={(e) => autoSaveStringField('grok_oauth_client_id', e.currentTarget.value.trim())}
                   />
                 </SettingField>
               </div>
