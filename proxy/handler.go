@@ -207,6 +207,38 @@ func sessionAffinityKey(sessionID string, apiKeyID int64) string {
 	return fmt.Sprintf("%s::api-key:%d", sessionID, apiKeyID)
 }
 
+// applyAffinityGroupRouting keeps requests with the dedicated downstream affinity header
+// on the API key's original groups and routes requests without it to the configured split groups.
+func applyAffinityGroupRouting(c *gin.Context, identity requestSessionIdentity, filter auth.AccountFilter) auth.AccountFilter {
+	row := apiKeyRowFromContext(c)
+	if row == nil || len(row.Limits.NoAffinityGroupIDs) == 0 {
+		return filter
+	}
+
+	groupIDs := row.Limits.NoAffinityGroupIDs
+	if identity.hasDownstreamAffinity {
+		groupIDs = row.AllowedGroupIDs
+		if len(groupIDs) == 0 {
+			return filter
+		}
+	}
+	groups := make(map[int64]struct{}, len(groupIDs))
+	for _, id := range groupIDs {
+		if id > 0 {
+			groups[id] = struct{}{}
+		}
+	}
+	if len(groups) == 0 {
+		return filter
+	}
+	return func(account *auth.Account) bool {
+		if account == nil || !account.InAnyGroup(groups) {
+			return false
+		}
+		return filter == nil || filter(account)
+	}
+}
+
 const proOnlySparkModel = "gpt-5.3-codex-spark"
 
 func isProOnlyModel(model string) bool {
@@ -632,6 +664,7 @@ func (h *Handler) syncAPIKeyAllowedGroups(row *database.APIKeyRow) {
 		return
 	}
 	h.store.SetAPIKeyAllowedGroups(row.ID, row.AllowedGroupIDs)
+	h.store.SetAPIKeyNoAffinityGroups(row.ID, row.Limits.NoAffinityGroupIDs)
 	h.store.SetAPIKeyAllowedPlans(row.ID, row.Limits.PlanAllow)
 	h.store.SetAPIKeyUpstreamChannel(row.ID, row.Limits.ResolveUpstreamChannel())
 }
@@ -2040,6 +2073,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		accountFilter = excludeRelayAccountsFilter(accountFilter)
 	}
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
+	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
@@ -3228,6 +3262,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// 中转账号会命中上游自身的 /responses/compact，使仅接入中转的用户也能压缩（issue #174）。
 	accountFilter := accountFilterForCompactResponsesModelWithOriginal(routingModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
@@ -3758,6 +3793,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
 
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, codexBody)
+	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
 

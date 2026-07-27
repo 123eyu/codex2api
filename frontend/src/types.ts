@@ -1562,6 +1562,7 @@ export interface APIKeyLimits {
   model_allow?: string[]
   model_deny?: string[]
   plan_allow?: string[]
+  no_affinity_group_ids?: number[]
   rpm?: number
   rpd?: number
   max_concurrency?: number

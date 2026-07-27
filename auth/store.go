@@ -2454,6 +2454,8 @@ type Store struct {
 	apiKeyGroupsMu                     sync.RWMutex
 	apiKeyAllowedGroups                map[int64][]int64
 	apiKeyAllowedGroupSets             map[int64]map[int64]struct{}
+	apiKeyNoAffinityGroups             map[int64][]int64
+	apiKeyNoAffinityGroupSets          map[int64]map[int64]struct{}
 	apiKeyAllowedPlans                 map[int64][]string
 	apiKeyAllowedPlanSets              map[int64]map[string]struct{}
 	apiKeyUpstreamChannels             map[int64]string
@@ -5976,6 +5978,35 @@ func (s *Store) SetAPIKeyAllowedGroups(apiKeyID int64, groupIDs []int64) {
 	s.rebuildFastScheduler()
 }
 
+// SetAPIKeyNoAffinityGroups 设置未携带下游亲和头时可使用的分流组。
+// 这些组会加入 API Key 的账号授权并集；具体请求仍由 proxy 层按亲和头是否存在精确选池。
+func (s *Store) SetAPIKeyNoAffinityGroups(apiKeyID int64, groupIDs []int64) {
+	if apiKeyID <= 0 {
+		return
+	}
+	normalized := normalizeAllowedGroupIDs(groupIDs)
+	s.apiKeyGroupsMu.Lock()
+	if s.apiKeyNoAffinityGroups == nil {
+		s.apiKeyNoAffinityGroups = make(map[int64][]int64)
+	}
+	if s.apiKeyNoAffinityGroupSets == nil {
+		s.apiKeyNoAffinityGroupSets = make(map[int64]map[int64]struct{})
+	}
+	if int64SliceEqual(s.apiKeyNoAffinityGroups[apiKeyID], normalized) {
+		s.apiKeyGroupsMu.Unlock()
+		return
+	}
+	if len(normalized) == 0 {
+		delete(s.apiKeyNoAffinityGroups, apiKeyID)
+		delete(s.apiKeyNoAffinityGroupSets, apiKeyID)
+	} else {
+		s.apiKeyNoAffinityGroups[apiKeyID] = cloneInt64Slice(normalized)
+		s.apiKeyNoAffinityGroupSets[apiKeyID] = int64Set(normalized)
+	}
+	s.apiKeyGroupsMu.Unlock()
+	s.rebuildFastScheduler()
+}
+
 // SetAPIKeyAllowedPlans 设置某 API Key 的账号套餐白名单。plans 归一(小写、去空白、去重)
 // 后落入内存集合;为空表示不限套餐。仅当集合真正变化时才重建调度器,以免鉴权热路径
 // 每次请求都触发重建。
@@ -6063,6 +6094,8 @@ func (s *Store) LoadAPIKeyAllowedGroups(ctx context.Context) error {
 	s.apiKeyGroupsMu.Lock()
 	s.apiKeyAllowedGroups = make(map[int64][]int64, len(keys))
 	s.apiKeyAllowedGroupSets = make(map[int64]map[int64]struct{}, len(keys))
+	s.apiKeyNoAffinityGroups = make(map[int64][]int64, len(keys))
+	s.apiKeyNoAffinityGroupSets = make(map[int64]map[int64]struct{}, len(keys))
 	s.apiKeyAllowedPlans = make(map[int64][]string, len(keys))
 	s.apiKeyAllowedPlanSets = make(map[int64]map[string]struct{}, len(keys))
 	s.apiKeyUpstreamChannels = make(map[int64]string, len(keys))
@@ -6071,6 +6104,11 @@ func (s *Store) LoadAPIKeyAllowedGroups(ctx context.Context) error {
 		if len(normalized) > 0 {
 			s.apiKeyAllowedGroups[key.ID] = cloneInt64Slice(normalized)
 			s.apiKeyAllowedGroupSets[key.ID] = int64Set(normalized)
+		}
+		noAffinityGroups := normalizeAllowedGroupIDs(key.Limits.NoAffinityGroupIDs)
+		if len(noAffinityGroups) > 0 {
+			s.apiKeyNoAffinityGroups[key.ID] = cloneInt64Slice(noAffinityGroups)
+			s.apiKeyNoAffinityGroupSets[key.ID] = int64Set(noAffinityGroups)
 		}
 		plans := normalizeAllowedPlans(key.Limits.PlanAllow)
 		if len(plans) > 0 {
@@ -6094,6 +6132,7 @@ func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
 	}
 	s.apiKeyGroupsMu.RLock()
 	allowedGroups := s.apiKeyAllowedGroupSets[apiKeyID]
+	noAffinityGroups := s.apiKeyNoAffinityGroupSets[apiKeyID]
 	allowedPlans := s.apiKeyAllowedPlanSets[apiKeyID]
 	channel := s.apiKeyUpstreamChannels[apiKeyID]
 	s.apiKeyGroupsMu.RUnlock()
@@ -6123,6 +6162,9 @@ func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
 	}
 	for _, id := range acc.GroupIDs {
 		if _, ok := allowedGroups[id]; ok {
+			return true
+		}
+		if _, ok := noAffinityGroups[id]; ok {
 			return true
 		}
 	}

@@ -3903,6 +3903,37 @@ func TestSessionAffinityKeySeparatesDifferentAPIKeys(t *testing.T) {
 	}
 }
 
+func TestApplyAffinityGroupRoutingSplitsByDedicatedHeader(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set(contextAPIKeyRow, &database.APIKeyRow{
+		AllowedGroupIDs: []int64{10},
+		Limits: database.APIKeyLimits{
+			NoAffinityGroupIDs: []int64{20},
+		},
+	})
+	primary := &auth.Account{DBID: 1, GroupIDs: []int64{10}}
+	split := &auth.Account{DBID: 2, GroupIDs: []int64{20}}
+
+	withoutAffinity := applyAffinityGroupRouting(c, requestSessionIdentity{}, nil)
+	if withoutAffinity(primary) || !withoutAffinity(split) {
+		t.Fatal("request without affinity header must use only the split groups")
+	}
+
+	withAffinity := applyAffinityGroupRouting(c, requestSessionIdentity{hasDownstreamAffinity: true}, nil)
+	if !withAffinity(primary) || withAffinity(split) {
+		t.Fatal("request with affinity header must keep using the original groups")
+	}
+}
+
+func TestApplyAffinityGroupRoutingDisabledKeepsExistingFilter(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set(contextAPIKeyRow, &database.APIKeyRow{AllowedGroupIDs: []int64{10}})
+	want := auth.AccountFilter(func(account *auth.Account) bool { return account != nil && account.DBID == 1 })
+	if got := applyAffinityGroupRouting(c, requestSessionIdentity{}, want); got(&auth.Account{DBID: 1}) != true || got(&auth.Account{DBID: 2}) != false {
+		t.Fatal("disabled split routing must preserve the existing account filter")
+	}
+}
+
 // TestResponsesWebSocketStripsInjectedImageTool verifies that a plain
 // conversation request — which PrepareResponsesWebSocketBody auto-injects an
 // image_generation tool into — has that tool stripped before going to the

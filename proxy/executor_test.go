@@ -1244,6 +1244,12 @@ func TestResolveSessionIDUsesLocalAffinityHeader(t *testing.T) {
 	identityWithoutAffinity := resolveRequestSessionIdentity(baseHeaders, body)
 	identityA := resolveRequestSessionIdentity(headersA, body)
 	identityB := resolveRequestSessionIdentity(headersB, body)
+	if identityWithoutAffinity.hasDownstreamAffinity {
+		t.Fatal("request without the dedicated affinity header was marked as having one")
+	}
+	if !identityA.hasDownstreamAffinity || !identityB.hasDownstreamAffinity {
+		t.Fatal("request with the dedicated affinity header was not marked as having one")
+	}
 	idA := identityA.affinityID
 	idARepeat := ResolveSessionID(headersA, body)
 	idB := identityB.affinityID
@@ -1264,6 +1270,15 @@ func TestResolveSessionIDUsesLocalAffinityHeader(t *testing.T) {
 	}
 	if identityA.explicitUpstreamID != "" || identityB.explicitUpstreamID != "" {
 		t.Fatalf("local affinity became an explicit upstream id: a=%q b=%q", identityA.explicitUpstreamID, identityB.explicitUpstreamID)
+	}
+}
+
+func TestResolveSessionIdentityTreatsBlankAffinityHeaderAsMissing(t *testing.T) {
+	headers := http.Header{"Authorization": []string{"Bearer shared-key"}}
+	headers.Set("X-Codex2API-Affinity-Key", "   ")
+	identity := resolveRequestSessionIdentity(headers, []byte(`{"model":"gpt-5.4","input":"hello"}`))
+	if identity.hasDownstreamAffinity {
+		t.Fatal("blank affinity header must be treated as missing")
 	}
 }
 
