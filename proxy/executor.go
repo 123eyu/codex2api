@@ -1079,9 +1079,11 @@ const downstreamAffinityHeader = "X-Codex2API-Affinity-Key"
 // dedicated downstream affinity header may only replace affinityID; it must
 // never change upstreamSeed or become an explicit upstream session.
 type requestSessionIdentity struct {
-	affinityID         string
-	upstreamSeed       string
-	explicitUpstreamID string
+	affinityID            string
+	upstreamSeed          string
+	explicitUpstreamID    string
+	hasDownstreamAffinity bool
+	hasRequestFingerprint bool
 }
 
 // ResolveSessionID 从下游请求提取或生成 session ID
@@ -1104,6 +1106,7 @@ func ResolveSessionID(headers http.Header, body []byte) string {
 }
 
 func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSessionIdentity {
+	hasEngineFingerprint := EvaluateEngineFingerprint(headers, body, nil)
 	explicitID := ResolveExplicitSessionID(headers, body)
 	upstreamSeed := explicitID
 	if upstreamSeed == "" {
@@ -1128,11 +1131,19 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 	affinityID := upstreamSeed
 	if localAffinityID := resolveDownstreamAffinityID(headers); localAffinityID != "" {
 		affinityID = localAffinityID
+		return requestSessionIdentity{
+			affinityID:            affinityID,
+			upstreamSeed:          upstreamSeed,
+			explicitUpstreamID:    explicitID,
+			hasDownstreamAffinity: true,
+			hasRequestFingerprint: true,
+		}
 	}
 	return requestSessionIdentity{
-		affinityID:         affinityID,
-		upstreamSeed:       upstreamSeed,
-		explicitUpstreamID: explicitID,
+		affinityID:            affinityID,
+		upstreamSeed:          upstreamSeed,
+		explicitUpstreamID:    explicitID,
+		hasRequestFingerprint: hasEngineFingerprint,
 	}
 }
 

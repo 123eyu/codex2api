@@ -6259,6 +6259,10 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 	var limits database.APIKeyLimits
 	if req.Limits != nil {
 		limits = sanitizeAPIKeyLimits(*req.Limits)
+		if err := h.validateAPIKeyGroupIDs(ctx, limits.NoAffinityGroupIDs, "limits.no_affinity_group_ids"); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		if err := h.validateAPIKeyScopeLimits(ctx, limits.ScopeLimits); err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())
 			return
@@ -6284,6 +6288,7 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 		}
 	}
 	if h.store != nil {
+		h.store.SetAPIKeyNoAffinityGroups(id, limits.NoAffinityGroupIDs)
 		h.store.SetAPIKeyAllowedPlans(id, limits.PlanAllow)
 	}
 	// 新配的累计额度要立刻开始记账，不等落库侧的 60s 缓存过期。
@@ -6413,6 +6418,10 @@ func (h *Handler) UpdateAPIKey(c *gin.Context) {
 	}
 	if req.Limits != nil {
 		update.Limits = sanitizeAPIKeyLimits(*req.Limits)
+		if err := h.validateAPIKeyGroupIDs(ctx, update.Limits.NoAffinityGroupIDs, "limits.no_affinity_group_ids"); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		if err := h.validateAPIKeyScopeLimits(ctx, update.Limits.ScopeLimits); err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())
 			return
@@ -6427,6 +6436,7 @@ func (h *Handler) UpdateAPIKey(c *gin.Context) {
 		h.store.SetAPIKeyAllowedGroups(id, allowedGroupValues)
 	}
 	if update.LimitsSet && h.store != nil {
+		h.store.SetAPIKeyNoAffinityGroups(id, update.Limits.NoAffinityGroupIDs)
 		h.store.SetAPIKeyAllowedPlans(id, update.Limits.PlanAllow)
 	}
 	if update.LimitsSet {
@@ -6463,6 +6473,7 @@ func sanitizeAPIKeyLimits(in database.APIKeyLimits) database.APIKeyLimits {
 		ModelAllow:             clean(in.ModelAllow),
 		ModelDeny:              clean(in.ModelDeny),
 		PlanAllow:              cleanPlanAllow(in.PlanAllow),
+		NoAffinityGroupIDs:     dedupeInt64(in.NoAffinityGroupIDs),
 		RPM:                    maxInt(in.RPM, 0),
 		RPD:                    maxInt(in.RPD, 0),
 		MaxConcurrency:         maxInt(in.MaxConcurrency, 0),
@@ -6484,6 +6495,20 @@ func sanitizeAPIKeyLimits(in database.APIKeyLimits) database.APIKeyLimits {
 		out.ImageGenerationPolicy = ""
 	}
 	return out
+}
+
+func (h *Handler) validateAPIKeyGroupIDs(ctx context.Context, groupIDs []int64, field string) error {
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	missing, err := h.db.VerifyAccountGroupIDs(ctx, groupIDs)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%s 包含不存在的分组 ID: %s", field, joinInt64s(missing))
+	}
+	return nil
 }
 
 // validateAPIKeyScopeLimits 校验分组 / 账号维度限额指向的 scope 真实存在（issue #439）。
@@ -6702,6 +6727,7 @@ func (h *Handler) DeleteAPIKey(c *gin.Context) {
 	}
 	if h.store != nil {
 		h.store.SetAPIKeyAllowedGroups(id, nil)
+		h.store.SetAPIKeyNoAffinityGroups(id, nil)
 		h.store.SetAPIKeyAllowedPlans(id, nil)
 	}
 	h.invalidateAPIKeyRuntimeCaches(ctx, keyToInvalidate)
