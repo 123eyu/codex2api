@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/codex2api/internal/openaiidentity"
 	"github.com/lib/pq"
@@ -494,10 +495,12 @@ func (db *DB) Close() error {
 	if !db.DrainBackgroundTasks(2 * time.Second) {
 		log.Printf("数据库后台任务超过优雅关闭窗口，已取消并等待退出")
 	}
-	// 停止批量写入并刷完缓冲
+	// 停止批量写入并刷完缓冲。这里必须用 FlushUsageLogs 而不是 flushLogs：
+	// 后者每次只取 usage_log_batch_size 条，剩余部分靠 notifyLogFlush 让后台协程接着刷，
+	// 而此刻 flusher 已经退出，没人消费这个信号，超出一个批次的日志会被静默丢弃。
 	close(db.logStop)
 	db.logWg.Wait()
-	db.flushLogs() // 最后一次 flush
+	db.FlushUsageLogs() // 最后一次 flush，刷完整个缓冲
 	if db.promptFilterAudit != nil {
 		db.promptFilterAudit.close(2 * time.Second)
 	}
@@ -2646,6 +2649,37 @@ type UsageLog struct {
 	ErrorMessage         string    `json:"error_message"`
 }
 
+// usage_logs 中受 varchar 长度约束的列宽。这些字段大多直接来自下游请求体或上游响应
+// （reasoning_effort、service_tier、image_format 等），长度不受网关控制。一条超长值会让
+// 整条批量 INSERT 回滚，失败的 batch 又会被原样放回缓冲区头部，下一轮继续失败——
+// 单条脏数据就能永久堵死整个日志写入。因此写入前按列宽截断。
+const (
+	usageLogChannelMaxLen    = 16  // channel
+	usageLogImageSizeMaxLen  = 32  // image_size
+	usageLogShortTextMaxLen  = 64  // client_ip / api_key_masked / upstream_error_kind
+	usageLogTextMaxLen       = 100 // endpoint / model / *_service_tier / reasoning_effort ...
+	usageLogAPIKeyNameMaxLen = 255 // api_key_name
+)
+
+// clampUsageLogText 按字符数截断：PostgreSQL varchar(n) 限制的是字符而非字节，
+// 且按字节切会切出非法 UTF-8 序列。
+func clampUsageLogText(s string, maxRunes int) string {
+	if maxRunes <= 0 || len(s) <= maxRunes {
+		return s
+	}
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	count := 0
+	for i := range s {
+		count++
+		if count > maxRunes {
+			return s[:i]
+		}
+	}
+	return s
+}
+
 // InsertUsageLog 将用量事件追加到内存缓冲（非阻塞）。
 func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 	if db == nil || log == nil {
@@ -2676,14 +2710,14 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 	db.logBuf = append(db.logBuf, usageLogEntry{
 		StoreUsageLog:        storeUsageLog,
 		AccountID:            log.AccountID,
-		Channel:              log.Channel,
-		ClientIP:             log.ClientIP,
+		Channel:              clampUsageLogText(log.Channel, usageLogChannelMaxLen),
+		ClientIP:             clampUsageLogText(log.ClientIP, usageLogShortTextMaxLen),
 		ClientUserAgent:      log.ClientUserAgent,
 		UpstreamUserAgent:    log.UpstreamUserAgent,
 		UserAgentOverridden:  log.UserAgentOverridden,
-		Endpoint:             log.Endpoint,
-		Model:                log.Model,
-		EffectiveModel:       log.EffectiveModel,
+		Endpoint:             clampUsageLogText(log.Endpoint, usageLogTextMaxLen),
+		Model:                clampUsageLogText(log.Model, usageLogTextMaxLen),
+		EffectiveModel:       clampUsageLogText(log.EffectiveModel, usageLogTextMaxLen),
 		PromptTokens:         log.PromptTokens,
 		CompletionTokens:     log.CompletionTokens,
 		TotalTokens:          log.TotalTokens,
@@ -2694,31 +2728,31 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 		ReasoningTokens:      log.ReasoningTokens,
 		FirstTokenMs:         log.FirstTokenMs,
 		WsAcquireMs:          log.WsAcquireMs,
-		ReasoningEffort:      log.ReasoningEffort,
-		InboundEndpoint:      log.InboundEndpoint,
-		UpstreamEndpoint:     log.UpstreamEndpoint,
+		ReasoningEffort:      clampUsageLogText(log.ReasoningEffort, usageLogTextMaxLen),
+		InboundEndpoint:      clampUsageLogText(log.InboundEndpoint, usageLogTextMaxLen),
+		UpstreamEndpoint:     clampUsageLogText(log.UpstreamEndpoint, usageLogTextMaxLen),
 		Stream:               log.Stream,
 		Compact:              log.Compact,
 		ViaWebsocket:         log.ViaWebsocket,
 		CachedTokens:         log.CachedTokens,
-		ServiceTier:          serviceTier,
-		RequestedServiceTier: log.RequestedServiceTier,
-		ActualServiceTier:    log.ActualServiceTier,
-		BillingServiceTier:   billingServiceTier,
+		ServiceTier:          clampUsageLogText(serviceTier, usageLogTextMaxLen),
+		RequestedServiceTier: clampUsageLogText(log.RequestedServiceTier, usageLogTextMaxLen),
+		ActualServiceTier:    clampUsageLogText(log.ActualServiceTier, usageLogTextMaxLen),
+		BillingServiceTier:   clampUsageLogText(billingServiceTier, usageLogTextMaxLen),
 		APIKeyID:             log.APIKeyID,
-		APIKeyName:           log.APIKeyName,
-		APIKeyMasked:         log.APIKeyMasked,
+		APIKeyName:           clampUsageLogText(log.APIKeyName, usageLogAPIKeyNameMaxLen),
+		APIKeyMasked:         clampUsageLogText(log.APIKeyMasked, usageLogShortTextMaxLen),
 		ImageCount:           log.ImageCount,
 		ImageWidth:           log.ImageWidth,
 		ImageHeight:          log.ImageHeight,
 		ImageBytes:           log.ImageBytes,
-		ImageFormat:          log.ImageFormat,
-		ImageSize:            log.ImageSize,
+		ImageFormat:          clampUsageLogText(log.ImageFormat, usageLogTextMaxLen),
+		ImageSize:            clampUsageLogText(log.ImageSize, usageLogImageSizeMaxLen),
 		AccountBilled:        accountBilled,
 		UserBilled:           userBilled,
 		IsRetryAttempt:       log.IsRetryAttempt,
 		AttemptIndex:         log.AttemptIndex,
-		UpstreamErrorKind:    log.UpstreamErrorKind,
+		UpstreamErrorKind:    clampUsageLogText(log.UpstreamErrorKind, usageLogShortTextMaxLen),
 		ErrorMessage:         log.ErrorMessage,
 	})
 	bufLen := len(db.logBuf)
