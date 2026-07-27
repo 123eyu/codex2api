@@ -68,9 +68,10 @@ func (h *Handler) CodexAlphaSearchHandler(c *gin.Context) {
 
 	apiKeyID := requestAPIKeyID(c)
 	// 搜索端点只存在于 ChatGPT 后端，relay/Grok 账号无从代答。
-	account := h.store.NextExcludingWithFilter(apiKeyID, nil, func(a *auth.Account) bool {
+	searchFilter := applyAffinityGroupRouting(c, resolveRequestSessionIdentity(c.Request.Header, rawBody), func(a *auth.Account) bool {
 		return !a.IsRelayStyle()
 	})
+	account := h.store.NextExcludingWithFilter(apiKeyID, nil, searchFilter)
 	if account == nil {
 		api.SendError(c, api.ErrServiceUnavailable)
 		return

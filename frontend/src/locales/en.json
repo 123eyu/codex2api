@@ -3228,7 +3228,7 @@
     "noAffinityGroupsLabel": "No-affinity request groups",
     "noAffinityGroupsPlaceholder": "Choose groups for requests without affinity",
     "noAffinityGroupsDisabled": "Split routing off",
-    "noAffinityGroupsHint": "Requests without either a Codex engine fingerprint or X-Codex2API-Affinity-Key use only these groups; fingerprinted requests keep using the original groups above. Leave empty to preserve current behavior.",
+    "noAffinityGroupsHint": "Requests without either a Codex engine fingerprint or X-Codex2API-Affinity-Key use only these groups; fingerprinted requests use the original groups above, or — when that is empty (no group limit) — every group except the ones selected here. Leave empty to preserve current behavior. Note the fingerprint is only a client trait: a downstream caller can opt in by sending the header itself.",
     "allowedGroupsNone": "No group limit",
     "allowedGroupsMissing": "Group no longer exists",
     "allowedGroupsSaved": "Allowed groups saved",

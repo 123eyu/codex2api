@@ -210,30 +210,51 @@ func sessionAffinityKey(sessionID string, apiKeyID int64) string {
 // applyAffinityGroupRouting keeps fingerprinted requests on the API key's original groups
 // and routes requests without either a Codex engine fingerprint or the dedicated local
 // affinity header to the configured split groups.
+//
+// 当 Key 没配「允许账号分组」（= 不限分组）时，带指纹的请求改为「除分流组以外的全部账号」：
+// 否则分流组既服务无指纹请求、又照常接真 Codex 流量，隔离等于没做——而不限分组恰恰是
+// 绝大多数 Key 的默认配置。
 func applyAffinityGroupRouting(c *gin.Context, identity requestSessionIdentity, filter auth.AccountFilter) auth.AccountFilter {
 	row := apiKeyRowFromContext(c)
 	if row == nil || len(row.Limits.NoAffinityGroupIDs) == 0 {
 		return filter
 	}
 
-	groupIDs := row.Limits.NoAffinityGroupIDs
-	if identity.hasRequestFingerprint {
-		groupIDs = row.AllowedGroupIDs
-		if len(groupIDs) == 0 {
-			return filter
-		}
-	}
-	groups := make(map[int64]struct{}, len(groupIDs))
-	for _, id := range groupIDs {
-		if id > 0 {
-			groups[id] = struct{}{}
-		}
-	}
-	if len(groups) == 0 {
+	splitGroups := int64GroupSet(row.Limits.NoAffinityGroupIDs)
+	if len(splitGroups) == 0 {
 		return filter
 	}
+
+	if !identity.hasRequestFingerprint {
+		return groupMembershipFilter(splitGroups, true, filter)
+	}
+
+	allowedGroups := int64GroupSet(row.AllowedGroupIDs)
+	if len(allowedGroups) == 0 {
+		// 不限分组：把分流组排除掉，其余（含未分组账号）照常可用。
+		return groupMembershipFilter(splitGroups, false, filter)
+	}
+	return groupMembershipFilter(allowedGroups, true, filter)
+}
+
+func int64GroupSet(ids []int64) map[int64]struct{} {
+	if len(ids) == 0 {
+		return nil
+	}
+	set := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id > 0 {
+			set[id] = struct{}{}
+		}
+	}
+	return set
+}
+
+// groupMembershipFilter 在 filter 之上叠加分组门：want=true 要求账号命中 groups，
+// want=false 要求账号不在 groups 里。
+func groupMembershipFilter(groups map[int64]struct{}, want bool, filter auth.AccountFilter) auth.AccountFilter {
 	return func(account *auth.Account) bool {
-		if account == nil || !account.InAnyGroup(groups) {
+		if account == nil || account.InAnyGroup(groups) != want {
 			return false
 		}
 		return filter == nil || filter(account)
