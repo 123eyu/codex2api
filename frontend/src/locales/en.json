@@ -3225,7 +3225,7 @@
     "noAffinityGroupsLabel": "No-affinity request groups",
     "noAffinityGroupsPlaceholder": "Choose groups for requests without affinity",
     "noAffinityGroupsDisabled": "Split routing off",
-    "noAffinityGroupsHint": "Requests without X-Codex2API-Affinity-Key use only these groups; requests with the header keep using the original groups above. Leave empty to preserve current behavior.",
+    "noAffinityGroupsHint": "Requests without either a Codex engine fingerprint or X-Codex2API-Affinity-Key use only these groups; fingerprinted requests keep using the original groups above. Leave empty to preserve current behavior.",
     "allowedGroupsNone": "No group limit",
     "allowedGroupsMissing": "Group no longer exists",
     "allowedGroupsSaved": "Allowed groups saved",

@@ -1202,7 +1202,7 @@ type APIKeyLimits struct {
 	ModelAllow []string `json:"model_allow,omitempty"`
 	ModelDeny  []string `json:"model_deny,omitempty"`
 	PlanAllow  []string `json:"plan_allow,omitempty"`
-	// NoAffinityGroupIDs 指定未携带 X-Codex2API-Affinity-Key 的请求使用的账号分组。
+	// NoAffinityGroupIDs 指定未携带 Codex 引擎指纹或 X-Codex2API-Affinity-Key 的请求使用的账号分组。
 	// 空表示不启用分流，继续沿用 AllowedGroupIDs 的现有行为。
 	NoAffinityGroupIDs []int64 `json:"no_affinity_group_ids,omitempty"`
 	RPM                int     `json:"rpm,omitempty"`

@@ -207,8 +207,9 @@ func sessionAffinityKey(sessionID string, apiKeyID int64) string {
 	return fmt.Sprintf("%s::api-key:%d", sessionID, apiKeyID)
 }
 
-// applyAffinityGroupRouting keeps requests with the dedicated downstream affinity header
-// on the API key's original groups and routes requests without it to the configured split groups.
+// applyAffinityGroupRouting keeps fingerprinted requests on the API key's original groups
+// and routes requests without either a Codex engine fingerprint or the dedicated local
+// affinity header to the configured split groups.
 func applyAffinityGroupRouting(c *gin.Context, identity requestSessionIdentity, filter auth.AccountFilter) auth.AccountFilter {
 	row := apiKeyRowFromContext(c)
 	if row == nil || len(row.Limits.NoAffinityGroupIDs) == 0 {
@@ -216,7 +217,7 @@ func applyAffinityGroupRouting(c *gin.Context, identity requestSessionIdentity, 
 	}
 
 	groupIDs := row.Limits.NoAffinityGroupIDs
-	if identity.hasDownstreamAffinity {
+	if identity.hasRequestFingerprint {
 		groupIDs = row.AllowedGroupIDs
 		if len(groupIDs) == 0 {
 			return filter

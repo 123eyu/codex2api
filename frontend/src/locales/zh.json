@@ -3225,7 +3225,7 @@
     "noAffinityGroupsLabel": "无指纹请求分流组",
     "noAffinityGroupsPlaceholder": "选择无指纹请求使用的分组",
     "noAffinityGroupsDisabled": "不启用分流",
-    "noAffinityGroupsHint": "不带 X-Codex2API-Affinity-Key 的请求只从这些分组选号；带指纹的请求继续使用上面的原分组。留空保持当前行为。",
+    "noAffinityGroupsHint": "不带 Codex 引擎指纹且不带 X-Codex2API-Affinity-Key 的请求只从这些分组选号；带任一指纹的请求继续使用上面的原分组。留空保持当前行为。",
     "allowedGroupsNone": "不限制分组",
     "allowedGroupsMissing": "分组已不存在",
     "allowedGroupsSaved": "允许分组已保存",

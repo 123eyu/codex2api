@@ -3903,7 +3903,7 @@ func TestSessionAffinityKeySeparatesDifferentAPIKeys(t *testing.T) {
 	}
 }
 
-func TestApplyAffinityGroupRoutingSplitsByDedicatedHeader(t *testing.T) {
+func TestApplyAffinityGroupRoutingSplitsByRequestFingerprint(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Set(contextAPIKeyRow, &database.APIKeyRow{
 		AllowedGroupIDs: []int64{10},
@@ -3919,9 +3919,9 @@ func TestApplyAffinityGroupRoutingSplitsByDedicatedHeader(t *testing.T) {
 		t.Fatal("request without affinity header must use only the split groups")
 	}
 
-	withAffinity := applyAffinityGroupRouting(c, requestSessionIdentity{hasDownstreamAffinity: true}, nil)
-	if !withAffinity(primary) || withAffinity(split) {
-		t.Fatal("request with affinity header must keep using the original groups")
+	withFingerprint := applyAffinityGroupRouting(c, requestSessionIdentity{hasRequestFingerprint: true}, nil)
+	if !withFingerprint(primary) || withFingerprint(split) {
+		t.Fatal("fingerprinted request must keep using the original groups")
 	}
 }
 
