@@ -91,6 +91,7 @@
     "fileImportDesc": "选择一个或多个 CPA / auth.json 凭据文件(支持多选)。",
     "fileImportBtn": "导入文件",
     "fileImporting": "导入中…",
+    "fileImportProgress": "导入中… 第 {{done}}/{{total}} 批",
     "fileImportDone": "成功导入 {{imported}}/{{total}} 个账号",
     "importPickerTitle": "导入 Grok 账号",
     "importPickerDesc": "选择一种来源,导入的账号都会进入 Grok 账号池。",

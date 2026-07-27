@@ -91,6 +91,7 @@
     "fileImportDesc": "Select one or more CPA / auth.json credential files (multi-select supported).",
     "fileImportBtn": "Import files",
     "fileImporting": "Importing…",
+    "fileImportProgress": "Importing… batch {{done}}/{{total}}",
     "fileImportDone": "Imported {{imported}}/{{total}} accounts",
     "importPickerTitle": "Import Grok accounts",
     "importPickerDesc": "Choose a source. All entries are added to the Grok account pool.",
