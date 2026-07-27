@@ -1413,6 +1413,7 @@
     "batchSize": "批量大小",
     "flushInterval": "刷新间隔",
     "buffer": "缓冲",
+    "usageLogDropped": "累计丢弃",
     "lazyMode": "惰性模式",
     "backgroundRefresh": "后台巡检",
     "usageProbeMaxAge": "用量快照最长缓存",

@@ -1413,6 +1413,7 @@
     "batchSize": "Batch Size",
     "flushInterval": "Flush Interval",
     "buffer": "Buffer",
+    "usageLogDropped": "Dropped Logs",
     "lazyMode": "Lazy Mode",
     "backgroundRefresh": "Background Loop",
     "usageProbeMaxAge": "Usage Snapshot Max Age",

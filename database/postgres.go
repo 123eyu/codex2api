@@ -209,6 +209,10 @@ type DB struct {
 	logStop chan struct{}
 	logWg   sync.WaitGroup
 
+	// 缓冲溢出/脏数据丢弃的累计条数，暴露在运行状态里供运维观察
+	usageLogDropped   int64
+	usageLogDropLogAt time.Time // 溢出日志的限流时间戳，由 logMu 保护
+
 	usageLogMode          atomic.Value // string: full|errors|off
 	usageLogBatchSize     int64
 	usageLogFlushInterval int64 // ns
@@ -240,6 +244,11 @@ const (
 	postgresMaxBindParams       = 65535
 	usageLogInsertColumnCount   = 45
 	maxUsageLogInsertRowsPerSQL = 1000
+
+	// usageLogBufferHardLimit 内存缓冲的硬上限。PG 长时间不可用时（维护、主从切换、
+	// 磁盘写满）失败批次会一直被放回缓冲区，没有上限的话内存一路涨到 OOM——那会把
+	// 整个网关拖死，比丢日志严重得多。超限时丢最旧的，丢弃条数计入运行状态。
+	usageLogBufferHardLimit = 20000
 )
 
 var ErrDuplicateAccountCredential = errors.New("duplicate account credential")
@@ -632,6 +641,9 @@ type UsageLogRuntimeStats struct {
 	FlushIntervalSeconds int
 	BufferLength         int
 	BufferCapacity       int
+	// BufferLimit 内存缓冲硬上限，DroppedTotal 是启动以来因溢出或脏数据丢掉的日志条数。
+	BufferLimit  int
+	DroppedTotal int64
 }
 
 // GetUsageLogRuntimeStats 返回 usage_logs 配置和当前内存缓冲长度。
@@ -655,6 +667,8 @@ func (db *DB) GetUsageLogRuntimeStats() UsageLogRuntimeStats {
 	stats.BufferLength = len(db.logBuf)
 	stats.BufferCapacity = cap(db.logBuf)
 	db.logMu.Unlock()
+	stats.BufferLimit = usageLogBufferHardLimit
+	stats.DroppedTotal = atomic.LoadInt64(&db.usageLogDropped)
 
 	return stats
 }
@@ -2680,6 +2694,23 @@ func clampUsageLogText(s string, maxRunes int) string {
 	return s
 }
 
+// trimUsageLogBufferLocked 把缓冲裁到硬上限以内，丢最旧的日志。调用方必须持有 logMu。
+// 丢弃的日志同时会丢掉它们那份 API Key 额度累加（额度计数器和日志在同一个事务里落库），
+// 这是过载/长时间断库下的取舍：宁可少记一段用量，也不能让进程 OOM。
+func (db *DB) trimUsageLogBufferLocked() {
+	overflow := len(db.logBuf) - usageLogBufferHardLimit
+	if overflow <= 0 {
+		return
+	}
+	db.logBuf = append(db.logBuf[:0], db.logBuf[overflow:]...)
+	total := atomic.AddInt64(&db.usageLogDropped, int64(overflow))
+	if now := time.Now(); now.Sub(db.usageLogDropLogAt) >= 30*time.Second {
+		db.usageLogDropLogAt = now
+		log.Printf("用量日志缓冲已达上限 %d 条，丢弃最旧的 %d 条（累计丢弃 %d 条），请检查数据库是否可写",
+			usageLogBufferHardLimit, overflow, total)
+	}
+}
+
 // InsertUsageLog 将用量事件追加到内存缓冲（非阻塞）。
 func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 	if db == nil || log == nil {
@@ -2755,6 +2786,7 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 		UpstreamErrorKind:    clampUsageLogText(log.UpstreamErrorKind, usageLogShortTextMaxLen),
 		ErrorMessage:         log.ErrorMessage,
 	})
+	db.trimUsageLogBufferLocked()
 	bufLen := len(db.logBuf)
 	db.logMu.Unlock()
 
@@ -2933,17 +2965,25 @@ func (db *DB) flushLogBatch(drain bool) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second) // 增加超时时间
 	defer cancel()
 
-	var err error
-	// 使用批处理插入优化性能
-	if db.driver == "postgres" {
-		err = db.batchInsertLogs(ctx, batch)
-	} else {
-		err = db.insertSQLiteUsageLogBatch(ctx, batch)
-	}
-	if err != nil {
-		log.Printf("批量写入日志失败，已重新放回缓冲区等待重试: %v", err)
-		db.requeueUsageLogBatch(batch)
-		return false
+	if err := db.insertUsageLogBatch(ctx, batch); err != nil {
+		// 瞬时故障（连接断开、超时、死锁）原样放回缓冲区重试，一条都不能丢。
+		if !isUsageLogDataError(err) {
+			log.Printf("批量写入日志失败，已重新放回缓冲区等待重试: %v", err)
+			db.requeueUsageLogBatch(batch)
+			return false
+		}
+		// 脏数据重试多少次都写不进去，隔离出来丢掉，其余照常落库。
+		pending, dropped := db.salvageUsageLogBatch(ctx, batch, err)
+		if dropped > 0 {
+			total := atomic.AddInt64(&db.usageLogDropped, int64(dropped))
+			log.Printf("批量写入命中写不进去的日志：已丢弃 %d 条（累计 %d 条），其余继续落库。首个错误: %v",
+				dropped, total, err)
+		}
+		if len(pending) > 0 {
+			log.Printf("批量写入日志部分失败，%d 条已放回缓冲区等待重试", len(pending))
+			db.requeueUsageLogBatch(pending)
+			return false
+		}
 	}
 
 	if storedLogCount := countStoredUsageLogs(batch); storedLogCount > 10 {
@@ -2956,6 +2996,79 @@ func (db *DB) flushLogBatch(drain bool) bool {
 		db.notifyLogFlush()
 	}
 	return false
+}
+
+// insertUsageLogBatch 按驱动把一批日志写进去。整批是一个事务：日志行、API Key 累计额度
+// 计数器、api_keys.quota_used 要么一起成功，要么一起回滚。
+func (db *DB) insertUsageLogBatch(ctx context.Context, batch []usageLogEntry) error {
+	if db.driver == "postgres" {
+		return db.batchInsertLogs(ctx, batch)
+	}
+	return db.insertSQLiteUsageLogBatch(ctx, batch)
+}
+
+// isUsageLogDataError 判断失败是不是「这批数据本身写不进去」。PostgreSQL 的 SQLSTATE
+// class 22（数据异常：超长、非法 UTF-8 字节、数值溢出…）和 class 23（约束冲突）重试多少次
+// 都不会成功；其余错误（连接断开、超时、死锁、只读事务）是瞬时故障，必须继续重试，
+// 绝不能顺手把日志丢掉。
+func isUsageLogDataError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return false
+	}
+	switch pqErr.Code.Class() {
+	case "22", "23":
+		return true
+	}
+	return false
+}
+
+// salvageUsageLogBatch 二分隔离写不进去的日志：能写的照常落库，脏数据丢掉并计数，
+// 途中遇到瞬时故障就把还没落库的部分交回调用方重试（已经写进去的不会再交回，避免重复计费）。
+//
+// 不做隔离的话，一条脏数据会让整批回滚、原样放回缓冲区头部、下一轮继续失败——日志永久停更，
+// 同一事务里的 API Key 额度计数器也跟着冻结，带预算的 Key 会一直判定为未超额。
+func (db *DB) salvageUsageLogBatch(ctx context.Context, batch []usageLogEntry, cause error) (pending []usageLogEntry, dropped int) {
+	return salvageUsageLogBatchWith(batch, cause,
+		func(chunk []usageLogEntry) error { return db.insertUsageLogBatch(ctx, chunk) },
+		func(e usageLogEntry, err error) {
+			log.Printf("丢弃 1 条写不进去的用量日志(endpoint=%s model=%s status=%d api_key_id=%d): %v",
+				e.Endpoint, e.Model, e.StatusCode, e.APIKeyID, err)
+		})
+}
+
+func salvageUsageLogBatchWith(
+	batch []usageLogEntry,
+	cause error,
+	insert func([]usageLogEntry) error,
+	onDrop func(usageLogEntry, error),
+) (pending []usageLogEntry, dropped int) {
+	if len(batch) == 0 {
+		return nil, 0
+	}
+	if len(batch) == 1 {
+		onDrop(batch[0], cause)
+		return nil, 1
+	}
+
+	mid := len(batch) / 2
+	for _, half := range [][]usageLogEntry{batch[:mid], batch[mid:]} {
+		err := insert(half)
+		if err == nil {
+			continue
+		}
+		if !isUsageLogDataError(err) {
+			pending = append(pending, half...)
+			continue
+		}
+		halfPending, halfDropped := salvageUsageLogBatchWith(half, err, insert, onDrop)
+		pending = append(pending, halfPending...)
+		dropped += halfDropped
+	}
+	return pending, dropped
 }
 
 func countStoredUsageLogs(batch []usageLogEntry) int {
@@ -2993,6 +3106,7 @@ func (db *DB) requeueUsageLogBatch(batch []usageLogEntry) {
 		requeued := make([]usageLogEntry, len(batch), len(batch)+db.GetUsageLogBatchSize())
 		copy(requeued, batch)
 		db.logBuf = requeued
+		db.trimUsageLogBufferLocked()
 		return
 	}
 
@@ -3000,6 +3114,7 @@ func (db *DB) requeueUsageLogBatch(batch []usageLogEntry) {
 	requeued = append(requeued, batch...)
 	requeued = append(requeued, db.logBuf...)
 	db.logBuf = requeued
+	db.trimUsageLogBufferLocked()
 }
 
 func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEntry) error {
