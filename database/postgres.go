@@ -232,9 +232,13 @@ const (
 	defaultUsageLogBatchSize            = 200
 	defaultUsageLogFlushIntervalSeconds = 5
 	minUsageLogBatchSize                = 1
-	maxUsageLogBatchSize                = 10000
+	maxUsageLogBatchSize                = 1000
 	minUsageLogFlushIntervalSeconds     = 1
 	maxUsageLogFlushIntervalSeconds     = 300
+
+	postgresMaxBindParams       = 65535
+	usageLogInsertColumnCount   = 45
+	maxUsageLogInsertRowsPerSQL = 1000
 )
 
 var ErrDuplicateAccountCredential = errors.New("duplicate account credential")
@@ -784,7 +788,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS reasoning_tokens INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS first_token_ms INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS ws_acquire_ms INT DEFAULT 0;
-	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS reasoning_effort VARCHAR(20) DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS reasoning_effort VARCHAR(100) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS via_websocket BOOLEAN DEFAULT FALSE;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS effective_model VARCHAR(100) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS inbound_endpoint VARCHAR(100) DEFAULT '';
@@ -792,10 +796,10 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS stream BOOLEAN DEFAULT false;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS compact BOOLEAN DEFAULT false;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cached_tokens INT DEFAULT 0;
-	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS service_tier VARCHAR(20) DEFAULT '';
-	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS requested_service_tier VARCHAR(20) DEFAULT '';
-	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS actual_service_tier VARCHAR(20) DEFAULT '';
-	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS billing_service_tier VARCHAR(20) DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS service_tier VARCHAR(100) DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS requested_service_tier VARCHAR(100) DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS actual_service_tier VARCHAR(100) DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS billing_service_tier VARCHAR(100) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS api_key_id INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS api_key_name VARCHAR(255) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS api_key_masked VARCHAR(64) DEFAULT '';
@@ -807,7 +811,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_width INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_height INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_bytes INT DEFAULT 0;
-	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_format VARCHAR(20) DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_format VARCHAR(100) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_size VARCHAR(32) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS account_billed DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS user_billed DOUBLE PRECISION DEFAULT 0;
@@ -817,6 +821,12 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS error_message TEXT DEFAULT '';
 	-- 上游渠道（codex/grok），写入时按调度账号固化，供仪表盘/用量分渠道聚合
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS channel VARCHAR(16) DEFAULT '';
+	ALTER TABLE usage_logs ALTER COLUMN reasoning_effort TYPE VARCHAR(100);
+	ALTER TABLE usage_logs ALTER COLUMN service_tier TYPE VARCHAR(100);
+	ALTER TABLE usage_logs ALTER COLUMN requested_service_tier TYPE VARCHAR(100);
+	ALTER TABLE usage_logs ALTER COLUMN actual_service_tier TYPE VARCHAR(100);
+	ALTER TABLE usage_logs ALTER COLUMN billing_service_tier TYPE VARCHAR(100);
+	ALTER TABLE usage_logs ALTER COLUMN image_format TYPE VARCHAR(100);
 
 	CREATE INDEX IF NOT EXISTS idx_usage_logs_api_key_created_at ON usage_logs(api_key_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_usage_logs_channel_created_at ON usage_logs(channel, created_at);
@@ -2845,18 +2855,45 @@ func (db *DB) FlushUsageLogs() {
 	if db == nil {
 		return
 	}
-	db.flushLogs()
+	for db.flushLogBatch(true) {
+	}
 }
 
-// flushLogs 将缓冲中的日志批量写入 PG
+// flushLogs 将缓冲中的日志按配置批量写入 PG。
+// 高并发下 logBuf 可能在一个 flush 间隔内积累到数千条；这里每次只取
+// usage_log_batch_size，避免一次事务过大，也避免 PostgreSQL 65535 bind 参数上限。
 func (db *DB) flushLogs() {
+	db.flushLogBatch(false)
+}
+
+func (db *DB) flushLogBatch(drain bool) bool {
+	if db == nil {
+		return false
+	}
+	batchSize := db.GetUsageLogBatchSize()
+	if batchSize <= 0 {
+		batchSize = defaultUsageLogBatchSize
+	}
+
 	db.logMu.Lock()
 	if len(db.logBuf) == 0 {
 		db.logMu.Unlock()
-		return
+		return false
 	}
-	batch := db.logBuf
-	db.logBuf = make([]usageLogEntry, 0, db.GetUsageLogBatchSize())
+	take := len(db.logBuf)
+	if take > batchSize {
+		take = batchSize
+	}
+	batch := make([]usageLogEntry, take)
+	copy(batch, db.logBuf[:take])
+	remaining := len(db.logBuf) - take
+	if remaining == 0 {
+		db.logBuf = make([]usageLogEntry, 0, batchSize)
+	} else {
+		next := make([]usageLogEntry, remaining, remaining+batchSize)
+		copy(next, db.logBuf[take:])
+		db.logBuf = next
+	}
 	db.logMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second) // 增加超时时间
@@ -2872,12 +2909,19 @@ func (db *DB) flushLogs() {
 	if err != nil {
 		log.Printf("批量写入日志失败，已重新放回缓冲区等待重试: %v", err)
 		db.requeueUsageLogBatch(batch)
-		return
+		return false
 	}
 
 	if storedLogCount := countStoredUsageLogs(batch); storedLogCount > 10 {
 		log.Printf("批量写入 %d 条使用日志", storedLogCount)
 	}
+	if remaining > 0 {
+		if drain {
+			return true
+		}
+		db.notifyLogFlush()
+	}
+	return false
 }
 
 func countStoredUsageLogs(batch []usageLogEntry) int {
@@ -2976,8 +3020,9 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 	return nil
 }
 
-// batchInsertLogs 使用 PostgreSQL 的批量插入优化
-// 分批处理以避免 PostgreSQL 65535 参数限制（每行 43 个参数）。
+// batchInsertLogs 使用 PostgreSQL 的批量插入优化。
+// PostgreSQL 单条语句最多 65535 个 bind 参数；usage_logs 当前每行 45 个参数，
+// 因此单条 INSERT 的行数必须稳定低于 floor(65535/45)=1456。
 func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error {
 	if len(batch) == 0 {
 		return nil
@@ -2990,7 +3035,10 @@ func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error 
 	defer tx.Rollback()
 
 	logsToStore := storedUsageLogs(batch)
-	const maxRowsPerBatch = 1500
+	maxRowsPerBatch := maxUsageLogInsertRowsPerSQL
+	if paramSafeRows := postgresMaxBindParams / usageLogInsertColumnCount; paramSafeRows > 0 && maxRowsPerBatch > paramSafeRows {
+		maxRowsPerBatch = paramSafeRows
+	}
 
 	// 分批处理
 	for start := 0; start < len(logsToStore); start += maxRowsPerBatch {
@@ -3024,7 +3072,6 @@ func (db *DB) batchInsertLogsChunk(ctx context.Context, execer sqlExecer, batch 
 
 	// 使用 COPY 或批量 VALUES 优化插入性能
 	valueStrings := make([]string, 0, len(batch))
-	const usageLogInsertColumnCount = 45
 	valueArgs := make([]interface{}, 0, len(batch)*usageLogInsertColumnCount)
 	argIdx := 1
 
