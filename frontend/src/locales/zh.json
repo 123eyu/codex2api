@@ -2457,6 +2457,8 @@
       "overviewDesc": "服务与依赖健康状态",
       "traffic": "流量与调度",
       "trafficDesc": "限流、探针、调度策略与自动暂停",
+      "grok": "Grok 配置",
+      "grokDesc": "Grok 会话粘性、探测、限流重试与 OAuth client_id",
       "runtime": "运行时",
       "runtimeDesc": "WebSocket、优化参数与连接池",
       "storage": "存储与清理",

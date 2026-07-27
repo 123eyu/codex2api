@@ -2457,6 +2457,8 @@
       "overviewDesc": "Service and dependency health",
       "traffic": "Traffic & scheduling",
       "trafficDesc": "Limits, probes, scheduler, auto-pause",
+      "grok": "Grok",
+      "grokDesc": "Grok session affinity, probes, rate-limit retries, and OAuth client_id",
       "runtime": "Runtime",
       "runtimeDesc": "WebSocket, optimisations, connection pool",
       "storage": "Storage & cleanup",

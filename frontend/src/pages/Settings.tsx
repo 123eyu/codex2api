@@ -55,7 +55,6 @@ import {
   Image as ImageIcon,
   Layers,
   Link2,
-  Loader2,
   Palette,
   RefreshCw,
   Save,
@@ -67,6 +66,7 @@ import {
   X,
 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
+import ChannelLogo from '../components/ChannelLogo'
 
 type ModelPanelKey = 'registry' | 'anthropic' | 'codex' | 'reasoning'
 
@@ -1239,7 +1239,6 @@ export default function Settings() {
   const lazyModeActive = settingsForm.lazy_mode
   const [savingSettings, setSavingSettings] = useState(false)
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('idle')
-  const [autoSaveError, setAutoSaveError] = useState('')
   const [testingImageStorage, setTestingImageStorage] = useState(false)
   const [loadedAdminSecret, setLoadedAdminSecret] = useState('')
   const [modelList, setModelList] = useState<string[]>([])
@@ -1326,7 +1325,6 @@ export default function Settings() {
       window.clearTimeout(autoSaveStatusTimerRef.current)
       autoSaveStatusTimerRef.current = null
     }
-    setAutoSaveError('')
     setAutoSaveStatus('saving')
 
     try {
@@ -1358,7 +1356,6 @@ export default function Settings() {
         })
       }
       const message = getErrorMessage(error)
-      setAutoSaveError(message)
       showToast(`${t('settings.autoSaveFailed')}: ${message}`, 'error')
       finishAutoSaveRequest('error')
     }
@@ -1596,31 +1593,6 @@ export default function Settings() {
   const showConnectionPool = isExternalDatabase || isExternalCache
   const canConfigureRemoteMigration = settingsForm.admin_auth_source === 'env' || settingsForm.admin_secret.trim() !== ''
   const saveButtonLabel = savingSettings ? t('common.saving') : t('settings.saveSettings')
-  const autoSaveStatusMeta = autoSaveStatus === 'idle' ? null : (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1 font-medium',
-        autoSaveStatus === 'saving' && 'text-muted-foreground',
-        autoSaveStatus === 'saved' && 'text-emerald-600 dark:text-emerald-400',
-        autoSaveStatus === 'error' && 'text-destructive',
-      )}
-      title={autoSaveStatus === 'error' ? autoSaveError : undefined}
-    >
-      <span
-        className={cn(
-          'size-1.5 rounded-full',
-          autoSaveStatus === 'saving' && 'animate-pulse bg-muted-foreground',
-          autoSaveStatus === 'saved' && 'bg-emerald-500',
-          autoSaveStatus === 'error' && 'bg-destructive',
-        )}
-      />
-      {autoSaveStatus === 'saving'
-        ? t('settings.autoSaving')
-        : autoSaveStatus === 'saved'
-          ? t('settings.autoSaved')
-          : t('settings.autoSaveFailed')}
-    </span>
-  )
   const siteLogoPreview = sanitizeBrandingLogo(settingsForm.site_logo) || DEFAULT_SITE_LOGO
   const backgroundImagePreview = sanitizeBrandingImage(settingsForm.background_image)
   const backgroundIsVideo = isBrandingVideo(backgroundImagePreview)
@@ -1705,6 +1677,7 @@ export default function Settings() {
       [
         { id: 'settings-overview', label: t('settings.nav.overview'), icon: <Activity className="size-4" /> },
         { id: 'settings-traffic', label: t('settings.nav.traffic'), icon: <Gauge className="size-4" /> },
+        { id: 'settings-grok', label: t('settings.nav.grok'), icon: <ChannelLogo channel="grok" size={16} /> },
         { id: 'settings-runtime', label: t('settings.nav.runtime'), icon: <Wrench className="size-4" /> },
         { id: 'settings-storage', label: t('settings.nav.storage'), icon: <ImageIcon className="size-4" /> },
         { id: 'settings-appearance', label: t('settings.nav.appearance'), icon: <Palette className="size-4" /> },
@@ -1850,20 +1823,11 @@ export default function Settings() {
               )
             })}
           </nav>
-          {autoSaveStatusMeta ? (
-            <div className="hidden shrink-0 items-center gap-1.5 rounded-full border border-border/80 bg-card/95 px-3 py-2 text-xs shadow-sm backdrop-blur-xl sm:inline-flex">
-              {autoSaveStatus === 'saving' ? (
-                <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-              ) : null}
-              {autoSaveStatusMeta}
-            </div>
-          ) : null}
         </div>
 
         <PageHeader
           title={t('settings.title')}
           description={t('settings.description')}
-          actionMeta={autoSaveStatusMeta}
           actions={renderSaveButton('shrink-0')}
         />
 
@@ -2140,97 +2104,6 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
-          <SettingsCard title={t('settings.grokSettingsTitle')} description={t('settings.grokSettingsDesc')} icon={<Layers className="size-4" />}>
-            {/* 与「探测调度」一致：表单控件同宽网格，开关单独一行，避免 switch 卡片与 input 混排导致高低宽不一致。 */}
-            <div className="space-y-4">
-              <div className={SETTINGS_FIELD_GRID_3}>
-                <SettingField label={t('settings.grokAffinityMode')} description={t('settings.grokAffinityModeDesc')}>
-                  <Select
-                    value={settingsForm.grok_affinity_mode || 'strict'}
-                    onValueChange={(value) => autoSaveStringField('grok_affinity_mode', value)}
-                    options={grokAffinityModeOptions}
-                  />
-                </SettingField>
-                <SettingField
-                  label={t('settings.grokProbeInterval')}
-                  description={t('settings.grokProbeIntervalDesc')}
-                  suffix={t('settings.unit.min')}
-                >
-                  <DraftNumberInput
-                    min={5}
-                    max={1440}
-                    step={5}
-                    integer
-                    emptyValue={30}
-                    disabled={!settingsForm.grok_probe_enabled}
-                    value={settingsForm.grok_probe_interval_minutes ?? 30}
-                    onValueChange={(value) => {
-                      setSettingsForm(f => ({ ...f, grok_probe_interval_minutes: value }))
-                    }}
-                    onValueCommit={(value) => {
-                      const v = value < 5 ? 5 : value
-                      void autoSaveSettingsPatch({ grok_probe_interval_minutes: v })
-                    }}
-                  />
-                </SettingField>
-                <SettingField
-                  label={t('settings.grokMaxRateLimitRetries')}
-                  description={t('settings.grokMaxRateLimitRetriesDesc')}
-                  suffix={t('settings.unit.times')}
-                >
-                  <DraftNumberInput
-                    min={0}
-                    max={20}
-                    step={1}
-                    integer
-                    emptyValue={0}
-                    value={settingsForm.grok_max_rate_limit_retries ?? 0}
-                    onValueChange={(value) => {
-                      setSettingsForm(f => ({ ...f, grok_max_rate_limit_retries: value }))
-                    }}
-                    onValueCommit={(value) => {
-                      const v = value < 0 ? 0 : value
-                      void autoSaveSettingsPatch({ grok_max_rate_limit_retries: v })
-                    }}
-                  />
-                </SettingField>
-              </div>
-              <div className={SETTINGS_SWITCH_GRID}>
-                <SettingField label={t('settings.grokProbeEnabled')} description={t('settings.grokProbeEnabledDesc')} layout="switch">
-                  <Switch
-                    checked={settingsForm.grok_probe_enabled}
-                    onCheckedChange={(checked) => autoSaveBooleanField('grok_probe_enabled', checked)}
-                  />
-                </SettingField>
-              </div>
-              <div className={SETTINGS_FIELD_GRID_3}>
-                {/* client_id 同时可由环境变量 GROK_OAUTH_CLIENT_ID 指定，且环境变量优先级更高；
-                    被覆盖时这里禁用输入并说明当前生效值，避免用户以为改了却不起作用。 */}
-                <SettingField
-                  className="sm:col-span-2 xl:col-span-3"
-                  label={t('settings.grokOAuthClientId')}
-                  description={
-                    settingsForm.grok_oauth_client_id_env_override
-                      ? t('settings.grokOAuthClientIdEnvOverride', {
-                          value: settingsForm.grok_oauth_client_id_effective || '',
-                        })
-                      : t('settings.grokOAuthClientIdDesc')
-                  }
-                >
-                  <Input
-                    value={settingsForm.grok_oauth_client_id ?? ''}
-                    disabled={settingsForm.grok_oauth_client_id_env_override}
-                    placeholder={t('settings.grokOAuthClientIdPlaceholder')}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                      setSettingsForm(f => ({ ...f, grok_oauth_client_id: e.target.value }))
-                    }
-                    onBlur={(e) => autoSaveStringField('grok_oauth_client_id', e.currentTarget.value.trim())}
-                  />
-                </SettingField>
-              </div>
-            </div>
-          </SettingsCard>
-
           <SettingsCard title={t('settings.globalAutoPauseTitle')} description={t('settings.globalAutoPauseDesc')} icon={<Activity className="size-4" />}>
             <div className="space-y-4">
               <div className={SETTINGS_FIELD_GRID_3}>
@@ -2358,6 +2231,99 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
+          </SettingsSection>
+
+          <SettingsSection id="settings-grok" title={t('settings.nav.grok')} description={t('settings.nav.grokDesc')}>
+          <SettingsCard title={t('settings.grokSettingsTitle')} description={t('settings.grokSettingsDesc')} icon={<ChannelLogo channel="grok" size={16} />}>
+            {/* 与「探测调度」一致：表单控件同宽网格，开关单独一行，避免 switch 卡片与 input 混排导致高低宽不一致。 */}
+            <div className="space-y-4">
+              <div className={SETTINGS_FIELD_GRID_3}>
+                <SettingField label={t('settings.grokAffinityMode')} description={t('settings.grokAffinityModeDesc')}>
+                  <Select
+                    value={settingsForm.grok_affinity_mode || 'strict'}
+                    onValueChange={(value) => autoSaveStringField('grok_affinity_mode', value)}
+                    options={grokAffinityModeOptions}
+                  />
+                </SettingField>
+                <SettingField
+                  label={t('settings.grokProbeInterval')}
+                  description={t('settings.grokProbeIntervalDesc')}
+                  suffix={t('settings.unit.min')}
+                >
+                  <DraftNumberInput
+                    min={5}
+                    max={1440}
+                    step={5}
+                    integer
+                    emptyValue={30}
+                    disabled={!settingsForm.grok_probe_enabled}
+                    value={settingsForm.grok_probe_interval_minutes ?? 30}
+                    onValueChange={(value) => {
+                      setSettingsForm(f => ({ ...f, grok_probe_interval_minutes: value }))
+                    }}
+                    onValueCommit={(value) => {
+                      const v = value < 5 ? 5 : value
+                      void autoSaveSettingsPatch({ grok_probe_interval_minutes: v })
+                    }}
+                  />
+                </SettingField>
+                <SettingField
+                  label={t('settings.grokMaxRateLimitRetries')}
+                  description={t('settings.grokMaxRateLimitRetriesDesc')}
+                  suffix={t('settings.unit.times')}
+                >
+                  <DraftNumberInput
+                    min={0}
+                    max={20}
+                    step={1}
+                    integer
+                    emptyValue={0}
+                    value={settingsForm.grok_max_rate_limit_retries ?? 0}
+                    onValueChange={(value) => {
+                      setSettingsForm(f => ({ ...f, grok_max_rate_limit_retries: value }))
+                    }}
+                    onValueCommit={(value) => {
+                      const v = value < 0 ? 0 : value
+                      void autoSaveSettingsPatch({ grok_max_rate_limit_retries: v })
+                    }}
+                  />
+                </SettingField>
+              </div>
+              <div className={SETTINGS_SWITCH_GRID}>
+                <SettingField label={t('settings.grokProbeEnabled')} description={t('settings.grokProbeEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.grok_probe_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('grok_probe_enabled', checked)}
+                  />
+                </SettingField>
+              </div>
+              <div className={SETTINGS_FIELD_GRID_3}>
+                {/* client_id 同时可由环境变量 GROK_OAUTH_CLIENT_ID 指定，且环境变量优先级更高；
+                    被覆盖时这里禁用输入并说明当前生效值，避免用户以为改了却不起作用。 */}
+                <SettingField
+                  className="sm:col-span-2 xl:col-span-3"
+                  label={t('settings.grokOAuthClientId')}
+                  description={
+                    settingsForm.grok_oauth_client_id_env_override
+                      ? t('settings.grokOAuthClientIdEnvOverride', {
+                          value: settingsForm.grok_oauth_client_id_effective || '',
+                        })
+                      : t('settings.grokOAuthClientIdDesc')
+                  }
+                >
+                  <Input
+                    value={settingsForm.grok_oauth_client_id ?? ''}
+                    disabled={settingsForm.grok_oauth_client_id_env_override}
+                    placeholder={t('settings.grokOAuthClientIdPlaceholder')}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      setSettingsForm(f => ({ ...f, grok_oauth_client_id: e.target.value }))
+                    }
+                    onBlur={(e) => autoSaveStringField('grok_oauth_client_id', e.currentTarget.value.trim())}
+                  />
+                </SettingField>
+              </div>
+            </div>
+          </SettingsCard>
           </SettingsSection>
 
           <SettingsSection id="settings-runtime" title={t('settings.nav.runtime')} description={t('settings.nav.runtimeDesc')}>
