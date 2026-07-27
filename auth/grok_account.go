@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,7 +44,20 @@ const (
 	GrokDefaultOAuthClientID    = "b1a00492-073a-47ea-816f-4c329264a828"
 	GrokDefaultOAuthScope       = "openid profile email offline_access grok-cli:access api:access"
 	GrokDefaultOAuthRedirectURI = "http://127.0.0.1:56121/callback"
+
+	// EnvGrokOAuthClientID 沿用既有 grokEnv 覆盖约定（类比 proxy 包的 GROK_CLIENT_VERSION / GROK_CLIENT_IDENTIFIER）：
+	// 留空回退到 GrokDefaultOAuthClientID，默认行为零变化。服务于多 client_id 部署、灰度对照与端点测试。
+	EnvGrokOAuthClientID = "GROK_OAUTH_CLIENT_ID"
 )
+
+// EffectiveGrokOAuthClientID 返回生效的 OAuth client_id：env GROK_OAUTH_CLIENT_ID 优先
+// （去空格后非空即用），留空回退到官方 Grok CLI 公开 id。未设 env 时仍是 GrokDefaultOAuthClientID。
+func EffectiveGrokOAuthClientID() string {
+	if v := strings.TrimSpace(os.Getenv(EnvGrokOAuthClientID)); v != "" {
+		return v
+	}
+	return GrokDefaultOAuthClientID
+}
 
 func (a *Account) isGrokAPILocked() bool {
 	if a == nil {
@@ -509,7 +523,7 @@ func BuildGrokAuthorizationURL(params GrokAuthURLParams) (string, error) {
 	}
 	clientID := strings.TrimSpace(params.ClientID)
 	if clientID == "" {
-		clientID = GrokDefaultOAuthClientID
+		clientID = EffectiveGrokOAuthClientID()
 	}
 	scope := strings.TrimSpace(params.Scope)
 	if scope == "" {
@@ -600,7 +614,7 @@ func ExchangeGrokAuthorizationCode(ctx context.Context, params GrokExchangeCodeP
 	}
 	clientID := strings.TrimSpace(params.ClientID)
 	if clientID == "" {
-		clientID = GrokDefaultOAuthClientID
+		clientID = EffectiveGrokOAuthClientID()
 	}
 	redirectURI := strings.TrimSpace(params.RedirectURI)
 	if redirectURI == "" {
@@ -817,7 +831,7 @@ func RefreshGrokAccessToken(ctx context.Context, params GrokRefreshParams) (*Gro
 	}
 	if strings.TrimSpace(params.ClientID) == "" {
 		// 浏览器授权链路默认使用 Grok CLI 公开 client_id
-		params.ClientID = GrokDefaultOAuthClientID
+		params.ClientID = EffectiveGrokOAuthClientID()
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
