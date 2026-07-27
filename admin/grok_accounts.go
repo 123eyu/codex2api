@@ -419,7 +419,7 @@ type grokBatchImportItem struct {
 	Error string `json:"error,omitempty"`
 }
 
-const grokBatchImportMaxFiles = 500
+const grokBatchImportMaxFiles = 5000
 
 // BatchImportGrokAccounts 批量导入 Grok 凭据文件（POST /api/admin/accounts/grok/import）。
 // 每个文件独立解析入库，按 subject / refresh_token 去重（批内 + 与现有账号）。
