@@ -1097,6 +1097,56 @@ func TestUpdateSettingsResponseIncludesRetrySettings(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsPersistsWeakNetworkMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousRuntime := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+	settings := defaultBootstrapSettings()
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	store := auth.NewStore(db, tc, settings)
+	t.Cleanup(store.Stop)
+	proxy.ApplyRuntimeSettingsFromSystem(settings)
+	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret")
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/api/admin/settings",
+		strings.NewReader(`{"codex_ws_weak_network_mode":true}`),
+	)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.UpdateSettings(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response settingsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.CodexWSWeakNetworkMode {
+		t.Fatal("response codex_ws_weak_network_mode = false, want true")
+	}
+	if !proxy.CurrentRuntimeSettings().CodexWSWeakNetworkMode {
+		t.Fatal("runtime codex_ws_weak_network_mode = false, want true")
+	}
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	if persisted == nil || !persisted.CodexWSWeakNetworkMode {
+		t.Fatal("persisted codex_ws_weak_network_mode = false, want true")
+	}
+}
+
 func TestPromptFilterAdvancedSettingsRoundTripPreservesUnknownFields(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
