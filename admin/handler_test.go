@@ -422,7 +422,7 @@ func TestBatchRefreshAccountsStreamsProgress(t *testing.T) {
 	handler := &Handler{
 		refreshAccount: func(_ context.Context, id int64) error {
 			if id == 8 {
-				return errors.New("账号 8 不存在")
+				return errors.New("token endpoint returned status 401")
 			}
 			return nil
 		},
@@ -446,6 +446,10 @@ func TestBatchRefreshAccountsStreamsProgress(t *testing.T) {
 		`"type":"progress"`,
 		`"type":"complete"`,
 		`"action":"batch_refresh"`,
+		`"status":"success"`,
+		`"status":"failed"`,
+		`"http_status":200`,
+		`"http_status":401`,
 		`"success":1`,
 		`"failed":1`,
 	} {

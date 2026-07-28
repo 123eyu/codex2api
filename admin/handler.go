@@ -5145,16 +5145,20 @@ func emitBatchRefreshProgress(
 	}
 	current := int(atomic.AddInt64(completedCount, 1))
 	event := batchOperationEvent{
-		Type:      "progress",
-		Action:    "batch_refresh",
-		Current:   current,
-		Total:     total,
-		Success:   atomic.LoadInt64(successCount),
-		Failed:    atomic.LoadInt64(failedCount),
-		AccountID: accountID,
-		Message:   message,
+		Type:       "progress",
+		Action:     "batch_refresh",
+		Status:     "success",
+		HTTPStatus: http.StatusOK,
+		Current:    current,
+		Total:      total,
+		Success:    atomic.LoadInt64(successCount),
+		Failed:     atomic.LoadInt64(failedCount),
+		AccountID:  accountID,
+		Message:    message,
 	}
 	if failed {
+		event.Status = "failed"
+		event.HTTPStatus = batchOperationHTTPStatus(event.Status, message)
 		event.Error = message
 	}
 	onProgress(event)
