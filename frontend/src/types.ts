@@ -660,6 +660,42 @@ export interface OpsOverviewResponse {
     used_bytes: number
     total_bytes: number
     process_bytes: number
+    heap_alloc_bytes?: number
+    heap_inuse_bytes?: number
+    heap_released_bytes?: number
+    num_gc?: number
+  }
+  response_cache?: {
+    effective_config: {
+      generation: number
+      local_max_bytes: number
+      local_max_entry_bytes: number
+      reconstruct_max_bytes: number
+    }
+    applied_config: {
+      generation: number
+      local_max_bytes: number
+      local_max_entry_bytes: number
+      reconstruct_max_bytes: number
+    }
+    entries: number
+    max_entries: number
+    current_bytes: number
+    max_bytes: number
+    high_water_bytes: number
+    largest_entry_bytes: number
+    local_hits: number
+    local_misses: number
+    remote_hits: number
+    remote_misses: number
+    expirations: number
+    count_evictions: number
+    byte_evictions: number
+    oversize_bypasses: number
+    oversize_rejections: number
+    known_unavailable_errors: number
+    last_config_sync_at: ISODateString | ''
+    last_config_sync_error: string
   }
   runtime: {
     goroutines: number
@@ -870,6 +906,10 @@ export interface SystemSettings {
   database_label: string
   cache_driver: string
   cache_label: string
+  response_cache_local_max_bytes: number
+  response_cache_local_max_entry_bytes: number
+  response_cache_reconstruct_max_bytes: number
+  readonly response_cache_config_generation: number
   expired_cleaned?: number
   model_mapping: string
   codex_model_mapping: string

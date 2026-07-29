@@ -892,7 +892,11 @@ func (db *DB) migrate(ctx context.Context) error {
 				usage_probe_concurrency INT DEFAULT 16,
 				usage_probe_responses_fallback_enabled BOOLEAN DEFAULT TRUE,
 				recovery_probe_interval_minutes INT DEFAULT 30,
-			scheduler_mode VARCHAR(20) DEFAULT 'round_robin'
+			scheduler_mode VARCHAR(20) DEFAULT 'round_robin',
+			response_cache_local_max_bytes BIGINT NOT NULL DEFAULT 67108864,
+			response_cache_local_max_entry_bytes BIGINT NOT NULL DEFAULT 8388608,
+			response_cache_reconstruct_max_bytes BIGINT NOT NULL DEFAULT 67108864,
+			response_cache_config_generation BIGINT NOT NULL DEFAULT 1
 		);
 	CREATE TABLE IF NOT EXISTS api_key_scope_counters (
 		api_key_id BIGINT NOT NULL,
@@ -1015,6 +1019,10 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_before_expiry_min INT DEFAULT 60;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS utls_shutdown_timeout_minutes INT DEFAULT 30;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_local_max_bytes BIGINT NOT NULL DEFAULT 67108864;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_local_max_entry_bytes BIGINT NOT NULL DEFAULT 8388608;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_reconstruct_max_bytes BIGINT NOT NULL DEFAULT 67108864;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_config_generation BIGINT NOT NULL DEFAULT 1;
 
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_5h_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_7d_threshold DOUBLE PRECISION DEFAULT 0;

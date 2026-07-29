@@ -46,6 +46,7 @@ type Handler struct {
 	store                  *auth.Store
 	cache                  cache.TokenCache
 	db                     *database.DB
+	cacheCfgStore          responseCacheSettingsStore
 	rateLimiter            *proxy.RateLimiter
 	systemUpdate           *systemUpdater
 	systemUpdateOnce       sync.Once
@@ -60,6 +61,7 @@ type Handler struct {
 	proxyBatchEventSender  func(*gin.Context, proxyBatchTestEvent) bool
 	proxyBatchTestMu       sync.Mutex
 	cpuSampler             *cpuSampler
+	memReader              memStatsReader
 	startedAt              time.Time
 	pgMaxConns             int
 	redisPoolSize          int
@@ -101,6 +103,61 @@ type Handler struct {
 	// Agent Identity 导入互斥锁：串行化 runtime_id 的数据库查重与插入，
 	// 防止并发请求在“检查不存在”后同时建号。
 	agentIdentityImportMu sync.Mutex
+}
+
+type responseCacheSettingsStore interface {
+	GetResponseCacheSettings(context.Context) (database.ResponseCacheSettings, error)
+	UpdateResponseCacheSettings(
+		context.Context,
+		database.ResponseCacheSettingsUpdate,
+	) (database.ResponseCacheSettings, error)
+}
+
+func validateResponseCacheSettingsUpdateRanges(update database.ResponseCacheSettingsUpdate) error {
+	switch {
+	case update.LocalMaxBytes != nil &&
+		(*update.LocalMaxBytes < database.MinResponseCacheLocalMaxBytes ||
+			*update.LocalMaxBytes > database.MaxResponseCacheLocalMaxBytes):
+		return fmt.Errorf(
+			"%w: response_cache_local_max_bytes must be between %d and %d",
+			database.ErrInvalidResponseCacheSettings,
+			database.MinResponseCacheLocalMaxBytes,
+			database.MaxResponseCacheLocalMaxBytes,
+		)
+	case update.LocalMaxEntryBytes != nil &&
+		(*update.LocalMaxEntryBytes < database.MinResponseCacheLocalMaxEntryBytes ||
+			*update.LocalMaxEntryBytes > database.MaxResponseCacheLocalMaxEntryBytes):
+		return fmt.Errorf(
+			"%w: response_cache_local_max_entry_bytes must be between %d and %d",
+			database.ErrInvalidResponseCacheSettings,
+			database.MinResponseCacheLocalMaxEntryBytes,
+			database.MaxResponseCacheLocalMaxEntryBytes,
+		)
+	case update.ReconstructMaxBytes != nil &&
+		(*update.ReconstructMaxBytes < database.MinResponseCacheReconstructMaxBytes ||
+			*update.ReconstructMaxBytes > database.MaxResponseCacheReconstructMaxBytes):
+		return fmt.Errorf(
+			"%w: response_cache_reconstruct_max_bytes must be between %d and %d",
+			database.ErrInvalidResponseCacheSettings,
+			database.MinResponseCacheReconstructMaxBytes,
+			database.MaxResponseCacheReconstructMaxBytes,
+		)
+	default:
+		return nil
+	}
+}
+
+func (h *Handler) cacheSettingsStore() responseCacheSettingsStore {
+	if h == nil {
+		return nil
+	}
+	if h.cacheCfgStore != nil {
+		return h.cacheCfgStore
+	}
+	if h.db == nil {
+		return nil
+	}
+	return h.db
 }
 
 type chartCacheEntry struct {
@@ -402,6 +459,7 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 		store:          store,
 		cache:          tc,
 		db:             db,
+		cacheCfgStore:  db,
 		rateLimiter:    rl,
 		cpuSampler:     newCPUSampler(),
 		startedAt:      time.Now(),
@@ -6921,7 +6979,13 @@ type settingsResponse struct {
 	SmartPacingMinConcurrency          int     `json:"smart_pacing_min_concurrency"`
 	SmartPacingWindows                 string  `json:"smart_pacing_windows"`
 	IgnoreUsageLimitStatus             bool    `json:"ignore_usage_limit_status"`
+	ResponseCacheLocalMaxBytes         int64   `json:"response_cache_local_max_bytes"`
+	ResponseCacheLocalMaxEntryBytes    int64   `json:"response_cache_local_max_entry_bytes"`
+	ResponseCacheReconstructMaxBytes   int64   `json:"response_cache_reconstruct_max_bytes"`
+	ResponseCacheConfigGeneration      int64   `json:"response_cache_config_generation"`
 }
+
+type rawJSON = json.RawMessage
 
 type updateSettingsReq struct {
 	SiteName                            *string  `json:"site_name"`
@@ -7040,6 +7104,10 @@ type updateSettingsReq struct {
 	SmartPacingMinConcurrency           *int     `json:"smart_pacing_min_concurrency"`
 	SmartPacingWindows                  *string  `json:"smart_pacing_windows"`
 	IgnoreUsageLimitStatus              *bool    `json:"ignore_usage_limit_status"`
+	ResponseCacheLocalMaxBytes          *int64   `json:"response_cache_local_max_bytes"`
+	ResponseCacheLocalMaxEntryBytes     *int64   `json:"response_cache_local_max_entry_bytes"`
+	ResponseCacheReconstructMaxBytes    *int64   `json:"response_cache_reconstruct_max_bytes"`
+	ResponseCacheConfigGeneration       rawJSON  `json:"response_cache_config_generation"`
 }
 
 type brandingResponse struct {
@@ -7552,6 +7620,16 @@ func (h *Handler) GetObservedInstructions(c *gin.Context) {
 func (h *Handler) GetSettings(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
+	cacheSettingsStore := h.cacheSettingsStore()
+	if cacheSettingsStore == nil {
+		writeError(c, http.StatusInternalServerError, "响应缓存设置存储不可用")
+		return
+	}
+	responseCacheSettings, err := cacheSettingsStore.GetResponseCacheSettings(ctx)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "读取响应缓存设置失败："+err.Error())
+		return
+	}
 	dbSettings, _ := h.db.GetSystemSettings(ctx)
 	_, adminAuthSource := h.resolveAdminSecret(c.Request.Context())
 	adminSecret := ""
@@ -7608,6 +7686,10 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		TestModel:                           h.store.GetTestModel(),
 		TestContent:                         h.store.GetTestContent(),
 		TestConcurrency:                     h.store.GetTestConcurrency(),
+		ResponseCacheLocalMaxBytes:          responseCacheSettings.LocalMaxBytes,
+		ResponseCacheLocalMaxEntryBytes:     responseCacheSettings.LocalMaxEntryBytes,
+		ResponseCacheReconstructMaxBytes:    responseCacheSettings.ReconstructMaxBytes,
+		ResponseCacheConfigGeneration:       responseCacheSettings.Generation,
 		BackgroundRefreshIntervalMinutes:    h.store.GetBackgroundRefreshIntervalMinutes(),
 		UsageProbeMaxAgeMinutes:             h.store.GetUsageProbeMaxAgeMinutes(),
 		UsageProbeConcurrency:               h.store.GetUsageProbeConcurrency(),
@@ -7733,6 +7815,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 	h.settingsUpdateMu.Lock()
 	defer h.settingsUpdateMu.Unlock()
+	if req.ResponseCacheConfigGeneration != nil {
+		writeError(c, http.StatusBadRequest, "response_cache_config_generation 为只读字段")
+		return
+	}
 	if req.AutoPause5hThreshold != nil {
 		if err := validateAutoPauseThreshold("auto_pause_5h_threshold", *req.AutoPause5hThreshold); err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())
@@ -7777,6 +7863,42 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, "auto_reset_credits_before_expiry_min 需在 10 到 10080 分钟之间")
 			return
 		}
+	}
+
+	responseCacheUpdate := database.ResponseCacheSettingsUpdate{
+		LocalMaxBytes:       req.ResponseCacheLocalMaxBytes,
+		LocalMaxEntryBytes:  req.ResponseCacheLocalMaxEntryBytes,
+		ReconstructMaxBytes: req.ResponseCacheReconstructMaxBytes,
+	}
+	responseCacheUpdateRequested := responseCacheUpdate.LocalMaxBytes != nil ||
+		responseCacheUpdate.LocalMaxEntryBytes != nil ||
+		responseCacheUpdate.ReconstructMaxBytes != nil
+	if err := validateResponseCacheSettingsUpdateRanges(responseCacheUpdate); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	cacheSettingsStore := h.cacheSettingsStore()
+	if cacheSettingsStore == nil {
+		writeError(c, http.StatusInternalServerError, "响应缓存设置存储不可用")
+		return
+	}
+	responseCacheSettings, err := cacheSettingsStore.GetResponseCacheSettings(c.Request.Context())
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "读取响应缓存设置失败："+err.Error())
+		return
+	}
+	if responseCacheUpdate.LocalMaxBytes != nil {
+		responseCacheSettings.LocalMaxBytes = *responseCacheUpdate.LocalMaxBytes
+	}
+	if responseCacheUpdate.LocalMaxEntryBytes != nil {
+		responseCacheSettings.LocalMaxEntryBytes = *responseCacheUpdate.LocalMaxEntryBytes
+	}
+	if responseCacheUpdate.ReconstructMaxBytes != nil {
+		responseCacheSettings.ReconstructMaxBytes = *responseCacheUpdate.ReconstructMaxBytes
+	}
+	if err := database.ValidateResponseCacheSettings(responseCacheSettings); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	currentAdminSecret := ""
@@ -8648,7 +8770,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	// 持久化保存到数据库
-	err := h.db.UpdateSystemSettings(c.Request.Context(), &database.SystemSettings{
+	err = h.db.UpdateSystemSettings(c.Request.Context(), &database.SystemSettings{
 		SiteName:                            siteName,
 		SiteLogo:                            siteLogo,
 		MaxConcurrency:                      h.store.GetMaxConcurrency(),
@@ -8756,6 +8878,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
+		if responseCacheUpdateRequested {
+			writeError(c, http.StatusInternalServerError, "保存响应缓存设置前无法持久化系统设置")
+			return
+		}
 		if promptFilterChanged {
 			writeError(c, http.StatusInternalServerError, "保存 Prompt 检查设置失败，设置未生效")
 			return
@@ -8786,6 +8912,30 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 	}
 
+	if responseCacheUpdateRequested {
+		committed, updateErr := cacheSettingsStore.UpdateResponseCacheSettings(
+			c.Request.Context(),
+			responseCacheUpdate,
+		)
+		if updateErr != nil {
+			if errors.Is(updateErr, database.ErrInvalidResponseCacheSettings) {
+				writeError(c, http.StatusBadRequest, updateErr.Error())
+			} else {
+				writeError(c, http.StatusInternalServerError, "保存响应缓存设置失败："+updateErr.Error())
+			}
+			return
+		}
+		responseCacheSettings = committed
+		proxy.ApplyResponseCacheSettings(committed)
+	} else {
+		latest, readErr := cacheSettingsStore.GetResponseCacheSettings(c.Request.Context())
+		if readErr != nil {
+			writeError(c, http.StatusInternalServerError, "读取响应缓存设置失败："+readErr.Error())
+			return
+		}
+		responseCacheSettings = latest
+	}
+
 	if h.store.GetAutoCleanUnauthorized() || h.store.GetAutoCleanRateLimited() || h.store.GetAutoCleanError() {
 		h.store.TriggerAutoCleanupAsync()
 	}
@@ -8812,6 +8962,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		TestModel:                           h.store.GetTestModel(),
 		TestContent:                         h.store.GetTestContent(),
 		TestConcurrency:                     h.store.GetTestConcurrency(),
+		ResponseCacheLocalMaxBytes:          responseCacheSettings.LocalMaxBytes,
+		ResponseCacheLocalMaxEntryBytes:     responseCacheSettings.LocalMaxEntryBytes,
+		ResponseCacheReconstructMaxBytes:    responseCacheSettings.ReconstructMaxBytes,
+		ResponseCacheConfigGeneration:       responseCacheSettings.Generation,
 		BackgroundRefreshIntervalMinutes:    h.store.GetBackgroundRefreshIntervalMinutes(),
 		UsageProbeMaxAgeMinutes:             h.store.GetUsageProbeMaxAgeMinutes(),
 		UsageProbeConcurrency:               h.store.GetUsageProbeConcurrency(),

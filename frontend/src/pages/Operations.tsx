@@ -19,8 +19,10 @@ import OpsTabs from '../components/OpsTabs'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import type { OpsOverviewResponse } from '../types'
+import { cacheUtilizationPercent, formatIECBytes } from '../lib/responseCacheMetrics'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { cn } from '@/lib/utils'
 
 type MetricTone = 'normal' | 'warning' | 'danger' | 'info'
 
@@ -99,7 +101,26 @@ export default function Operations() {
                   <OpsMetricCard
                     label={t('ops.memory')}
                     value={`${overview.memory.percent.toFixed(1)}%`}
-                    sub={`${t('ops.memoryUsage', { used: formatBytes(overview.memory.used_bytes), total: formatBytes(overview.memory.total_bytes) })} · ${t('ops.processMemory', { size: formatBytes(overview.memory.process_bytes) })}`}
+                    sub={
+                      <div className="space-y-1">
+                        <div>
+                          {t('ops.memoryUsage', {
+                            used: formatIECBytes(overview.memory.used_bytes),
+                            total: formatIECBytes(overview.memory.total_bytes),
+                          })} · {t('ops.processMemory', { size: formatIECBytes(overview.memory.process_bytes) })}
+                        </div>
+                        {typeof overview.memory.heap_alloc_bytes === 'number' ? (
+                          <div>
+                            {t('ops.goHeap', {
+                              alloc: formatIECBytes(overview.memory.heap_alloc_bytes),
+                              inuse: formatIECBytes(overview.memory.heap_inuse_bytes ?? 0),
+                              released: formatIECBytes(overview.memory.heap_released_bytes ?? 0),
+                              count: formatNumber(overview.memory.num_gc ?? 0),
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
+                    }
                     icon={<HardDrive className="size-5" />}
                     tone={getPercentTone(overview.memory.percent, 75, 90)}
                     t={t}
@@ -171,10 +192,185 @@ export default function Operations() {
                 </div>
               </CardContent>
             </Card>
+            <ResponseCacheCard cache={overview.response_cache} t={t} />
           </>
         ) : null}
       </>
     </StateShell>
+  )
+}
+
+type ResponseCacheOverview = NonNullable<OpsOverviewResponse['response_cache']>
+
+function ResponseCacheCard({
+  cache,
+  t,
+}: {
+  cache?: ResponseCacheOverview
+  t: (key: string, options?: Record<string, unknown>) => string
+}) {
+  if (!cache) {
+    return (
+      <Card className="mt-6">
+        <CardContent className="p-6">
+          <h3 className="text-base font-semibold text-foreground">{t('ops.responseCache.title')}</h3>
+          <p className="mt-1 text-sm text-muted-foreground">{t('ops.responseCache.unavailable')}</p>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  const maxBytes = cache.max_bytes || cache.applied_config.local_max_bytes
+  const utilization = cacheUtilizationPercent(cache.current_bytes, maxBytes)
+  const syncTone: MetricTone = cache.last_config_sync_error
+    ? 'danger'
+    : cache.effective_config.generation !== cache.applied_config.generation
+      ? 'warning'
+      : cache.last_config_sync_at
+        ? 'normal'
+        : 'info'
+  const syncLabel = cache.last_config_sync_error
+    ? t('ops.responseCache.syncError')
+    : cache.effective_config.generation !== cache.applied_config.generation
+      ? t('ops.responseCache.syncPending')
+      : cache.last_config_sync_at
+        ? t('ops.responseCache.syncHealthy')
+        : t('ops.responseCache.syncWaiting')
+  const syncStyle = {
+    normal: 'bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]',
+    warning: 'bg-amber-500/10 text-amber-600',
+    danger: 'bg-destructive/10 text-destructive',
+    info: 'bg-primary/10 text-primary',
+  }[syncTone]
+
+  return (
+    <Card className="mt-6">
+      <CardContent className="p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-foreground">{t('ops.responseCache.title')}</h3>
+            <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{t('ops.responseCache.description')}</p>
+          </div>
+          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${syncStyle}`}>
+            <span className={cn('size-2 rounded-full', syncTone === 'danger' ? 'bg-destructive' : syncTone === 'warning' ? 'bg-amber-500' : syncTone === 'info' ? 'bg-primary' : 'bg-emerald-500')} />
+            {syncLabel}
+          </span>
+        </div>
+
+        <div className="mt-5 grid gap-3 md:grid-cols-3">
+          <div className="rounded-lg border border-border/80 bg-muted/20 p-4 md:col-span-2">
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <span className="font-semibold text-foreground">{t('ops.responseCache.logicalBudget')}</span>
+              <span className="font-semibold tabular-nums text-foreground">
+                {formatIECBytes(cache.current_bytes)} / {formatIECBytes(maxBytes)}
+              </span>
+            </div>
+            <div
+              className="mt-3 h-2 overflow-hidden rounded-full bg-muted"
+              role="progressbar"
+              aria-label={t('ops.responseCache.logicalBudget')}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(utilization)}
+            >
+              <div
+                className={cn(
+                  'h-full rounded-full transition-[width] duration-300',
+                  utilization >= 90 ? 'bg-destructive' : utilization >= 75 ? 'bg-amber-500' : 'bg-primary',
+                )}
+                style={{ width: `${utilization}%` }}
+              />
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {t('ops.responseCache.logicalBudgetHint', { percent: utilization.toFixed(1) })}
+            </p>
+          </div>
+          <div className="rounded-lg border border-border/80 bg-muted/20 p-4">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              {t('ops.responseCache.entries')}
+            </div>
+            <div className="mt-2 text-2xl font-bold tabular-nums text-foreground">
+              {formatNumber(cache.entries)} / {formatNumber(cache.max_entries)}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {t('ops.responseCache.generations', {
+                effective: cache.effective_config.generation,
+                applied: cache.applied_config.generation,
+              })}
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <CacheMetricTile
+            label={t('ops.responseCache.highWater')}
+            value={formatIECBytes(cache.high_water_bytes)}
+            sub={t('ops.responseCache.highWaterSub', { max: formatIECBytes(maxBytes) })}
+          />
+          <CacheMetricTile
+            label={t('ops.responseCache.largestEntry')}
+            value={formatIECBytes(cache.largest_entry_bytes)}
+            sub={t('ops.responseCache.entryLimit', { max: formatIECBytes(cache.applied_config.local_max_entry_bytes) })}
+          />
+          <CacheMetricTile
+            label={t('ops.responseCache.localLookup')}
+            value={`${formatNumber(cache.local_hits)} / ${formatNumber(cache.local_misses)}`}
+            sub={t('ops.responseCache.hitMiss')}
+          />
+          <CacheMetricTile
+            label={t('ops.responseCache.remoteLookup')}
+            value={`${formatNumber(cache.remote_hits)} / ${formatNumber(cache.remote_misses)}`}
+            sub={t('ops.responseCache.hitMiss')}
+          />
+          <CacheMetricTile
+            label={t('ops.responseCache.expirations')}
+            value={formatNumber(cache.expirations)}
+            sub={t('ops.responseCache.absoluteTTL')}
+          />
+          <CacheMetricTile
+            label={t('ops.responseCache.evictions')}
+            value={`${formatNumber(cache.count_evictions)} / ${formatNumber(cache.byte_evictions)}`}
+            sub={t('ops.responseCache.countByte')}
+          />
+          <CacheMetricTile
+            label={t('ops.responseCache.oversize')}
+            value={`${formatNumber(cache.oversize_bypasses)} / ${formatNumber(cache.oversize_rejections)}`}
+            sub={t('ops.responseCache.bypassRejection')}
+          />
+          <CacheMetricTile
+            label={t('ops.responseCache.unavailableErrors')}
+            value={formatNumber(cache.known_unavailable_errors)}
+            sub={cache.last_config_sync_at
+              ? t('ops.responseCache.lastSync', { time: formatDateTimeLabel(cache.last_config_sync_at) })
+              : t('ops.responseCache.neverSynced')}
+          />
+        </div>
+
+        {cache.last_config_sync_error ? (
+          <p role="alert" className="mt-4 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            {t('ops.responseCache.syncErrorDetail', { error: cache.last_config_sync_error })}
+          </p>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}
+
+function CacheMetricTile({
+  label,
+  value,
+  sub,
+}: {
+  label: string
+  value: string
+  sub: string
+}) {
+  return (
+    <div className="rounded-lg border border-border/70 bg-card px-3.5 py-3">
+      <div className="text-xs font-semibold text-muted-foreground">{label}</div>
+      <div className="mt-2 text-lg font-bold tabular-nums text-foreground">{value}</div>
+      <div className="mt-1 text-xs leading-relaxed text-muted-foreground">{sub}</div>
+    </div>
   )
 }
 
@@ -188,7 +384,7 @@ function OpsMetricCard({
 }: {
   label: string
   value: string
-  sub: string
+  sub: React.ReactNode
   icon: React.ReactNode
   tone: MetricTone
   t: (key: string) => string
@@ -272,20 +468,16 @@ function getCacheTone(overview: OpsOverviewResponse): MetricTone {
   return getPercentTone(overview.redis.usage_percent, 70, 90)
 }
 
-function formatBytes(bytes: number): string {
-  if (!bytes) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let value = bytes
-  let unitIndex = 0
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024
-    unitIndex++
-  }
-  return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
-}
-
 function formatNumber(value: number): string {
   return value.toLocaleString()
+}
+
+function formatDateTimeLabel(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) {
+    return '--'
+  }
+  return date.toLocaleString()
 }
 
 function formatTimeLabel(iso: string): string {

@@ -146,6 +146,7 @@ type opsOverviewResponse struct {
 	Postgres       opsDatabaseResponse `json:"postgres"`
 	Redis          opsRedisResponse    `json:"redis"`
 	Traffic        opsTrafficResponse  `json:"traffic"`
+	ResponseCache  opsResponseCache    `json:"response_cache"`
 }
 
 type opsCPUResponse struct {
@@ -154,10 +155,44 @@ type opsCPUResponse struct {
 }
 
 type opsMemoryResponse struct {
-	Percent      float64 `json:"percent"`
-	UsedBytes    uint64  `json:"used_bytes"`
-	TotalBytes   uint64  `json:"total_bytes"`
-	ProcessBytes uint64  `json:"process_bytes"`
+	Percent           float64 `json:"percent"`
+	UsedBytes         uint64  `json:"used_bytes"`
+	TotalBytes        uint64  `json:"total_bytes"`
+	ProcessBytes      uint64  `json:"process_bytes"`
+	HeapAllocBytes    uint64  `json:"heap_alloc_bytes"`
+	HeapInuseBytes    uint64  `json:"heap_inuse_bytes"`
+	HeapReleasedBytes uint64  `json:"heap_released_bytes"`
+	NumGC             uint32  `json:"num_gc"`
+}
+
+type opsResponseCacheConfig struct {
+	Generation          int64 `json:"generation"`
+	LocalMaxBytes       int64 `json:"local_max_bytes"`
+	LocalMaxEntryBytes  int64 `json:"local_max_entry_bytes"`
+	ReconstructMaxBytes int64 `json:"reconstruct_max_bytes"`
+}
+
+type opsResponseCache struct {
+	EffectiveConfig        opsResponseCacheConfig `json:"effective_config"`
+	AppliedConfig          opsResponseCacheConfig `json:"applied_config"`
+	Entries                int                    `json:"entries"`
+	MaxEntries             int                    `json:"max_entries"`
+	CurrentBytes           int64                  `json:"current_bytes"`
+	MaxBytes               int64                  `json:"max_bytes"`
+	HighWaterBytes         int64                  `json:"high_water_bytes"`
+	LargestEntryBytes      int64                  `json:"largest_entry_bytes"`
+	LocalHits              uint64                 `json:"local_hits"`
+	LocalMisses            uint64                 `json:"local_misses"`
+	RemoteHits             uint64                 `json:"remote_hits"`
+	RemoteMisses           uint64                 `json:"remote_misses"`
+	Expirations            uint64                 `json:"expirations"`
+	CountEvictions         uint64                 `json:"count_evictions"`
+	ByteEvictions          uint64                 `json:"byte_evictions"`
+	OversizeBypasses       uint64                 `json:"oversize_bypasses"`
+	OversizeRejections     uint64                 `json:"oversize_rejections"`
+	KnownUnavailableErrors uint64                 `json:"known_unavailable_errors"`
+	LastConfigSyncAt       string                 `json:"last_config_sync_at"`
+	LastConfigSyncError    string                 `json:"last_config_sync_error"`
 }
 
 type opsRuntimeResponse struct {
