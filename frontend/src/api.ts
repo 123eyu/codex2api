@@ -864,6 +864,8 @@ export const api = {
     request<MessageResponse>(`/proxies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   batchDeleteProxies: (ids: number[]) =>
     request<{ message: string; deleted: number }>('/proxies/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
+  cleanErrorProxies: () =>
+    request<{ message: string; cleaned: number; unbound: number }>('/proxies/clean-error', { method: 'POST' }),
   testProxy: (url: string, id?: number, lang?: string) =>
     request<ProxyTestResult>('/proxies/test', { method: 'POST', body: JSON.stringify({ url, id, lang }) }),
   // OAuth
@@ -884,6 +886,7 @@ export interface ProxyRow {
   test_ip: string
   test_location: string
   test_latency_ms: number
+  test_status: 'untested' | 'success' | 'error'
 }
 
 export interface ProxyTestResult {

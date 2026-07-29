@@ -299,7 +299,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			test_ip TEXT DEFAULT '',
 			test_location TEXT DEFAULT '',
-			test_latency_ms INTEGER DEFAULT 0
+			test_latency_ms INTEGER DEFAULT 0,
+			test_status TEXT NOT NULL DEFAULT 'untested'
 		);`,
 		`CREATE TABLE IF NOT EXISTS account_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -588,11 +589,20 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"proxies", "test_ip", "TEXT DEFAULT ''"},
 		{"proxies", "test_location", "TEXT DEFAULT ''"},
 		{"proxies", "test_latency_ms", "INTEGER DEFAULT 0"},
+		{"proxies", "test_status", "TEXT NOT NULL DEFAULT 'untested'"},
 	}
 	for _, column := range columns {
 		if err := db.ensureSQLiteColumn(ctx, column.table, column.name, column.def); err != nil {
 			return err
 		}
+	}
+	if _, err := db.conn.ExecContext(ctx, `
+		UPDATE proxies
+		SET test_status = 'success'
+		WHERE COALESCE(test_status, 'untested') = 'untested'
+		  AND (COALESCE(test_ip, '') <> '' OR COALESCE(test_location, '') <> '' OR COALESCE(test_latency_ms, 0) > 0)
+	`); err != nil {
+		return err
 	}
 
 	indexStatements := []string{

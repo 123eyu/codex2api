@@ -16,6 +16,7 @@ import {
   Unlink,
   Search,
   Users,
+  Power,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,7 @@ import {
   usePersistedPageSize,
 } from "../hooks/usePersistedPageSize";
 import { useToast } from "../hooks/useToast";
+import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { getErrorMessage } from "../utils/error";
 
 const TEST_ALL_CONCURRENCY = 4;
@@ -128,9 +130,42 @@ function maskUrl(url: string): string {
   }
 }
 
+function ProxyStatusBadge({
+  proxy,
+}: {
+  proxy: ProxyRow;
+}) {
+  const { t } = useTranslation();
+  const isError = proxy.test_status === "error";
+  const styles = isError
+    ? "border-destructive/25 bg-destructive/10 text-destructive"
+    : proxy.enabled
+      ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+      : "border-border bg-muted/50 text-muted-foreground";
+  const dot = isError
+    ? "bg-destructive"
+    : proxy.enabled
+      ? "bg-emerald-500"
+      : "bg-muted-foreground/50";
+  const label = isError
+    ? t("proxies.testStatusError")
+    : proxy.enabled
+      ? t("proxies.enabled")
+      : t("proxies.disabled");
+  const className = `inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-all ${styles}`;
+
+  return (
+    <span className={className}>
+      <span className={`size-1.5 rounded-full ${dot}`} />
+      {label}
+    </span>
+  );
+}
+
 export default function Proxies() {
   const { t, i18n } = useTranslation();
   const { showToast } = useToast();
+  const { confirm, confirmDialog } = useConfirmDialog();
   const [proxies, setProxies] = useState<ProxyRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [poolEnabled, setPoolEnabled] = useState(false);
@@ -143,6 +178,7 @@ export default function Proxies() {
   const [testAllLoading, setTestAllLoading] = useState(false);
   const [testAllDone, setTestAllDone] = useState(0);
   const [testAllFailed, setTestAllFailed] = useState(0);
+  const [cleaningErrors, setCleaningErrors] = useState(false);
   const [page, setPage] = useState(1);
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS;
   const [pageSize, setPageSize] = usePersistedPageSize(
@@ -452,6 +488,7 @@ export default function Proxies() {
   };
 
   const handleTest = async (p: ProxyRow) => {
+    if (cleaningErrors) return;
     setTestingIds((prev) => new Set(prev).add(p.id));
     try {
       const result = await api.testProxy(p.url, p.id, ipApiLang);
@@ -459,7 +496,13 @@ export default function Proxies() {
         setProxies((prev) =>
           prev.map((px) =>
             px.id === p.id
-              ? { ...px, test_ip: "", test_location: "", test_latency_ms: 0 }
+              ? {
+                  ...px,
+                  test_status: "error",
+                  test_ip: "",
+                  test_location: "",
+                  test_latency_ms: 0,
+                }
               : px,
           ),
         );
@@ -478,6 +521,7 @@ export default function Proxies() {
                   test_ip: result.ip || "",
                   test_location: result.location || "",
                   test_latency_ms: result.latency_ms || 0,
+                  test_status: "success",
                 }
               : px,
           ),
@@ -497,6 +541,7 @@ export default function Proxies() {
   };
 
   const handleTestAll = async () => {
+    if (cleaningErrors) return;
     setTestAllLoading(true);
     setTestAllDone(0);
     setTestAllFailed(0);
@@ -516,7 +561,13 @@ export default function Proxies() {
           setProxies((prev) =>
             prev.map((px) =>
               px.id === p.id
-                ? { ...px, test_ip: "", test_location: "", test_latency_ms: 0 }
+                ? {
+                    ...px,
+                    test_status: "error",
+                    test_ip: "",
+                    test_location: "",
+                    test_latency_ms: 0,
+                  }
                 : px,
             ),
           );
@@ -529,6 +580,7 @@ export default function Proxies() {
                     test_ip: result.ip || "",
                     test_location: result.location || "",
                     test_latency_ms: result.latency_ms || 0,
+                    test_status: "success",
                   }
                 : px,
             ),
@@ -573,6 +625,41 @@ export default function Proxies() {
     setTestAllLoading(false);
   };
 
+  const errorCount = proxies.filter((p) => p.test_status === "error").length;
+  const testsRunning = testAllLoading || testingIds.size > 0;
+
+  const handleCleanErrors = async () => {
+    if (errorCount === 0 || testsRunning || cleaningErrors) return;
+    const confirmed = await confirm({
+      title: t("proxies.cleanErrorTitle"),
+      description: t("proxies.cleanErrorDesc", { count: errorCount }),
+      confirmText: t("proxies.cleanErrorConfirm"),
+      tone: "destructive",
+      confirmVariant: "destructive",
+    });
+    if (!confirmed) return;
+
+    setCleaningErrors(true);
+    try {
+      const result = await api.cleanErrorProxies();
+      setSelected(new Set());
+      showToast(
+        t("proxies.cleanErrorSuccess", {
+          count: result.cleaned,
+          unbound: result.unbound,
+        }),
+      );
+      await reload();
+    } catch (error) {
+      showToast(
+        t("proxies.cleanErrorFailed", { error: getErrorMessage(error) }),
+        "error",
+      );
+    } finally {
+      setCleaningErrors(false);
+    }
+  };
+
   const allSelected =
     pagedProxies.length > 0 && pagedProxies.every((p) => selected.has(p.id));
   const toggleSelectAll = () => {
@@ -592,10 +679,16 @@ export default function Proxies() {
   };
 
   const enabledCount = proxies.filter((p) => p.enabled).length;
-  const canEnable = enabledCount > 0;
+  const untestedCount = proxies.filter(
+    (p) => !p.test_status || p.test_status === "untested",
+  ).length;
+  const canEnable = proxies.some(
+    (p) => p.enabled && p.test_status !== "error",
+  );
 
   return (
     <div className="space-y-6">
+      {confirmDialog}
       {/* Header */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
@@ -649,10 +742,27 @@ export default function Proxies() {
             </button>
           )}
 
+          {errorCount > 0 && (
+            <button
+              onClick={handleCleanErrors}
+              disabled={cleaningErrors || testsRunning}
+              className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {cleaningErrors ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <AlertTriangle className="size-4" />
+              )}
+              {cleaningErrors
+                ? t("proxies.cleaningErrors")
+                : t("proxies.cleanErrors", { count: errorCount })}
+            </button>
+          )}
+
           {proxies.length > 0 && (
             <button
               onClick={handleTestAll}
-              disabled={testAllLoading}
+              disabled={testAllLoading || cleaningErrors}
               className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-muted/50 disabled:opacity-50"
             >
               {testAllLoading ? (
@@ -750,13 +860,11 @@ export default function Proxies() {
         </Card>
         <Card className="py-0">
           <CardContent className="p-4 text-center">
-            <div
-              className={`text-2xl font-bold ${poolEnabled ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}
-            >
-              {poolEnabled ? t("proxies.roundRobin") : t("proxies.off")}
+            <div className="text-2xl font-bold tabular-nums text-amber-600 dark:text-amber-400">
+              {untestedCount}
             </div>
             <div className="text-xs text-muted-foreground mt-1">
-              {t("proxies.poolStatus")}
+              {t("proxies.untestedCount")}
             </div>
           </CardContent>
         </Card>
@@ -828,21 +936,7 @@ export default function Proxies() {
                           </div>
 
                           <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                            <button
-                              onClick={() => handleToggle(p)}
-                              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-all ${
-                                p.enabled
-                                  ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                                  : "border-border bg-muted/50 text-muted-foreground"
-                              }`}
-                            >
-                              <span
-                                className={`size-1.5 rounded-full ${p.enabled ? "bg-emerald-500" : "bg-muted-foreground/50"}`}
-                              />
-                              {p.enabled
-                                ? t("proxies.enabled")
-                                : t("proxies.disabled")}
-                            </button>
+                            <ProxyStatusBadge proxy={p} />
                             <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-xs font-medium text-muted-foreground">
                               <Users className="size-3" />
                               {t("proxies.boundCount", {
@@ -884,7 +978,7 @@ export default function Proxies() {
                             </button>
                             <button
                               onClick={() => handleTest(p)}
-                              disabled={isTesting}
+                              disabled={isTesting || cleaningErrors}
                               className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-border px-2.5 text-xs font-medium text-foreground hover:bg-muted/50 disabled:opacity-50"
                             >
                               {isTesting ? (
@@ -893,6 +987,19 @@ export default function Proxies() {
                                 <Play className="size-3.5" />
                               )}
                               {t("proxies.test")}
+                            </button>
+                            <button
+                              onClick={() => handleToggle(p)}
+                              className={`inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+                                p.enabled
+                                  ? "border-amber-500/25 text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
+                                  : "border-emerald-500/25 text-emerald-600 hover:bg-emerald-500/10 dark:text-emerald-400"
+                              }`}
+                            >
+                              <Power className="size-3.5" />
+                              {p.enabled
+                                ? t("proxies.disableAction")
+                                : t("proxies.enableAction")}
                             </button>
                             <button
                               onClick={() => handleDelete(p.id)}
@@ -996,21 +1103,7 @@ export default function Proxies() {
                             </div>
                           </td>
                           <td className="p-3">
-                            <button
-                              onClick={() => handleToggle(p)}
-                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all ${
-                                p.enabled
-                                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-                                  : "bg-muted/50 text-muted-foreground border border-border"
-                              }`}
-                            >
-                              <span
-                                className={`size-1.5 rounded-full ${p.enabled ? "bg-emerald-500" : "bg-muted-foreground/50"}`}
-                              />
-                              {p.enabled
-                                ? t("proxies.enabled")
-                                : t("proxies.disabled")}
-                            </button>
+                            <ProxyStatusBadge proxy={p} />
                           </td>
                           {/* Bound accounts */}
                           <td className="p-3">
@@ -1086,7 +1179,7 @@ export default function Proxies() {
                               </button>
                               <button
                                 onClick={() => handleTest(p)}
-                                disabled={isTesting}
+                                disabled={isTesting || cleaningErrors}
                                 className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-50"
                                 title={t("proxies.testProxy")}
                               >
@@ -1096,6 +1189,24 @@ export default function Proxies() {
                                   <Play className="size-3.5" />
                                 )}
                                 {t("proxies.test")}
+                              </button>
+                              <button
+                                onClick={() => handleToggle(p)}
+                                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                                  p.enabled
+                                    ? "border-amber-500/25 text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
+                                    : "border-emerald-500/25 text-emerald-600 hover:bg-emerald-500/10 dark:text-emerald-400"
+                                }`}
+                                title={
+                                  p.enabled
+                                    ? t("proxies.disableAction")
+                                    : t("proxies.enableAction")
+                                }
+                              >
+                                <Power className="size-3.5" />
+                                {p.enabled
+                                  ? t("proxies.disableAction")
+                                  : t("proxies.enableAction")}
                               </button>
                               <button
                                 onClick={() => handleDelete(p.id)}
