@@ -332,6 +332,7 @@ type GrokImportedCredential struct {
 	AccessToken   string
 	RefreshToken  string
 	APIKey        string
+	PlanType      string
 	ClientID      string
 	TokenEndpoint string
 	OIDCIssuer    string
@@ -420,6 +421,7 @@ func parseGrokCredentialNode(scope string, node map[string]any) (*GrokImportedCr
 	cred := &GrokImportedCredential{
 		AccessToken:   access,
 		RefreshToken:  refresh,
+		PlanType:      GrokPlanTypeFromAccessToken(access),
 		ClientID:      grokFirstString(node, "client_id", "clientId", "oidc_client_id", "oidcClientId"),
 		TokenEndpoint: grokFirstString(node, "token_endpoint", "tokenEndpoint"),
 		OIDCIssuer:    strings.TrimRight(grokFirstString(node, "oidc_issuer", "oidcIssuer", "issuer"), "/"),
@@ -541,6 +543,7 @@ type GrokTokenData struct {
 	AccessToken  string
 	RefreshToken string // 上游轮换时非空
 	IDToken      string
+	PlanType     string
 	ExpiresAt    time.Time
 }
 
@@ -746,6 +749,7 @@ func ExchangeGrokAuthorizationCode(ctx context.Context, params GrokExchangeCodeP
 		AccessToken:  payload.AccessToken,
 		RefreshToken: payload.RefreshToken,
 		IDToken:      payload.IDToken,
+		PlanType:     GrokPlanTypeFromAccessToken(payload.AccessToken),
 		ExpiresAt:    expiresAt,
 	}, nil
 }
@@ -957,6 +961,7 @@ func RefreshGrokAccessToken(ctx context.Context, params GrokRefreshParams) (*Gro
 		AccessToken:  payload.AccessToken,
 		RefreshToken: payload.RefreshToken,
 		IDToken:      payload.IDToken,
+		PlanType:     GrokPlanTypeFromAccessToken(payload.AccessToken),
 		ExpiresAt:    expiresAt,
 	}, nil
 }
@@ -997,6 +1002,9 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 			if !forceRefresh && waitErr == nil && token != "" {
 				acc.mu.Lock()
 				acc.AccessToken = token
+				if planType := GrokPlanTypeFromAccessToken(token); planType != "" {
+					acc.PlanType = planType
+				}
 				if expiresAt := grokAccessTokenExpiry(token); !expiresAt.IsZero() {
 					acc.ExpiresAt = expiresAt
 				} else {
@@ -1044,6 +1052,9 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 
 	acc.mu.Lock()
 	acc.AccessToken = td.AccessToken
+	if td.PlanType != "" {
+		acc.PlanType = td.PlanType
+	}
 	if td.RefreshToken != "" {
 		acc.RefreshToken = td.RefreshToken
 	}
@@ -1075,6 +1086,9 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 		credentials := map[string]interface{}{
 			"access_token": td.AccessToken,
 			"expires_at":   td.ExpiresAt.Format(time.RFC3339),
+		}
+		if td.PlanType != "" {
+			credentials["plan_type"] = td.PlanType
 		}
 		if td.RefreshToken != "" {
 			credentials["refresh_token"] = td.RefreshToken

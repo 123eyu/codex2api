@@ -3929,12 +3929,18 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		// API Key 凭据没有 AT，下方 at!="" 的恢复分支不会执行，这里补齐身份信息
 		account.AccountID = row.GetCredential("account_id")
 		account.Email = row.GetCredential("email")
-		account.PlanType = row.GetCredential("plan_type")
+		if strings.TrimSpace(apiKey) != "" {
+			account.PlanType = "api"
+		} else {
+			account.PlanType = GrokPlanTypeFromAccessToken(at)
+			if account.PlanType == "" {
+				if storedPlan, ok := ResolveGrokPlan(row.GetCredential("plan_type")); ok {
+					account.PlanType = storedPlan.Key
+				}
+			}
+		}
 		if strings.TrimSpace(apiKey) != "" || at != "" {
 			account.HealthTier = HealthTierHealthy
-		}
-		if account.PlanType == "" {
-			account.PlanType = "api"
 		}
 		// billing 探针的周/月用量随 credentials 落库，重启后在此恢复运行时快照
 		// （周额度占用 5h 槽位、月额度占用 7d 槽位，与探针写入端一致）
@@ -4004,7 +4010,9 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		account.AccessToken = at
 		account.AccountID = row.GetCredential("account_id")
 		account.Email = row.GetCredential("email")
-		account.PlanType = row.GetCredential("plan_type")
+		if !isGrokAccount {
+			account.PlanType = row.GetCredential("plan_type")
+		}
 		if account.Status != StatusError {
 			account.HealthTier = HealthTierHealthy
 		}

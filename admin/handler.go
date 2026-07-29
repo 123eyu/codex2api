@@ -829,6 +829,7 @@ type accountResponse struct {
 	GrokAPI                    bool                        `json:"grok_api,omitempty"`
 	AgentIdentity              bool                        `json:"agent_identity,omitempty"`
 	GrokAuthKind               string                      `json:"grok_auth_kind,omitempty"`
+	GrokPlan                   *auth.GrokPlan              `json:"grok_plan,omitempty"`
 	GrokBilling                json.RawMessage             `json:"grok_billing,omitempty"`
 	GrokRateLimit              *auth.GrokRateLimitSnapshot `json:"grok_rate_limit,omitempty"`
 	GrokFreeQuota              *auth.GrokFreeQuotaSnapshot `json:"grok_free_quota,omitempty"`
@@ -1010,8 +1011,24 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			email = baseURL
 		}
 		planType := row.GetCredential("plan_type")
-		if (isOpenAIResponsesAccount || isGrokAccount) && planType == "" {
+		if isOpenAIResponsesAccount && planType == "" {
 			planType = "api"
+		}
+		if isGrokAccount && grokAuthKind == auth.GrokAuthKindAPIKey {
+			planType = "api"
+		}
+		if isGrokAccount {
+			if runtimeAccount, ok := accountMap[row.ID]; ok {
+				if runtimePlan := runtimeAccount.GetPlanType(); runtimePlan != "" {
+					planType = runtimePlan
+				}
+			}
+		}
+		var grokPlan *auth.GrokPlan
+		if isGrokAccount {
+			if resolved, ok := auth.ResolveGrokPlan(planType); ok {
+				grokPlan = &resolved
+			}
 		}
 		codexClientMetadataMode := ""
 		if isOpenAIResponsesAccount {
@@ -1042,6 +1059,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			GrokAPI:                  isGrokAccount,
 			AgentIdentity:            isAgentIdentityCredentialRow(row),
 			GrokAuthKind:             grokAuthKind,
+			GrokPlan:                 grokPlan,
 			GrokBilling:              grokBilling,
 			BaseURL:                  baseURL,
 			Models:                   row.GetCredentialStringSlice("models"),

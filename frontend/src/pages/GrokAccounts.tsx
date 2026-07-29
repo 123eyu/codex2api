@@ -79,6 +79,11 @@ import OperationProgressToast from "../components/OperationProgressToast";
 import { getErrorMessage } from "../utils/error";
 import { formatBeijingTime, formatRelativeTime } from "../utils/time";
 import { resolveChannelBatchTestAccountIDs } from "../lib/accountOperationResults";
+import {
+  grokPlanFilterCategory,
+  resolveAccountGrokPlan,
+  type GrokPlanFilter,
+} from "../lib/grokPlan";
 import { cn } from "@/lib/utils";
 
 const DEFAULT_GROK_TEST_MODELS = [
@@ -127,8 +132,6 @@ type StatusFilter =
   | "disabled"
   | "banned"
   | "error";
-// 套餐筛选：free / 付费档（SuperGrok 等）/ api / 其它。
-type PlanFilter = "all" | "free" | "premium" | "api" | "other";
 type AuthFilter = "all" | "oauth" | "api_key";
 type DeviceStep = "idle" | "waiting";
 type GrokSortKey = "usage" | "requests" | "updated" | "group";
@@ -249,32 +252,26 @@ function shortHost(raw?: string | null): string {
   return GROK_DEFAULT_HOSTS.has(host) ? "" : host;
 }
 
-function isPremiumPlan(plan?: string | null): boolean {
-  const p = (plan ?? "").trim().toLowerCase();
-  return Boolean(p) && p !== "api" && p !== "free" && p !== "unknown";
-}
-
-// 套餐徽章：付费档（SuperGrok / Heavy）琥珀，free 绿色，api/unknown 中性。
+// 套餐徽章：使用后端解析出的官方 tier 展示名；付费档琥珀，Free 绿色。
 // 表格用常规尺寸、空值显示占位「—」；卡片用 compact 尺寸、空值不渲染。
 function GrokPlanBadge({
-  plan,
+  account,
   compact = false,
   className,
 }: {
-  plan?: string | null;
+  account: Pick<AccountRow, "plan_type" | "grok_plan">;
   compact?: boolean;
   className?: string;
 }) {
-  const raw = (plan ?? "").trim();
-  const key = raw.toLowerCase();
-  if (!raw) {
+  const plan = resolveAccountGrokPlan(account);
+  if (!plan) {
     return compact ? null : (
       <span className="text-[12px] text-muted-foreground">—</span>
     );
   }
-  const tone = isPremiumPlan(raw)
+  const tone = plan.paid
     ? "bg-amber-50 text-amber-800 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-400/20"
-    : key === "free"
+    : plan.key === "free"
       ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-400/20"
       : "bg-muted text-muted-foreground ring-border";
   return (
@@ -288,7 +285,7 @@ function GrokPlanBadge({
         className,
       )}
     >
-      {raw}
+      {plan.display}
     </span>
   );
 }
@@ -327,15 +324,6 @@ function isAccountActive(account: AccountRow): boolean {
     !isAccountError(account) &&
     !isAccountRateLimited(account)
   );
-}
-
-// 套餐归类：free / 付费档（SuperGrok 等）/ api / 其它（空、unknown）。
-function planCategory(account: AccountRow): Exclude<PlanFilter, "all"> {
-  const p = (account.plan_type ?? "").trim().toLowerCase();
-  if (p === "free") return "free";
-  if (p === "api") return "api";
-  if (isPremiumPlan(p)) return "premium";
-  return "other";
 }
 
 export default function GrokAccounts({
@@ -452,7 +440,7 @@ export default function GrokAccounts({
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [authFilter, setAuthFilter] = useState<AuthFilter>("all");
-  const [planFilter, setPlanFilter] = useState<PlanFilter>("all");
+  const [planFilter, setPlanFilter] = useState<GrokPlanFilter>("all");
   const [groupFilter, setGroupFilter] = useState<AccountGroupFilterValue>(
     EMPTY_ACCOUNT_GROUP_FILTER,
   );
@@ -543,6 +531,7 @@ export default function GrokAccounts({
   const filteredAccounts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return accounts.filter((account) => {
+      const resolvedPlan = resolveAccountGrokPlan(account);
       if (statusFilter === "active" && !isAccountActive(account)) return false;
       if (statusFilter === "rate_limited" && !isAccountRateLimited(account))
         return false;
@@ -552,7 +541,10 @@ export default function GrokAccounts({
       if (authFilter === "oauth" && account.grok_auth_kind !== "oauth") return false;
       if (authFilter === "api_key" && account.grok_auth_kind !== "api_key")
         return false;
-      if (planFilter !== "all" && planCategory(account) !== planFilter)
+      if (
+        planFilter !== "all" &&
+        grokPlanFilterCategory(account) !== planFilter
+      )
         return false;
       if (
         !accountMatchesGroupFilter(account.group_ids ?? [], groupFilter)
@@ -570,6 +562,8 @@ export default function GrokAccounts({
         ...(account.models ?? []),
         account.base_url,
         account.plan_type,
+        resolvedPlan?.key,
+        resolvedPlan?.display,
         account.error_message,
         account.proxy_url,
         groupNames,
@@ -1661,8 +1655,9 @@ export default function GrokAccounts({
                 [
                   ["all", t("accounts.filterAll")],
                   ["free", t("grok.planFree")],
-                  ["premium", t("grok.planPremium")],
-                  ["api", t("grok.planApi")],
+                  ["supergrok", t("grok.planSuperGrok")],
+                  ["supergrok_heavy", t("grok.planSuperGrokHeavy")],
+                  ["supergrok_lite", t("grok.planSuperGrokLite")],
                   ["other", t("grok.planOther")],
                 ] as const
               ).map(([key, label]) => (
@@ -1670,6 +1665,7 @@ export default function GrokAccounts({
                   key={key}
                   type="button"
                   onClick={() => setPlanFilter(key)}
+                  aria-pressed={planFilter === key}
                   className={cn(
                     "shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors",
                     planFilter === key
@@ -3056,7 +3052,7 @@ function GrokAccountCard({
               ? t("grok.authKindOAuthShort")
               : t("grok.authKindApiKey")}
           </span>
-          <GrokPlanBadge plan={account.plan_type} compact />
+          <GrokPlanBadge account={account} compact />
           <GrokGroupChips groups={groups} />
           {disabled ? (
             <span className="inline-flex items-center rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-300">
@@ -3357,7 +3353,7 @@ function GrokAccountTableRow({
         </div>
       </TableCell>
       <TableCell className="text-center">
-        <GrokPlanBadge plan={account.plan_type} />
+        <GrokPlanBadge account={account} />
       </TableCell>
       <TableCell>
         <div className="space-y-1.5">

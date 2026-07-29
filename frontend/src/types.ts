@@ -72,6 +72,13 @@ export interface GrokFreeQuotaSnapshot {
   exhausted_at: string
 }
 
+export interface GrokPlanInfo {
+  key: string
+  display: string
+  paid: boolean
+  billing: boolean
+}
+
 export interface AccountRow {
   id: number
   name: string
@@ -89,6 +96,7 @@ export interface AccountRow {
   grok_api?: boolean
   agent_identity?: boolean
   grok_auth_kind?: string
+  grok_plan?: GrokPlanInfo
   grok_billing?: GrokBillingDetail
   // 上游逐请求返回的配额余量(x-ratelimit-* 头),运行时快照
   grok_rate_limit?: GrokRateLimitSnapshot
