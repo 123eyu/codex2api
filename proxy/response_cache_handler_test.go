@@ -222,12 +222,102 @@ func TestResponsesDependentCorruptAndTooLargeReturn409(t *testing.T) {
 	}
 }
 
+func TestResponsesContinuationScopeBudget429PrecedesCacheUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	raw := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_missing","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}],"stream":true}`)
+	tests := []struct {
+		name    string
+		handler func(*Handler, *gin.Context)
+	}{
+		{name: "responses", handler: func(h *Handler, c *gin.Context) { h.Responses(c) }},
+		{name: "compact", handler: func(h *Handler, c *gin.Context) { h.ResponsesCompact(c) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetResponseCacheStateForTest(testResponseCacheConfig())
+			upstream := newContinuationRelayUpstream(t, tt.name == "compact", new([]byte))
+			handler := NewHandler(newContinuationRelayStore(upstream.URL), nil, nil, nil)
+			recorder := invokeResponsesHandlerWithContext(t, func(c *gin.Context) {
+				gate := &scopeBudgetGate{
+					blockedAccounts: map[int64]struct{}{1: {}},
+					blockedGroups:   make(map[int64]struct{}),
+					message:         "scope budget exhausted before continuation fallback",
+				}
+				c.Set(contextScopeBudgetGate, gate)
+			}, func(c *gin.Context) {
+				tt.handler(handler, c)
+			}, raw)
+			if recorder.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want scope 429 before continuation error; body=%s", recorder.Code, recorder.Body.String())
+			}
+			if !strings.Contains(recorder.Body.String(), "scope budget exhausted") {
+				t.Fatalf("response missing scope exhaustion reason: %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestResponsesCompactNormalRequestWaitsForTemporarilyBusyAccountBeforeScope429(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponseCacheStateForTest(testResponseCacheConfig())
+	var seenBody []byte
+	upstream := newContinuationRelayUpstream(t, true, &seenBody)
+	store := newContinuationRelayStore(upstream.URL)
+	store.SetMaxConcurrency(1)
+	store.AddAccount(&auth.Account{
+		DBID:         2,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "relay-token-2",
+		Models:       []string{"gpt-5.4"},
+		PlanType:     "api",
+	})
+	held := store.NextExcludingWithFilter(0, nil, func(account *auth.Account) bool {
+		return account != nil && account.DBID == 2
+	})
+	if held == nil {
+		t.Fatal("failed to occupy the temporarily busy relay account")
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(75 * time.Millisecond)
+		store.Release(held)
+		close(released)
+	}()
+
+	handler := NewHandler(store, nil, nil, nil)
+	raw := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"compact this"}]}`)
+	recorder := invokeResponsesHandlerWithContext(t, func(c *gin.Context) {
+		c.Set(contextScopeBudgetGate, &scopeBudgetGate{
+			blockedAccounts: map[int64]struct{}{1: {}},
+			blockedGroups:   make(map[int64]struct{}),
+			message:         "scope budget exhausted for one account",
+		})
+	}, handler.ResponsesCompact, raw)
+	<-released
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want wait then 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("temporarily busy relay account was not used after release")
+	}
+}
+
 func invokeResponsesHandler(t *testing.T, handler func(*gin.Context), body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	return invokeResponsesHandlerWithContext(t, nil, handler, body)
+}
+
+func invokeResponsesHandlerWithContext(t *testing.T, setup func(*gin.Context), handler func(*gin.Context), body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	ctx.Request.Header.Set("Content-Type", "application/json")
+	if setup != nil {
+		setup(ctx)
+	}
 	start := time.Now()
 	handler(ctx)
 	if elapsed := time.Since(start); elapsed > time.Second {

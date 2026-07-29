@@ -2,6 +2,7 @@ package cache
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -107,10 +108,108 @@ func TestRedisResponseContextWireCompatibility(t *testing.T) {
 	}
 }
 
+func TestRedisResponseContextRealWriterRoundTripNormalizesEscapedExpansionAtLogicalBoundary(t *testing.T) {
+	special := strings.Repeat("<>&", 50) + "\u2028\u2029"
+	item := json.RawMessage(`{"type":"message","content":"` + special + `"}`)
+	normalized, err := NormalizeResponseContextItems([]json.RawMessage{item})
+	if err != nil {
+		t.Fatalf("NormalizeResponseContextItems() error = %v", err)
+	}
+	if len(normalized) != 1 || string(normalized[0]) != string(item) {
+		t.Fatalf("normalized item = %s, want original logical representation %s", normalized[0], item)
+	}
+	logicalLimit := int64(len(normalized[0]))
+
+	tc, commands := newBoundedRedisTestCache(t, nil)
+	if err := tc.SetResponseContext(context.Background(), "owner|escaped", normalized, time.Minute); err != nil {
+		t.Fatalf("SetResponseContext() error = %v", err)
+	}
+	result, err := tc.GetResponseContextBounded(
+		context.Background(),
+		"owner|escaped",
+		ResponseContextWireLimit(logicalLimit, len(normalized)),
+	)
+	if err != nil {
+		t.Fatalf("GetResponseContextBounded() error = %v", err)
+	}
+	if result.Status != ResponseContextReadFound || len(result.Items) != 1 {
+		t.Fatalf("result = %+v, want found round trip", result)
+	}
+	if got := string(result.Items[0]); got != string(normalized[0]) {
+		t.Fatalf("round-trip logical item = %s, want %s", got, normalized[0])
+	}
+	assertBoundedRedisCommand(t, commands, ResponseContextWireLimit(logicalLimit, len(normalized)))
+}
+
+func TestNormalizeResponseContextItemsPreservesStructureAndCanonicalizesStringEscapes(t *testing.T) {
+	raw := json.RawMessage(`{ "z":"\u003c\u003e\u0026\u2028\u2029\/\u00e9", "n":1e+09 }`)
+	want := json.RawMessage(`{ "z":"<>&` + "\u2028\u2029" + `/é", "n":1e+09 }`)
+
+	got, err := NormalizeResponseContextItems([]json.RawMessage{raw})
+	if err != nil {
+		t.Fatalf("NormalizeResponseContextItems() error = %v", err)
+	}
+	if len(got) != 1 || string(got[0]) != string(want) {
+		t.Fatalf("normalized = %s, want %s", got[0], want)
+	}
+	if _, err := NormalizeResponseContextItems([]json.RawMessage{json.RawMessage(`{"broken":`)}); err == nil {
+		t.Fatal("NormalizeResponseContextItems() accepted invalid JSON")
+	}
+}
+
+func TestNormalizeResponseContextItemsPreservesLiteralUnicodeEscapeTextAndIsIdempotent(t *testing.T) {
+	raw := json.RawMessage(`{"value":"literal \\u2028 and \\u2029; escaped backslash \\\\; html \u003c; unicode \u00e9; separators \u2028\u2029"}`)
+	var original struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &original); err != nil {
+		t.Fatalf("json.Unmarshal(raw) error = %v", err)
+	}
+
+	normalized, err := NormalizeResponseContextItems([]json.RawMessage{raw})
+	if err != nil {
+		t.Fatalf("NormalizeResponseContextItems() error = %v", err)
+	}
+	if len(normalized) != 1 || !json.Valid(normalized[0]) {
+		t.Fatalf("normalized = %q, want one valid JSON item", normalized)
+	}
+	var roundTrip struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(normalized[0], &roundTrip); err != nil {
+		t.Fatalf("json.Unmarshal(normalized) error = %v; normalized=%q", err, normalized[0])
+	}
+	if roundTrip.Value != original.Value {
+		t.Fatalf("normalized value = %q, want semantic preservation %q", roundTrip.Value, original.Value)
+	}
+
+	again, err := NormalizeResponseContextItems(normalized)
+	if err != nil {
+		t.Fatalf("second NormalizeResponseContextItems() error = %v", err)
+	}
+	if len(again) != 1 || !bytes.Equal(again[0], normalized[0]) {
+		t.Fatalf("normalization is not idempotent: first=%q second=%q", normalized[0], again)
+	}
+}
+
+func TestResponseContextWireLimitBoundsWorstCaseAndSaturates(t *testing.T) {
+	const logical = int64(123)
+	const items = 7
+	got := ResponseContextWireLimit(logical, items)
+	want := logical*6 + int64(len(`{"items":[`)+len(`]}`)+items-1)
+	if got != want {
+		t.Fatalf("ResponseContextWireLimit() = %d, want %d", got, want)
+	}
+	if got := ResponseContextWireLimit(int64(^uint64(0)>>1), items); got != int64(^uint64(0)>>1) {
+		t.Fatalf("overflow limit = %d, want MaxInt64", got)
+	}
+}
+
 func newBoundedRedisTestCache(t *testing.T, payload []byte) (*redisTokenCache, <-chan []string) {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()
 	commands := make(chan []string, 8)
+	storedPayload := append([]byte(nil), payload...)
 	go func() {
 		defer serverConn.Close()
 		reader := bufio.NewReader(serverConn)
@@ -128,13 +227,18 @@ func newBoundedRedisTestCache(t *testing.T, payload []byte) (*redisTokenCache, <
 				_, _ = serverConn.Write([]byte("*0\r\n"))
 			case "CLIENT":
 				_, _ = serverConn.Write([]byte("+OK\r\n"))
+			case "SET":
+				if len(command) >= 3 {
+					storedPayload = append(storedPayload[:0], command[2]...)
+				}
+				_, _ = serverConn.Write([]byte("+OK\r\n"))
 			case "GETRANGE":
-				if payload == nil {
+				if storedPayload == nil {
 					_, _ = serverConn.Write([]byte("$0\r\n\r\n"))
 					continue
 				}
 				end, _ := strconv.Atoi(command[len(command)-1])
-				value := payload
+				value := storedPayload
 				if end+1 < len(value) {
 					value = value[:end+1]
 				}

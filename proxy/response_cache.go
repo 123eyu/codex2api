@@ -216,6 +216,9 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 	defer respCache.mu.Unlock()
 
 	items = trimResponseContextTail(items, respCache.config.maxItems)
+	if normalizedItems, err := cache.NormalizeResponseContextItems(items); err == nil {
+		items = normalizedItems
+	}
 	var entryBytes int64
 	for _, item := range items {
 		entryBytes += int64(len(item))
@@ -551,10 +554,14 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 	default:
 		return responseCacheLookupResult{Kind: responseCacheLookupBackendCorrupt}
 	}
-	if responseContextLogicalBytes(backendResult.Items) > config.reconstructMaxBytes {
+	items, err := cache.NormalizeResponseContextItems(backendResult.Items)
+	if err != nil {
+		return responseCacheLookupResult{Kind: responseCacheLookupBackendCorrupt}
+	}
+	if responseContextLogicalBytes(items) > config.reconstructMaxBytes {
 		return responseCacheLookupResult{Kind: responseCacheLookupReconstructionTooLarge}
 	}
-	items := trimResponseContextTail(backendResult.Items, config.maxItems)
+	items = trimResponseContextTail(items, config.maxItems)
 	runtimeItems, promoted := admitResponseCache(storeKey, items)
 	return responseCacheLookupResult{
 		Items:    runtimeItems,
@@ -592,11 +599,7 @@ func readResponseContextBackend(ctx context.Context, runtimeCache cache.TokenCac
 }
 
 func responseContextWireLimit(config responseCacheConfig) int64 {
-	maxItems := config.maxItems
-	if maxItems < 1 {
-		maxItems = 1
-	}
-	return config.reconstructMaxBytes + int64(len(`{"items":[`)+len(`]}`)+maxItems-1)
+	return cache.ResponseContextWireLimit(config.reconstructMaxBytes, config.maxItems)
 }
 
 func responseContextLogicalBytes(items []json.RawMessage) int64 {

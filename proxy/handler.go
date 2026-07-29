@@ -2301,10 +2301,6 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 		}
 		if account == nil {
-			if continuationUnavailable && !relayContinuationAttempted {
-				sendResponseContextUnavailable(c, continuationStatus, continuationReason)
-				return
-			}
 			if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 				h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 				return
@@ -2312,6 +2308,10 @@ func (h *Handler) Responses(c *gin.Context) {
 			// 候选被 scope 预算剔空时给出真实原因，而不是含糊的「无可用账号」。
 			if msg := scopeBudgetExhaustedMessage(c); msg != "" {
 				SendAPIKeyLimitError(c, http.StatusTooManyRequests, msg)
+				return
+			}
+			if continuationUnavailable && !relayContinuationAttempted {
+				sendResponseContextUnavailable(c, continuationStatus, continuationReason)
 				return
 			}
 			c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
@@ -3491,6 +3491,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		account, stickyProxyURL := h.nextAccountForSessionWithFilter(affinityKey, apiKeyID, excludeAccounts, accountFilter)
 		if account == nil {
 			if continuationUnavailable && !relayContinuationAttempted {
+				if msg := scopeBudgetExhaustedMessage(c); msg != "" {
+					SendAPIKeyLimitError(c, http.StatusTooManyRequests, msg)
+					return
+				}
 				sendResponseContextUnavailable(c, continuationStatus, continuationReason)
 				return
 			}
