@@ -1165,6 +1165,9 @@ func sendResponseContextUnavailable(c *gin.Context, status int, reason string) {
 		errType = api.ErrorTypeServer
 		message = "Previous response context backend is temporarily unavailable"
 	}
+	if status == http.StatusConflict {
+		recordResponseCacheKnownUnavailableError()
+	}
 	api.SendErrorWithStatus(c, api.NewAPIErrorWithDetails(
 		code,
 		message,

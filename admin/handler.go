@@ -61,6 +61,7 @@ type Handler struct {
 	proxyBatchEventSender  func(*gin.Context, proxyBatchTestEvent) bool
 	proxyBatchTestMu       sync.Mutex
 	cpuSampler             *cpuSampler
+	memReader              memStatsReader
 	startedAt              time.Time
 	pgMaxConns             int
 	redisPoolSize          int

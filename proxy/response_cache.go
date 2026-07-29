@@ -83,16 +83,23 @@ func defaultResponseCacheConfig() responseCacheConfig {
 // ResponseCacheStats is a point-in-time snapshot of the bounded local cache.
 // Bytes are logical retained JSON payload bytes; they are not an RSS estimate.
 type ResponseCacheStats struct {
-	Entries               int
-	Bytes                 int64
-	HighWaterBytes        int64
-	LargestSeenEntryBytes int64
-	Hits                  uint64
-	Misses                uint64
-	Expirations           uint64
-	CountEvictions        uint64
-	ByteEvictions         uint64
-	OversizeSkips         uint64
+	Entries                int
+	Bytes                  int64
+	HighWaterBytes         int64
+	LargestSeenEntryBytes  int64
+	Hits                   uint64
+	Misses                 uint64
+	LocalHits              uint64
+	LocalMisses            uint64
+	RemoteHits             uint64
+	RemoteMisses           uint64
+	Expirations            uint64
+	CountEvictions         uint64
+	ByteEvictions          uint64
+	OversizeSkips          uint64
+	OversizeBypasses       uint64
+	OversizeRejections     uint64
+	KnownUnavailableErrors uint64
 }
 
 type responseCacheState struct {
@@ -202,7 +209,7 @@ func configureResponseCacheForTest(config responseCacheConfig) {
 // setResponseCache 存储响应上下文（按 owner 命名空间隔离）
 func setResponseCache(owner, responseID string, items []json.RawMessage) {
 	storeKey := responseCacheStoreKey(owner, responseID)
-	runtimeItems, _ := admitResponseCache(storeKey, items)
+	runtimeItems, _, _ := admitResponseCache(storeKey, items)
 
 	respCache.mu.RLock()
 	runtimeCache := respCache.runtimeCache
@@ -217,7 +224,7 @@ func setResponseCache(owner, responseID string, items []json.RawMessage) {
 	}
 }
 
-func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMessage, bool) {
+func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMessage, bool, bool) {
 	respCache.mu.Lock()
 	defer respCache.mu.Unlock()
 
@@ -235,14 +242,17 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 	if existing := respCache.store[storeKey]; existing != nil {
 		respCache.removeEntryLocked(existing, responseCacheRemovalReplace)
 	}
-	if respCache.config.maxEntries <= 0 ||
-		entryBytes > respCache.config.maxEntryBytes ||
-		entryBytes > respCache.config.maxBytes {
+	overL1ByteBudget := entryBytes > respCache.config.maxEntryBytes ||
+		entryBytes > respCache.config.maxBytes
+	if respCache.config.maxEntries <= 0 || overL1ByteBudget {
 		respCache.stats.OversizeSkips++
+		if respCache.runtimeCache == nil && overL1ByteBudget {
+			respCache.stats.OversizeRejections++
+		}
 		if respCache.runtimeCache == nil {
 			respCache.setMarkerLocked(storeKey, responseCacheLookupKnownOversize, time.Now().Add(respCache.config.ttl))
 		}
-		return items, false
+		return items, false, overL1ByteBudget
 	}
 
 	retainedItems := cloneResponseContextItems(items)
@@ -250,11 +260,15 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 		respCache.stats.Bytes+entryBytes > respCache.config.maxBytes {
 		oldest := respCache.oldestLocked()
 		if oldest == nil {
+			overL1ByteBudget = respCache.stats.Bytes+entryBytes > respCache.config.maxBytes
 			respCache.stats.OversizeSkips++
+			if respCache.runtimeCache == nil && overL1ByteBudget {
+				respCache.stats.OversizeRejections++
+			}
 			if respCache.runtimeCache == nil {
 				respCache.setMarkerLocked(storeKey, responseCacheLookupKnownOversize, time.Now().Add(respCache.config.ttl))
 			}
-			return items, false
+			return items, false, overL1ByteBudget
 		}
 		reason := responseCacheRemovalByteEviction
 		if len(respCache.store)+1 > respCache.config.maxEntries {
@@ -277,7 +291,7 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 	if respCache.stats.Bytes > respCache.stats.HighWaterBytes {
 		respCache.stats.HighWaterBytes = respCache.stats.Bytes
 	}
-	return items, true
+	return items, true, false
 }
 
 func cloneResponseContextItems(items []json.RawMessage) []json.RawMessage {
@@ -510,6 +524,7 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 		} else {
 			respCache.lru.MoveToFront(entry.element)
 			respCache.stats.Hits++
+			respCache.stats.LocalHits++
 			items := cloneResponseContextItems(entry.items)
 			respCache.mu.Unlock()
 			return responseCacheLookupResult{
@@ -520,6 +535,7 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 		}
 	}
 	respCache.stats.Misses++
+	respCache.stats.LocalMisses++
 	if runtimeCache == nil {
 		if marker := respCache.markers[storeKey]; marker != nil {
 			if time.Now().Before(marker.expiresAt) {
@@ -548,6 +564,7 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 	}
 	switch backendResult.Status {
 	case cache.ResponseContextReadMiss:
+		recordResponseCacheRemoteMiss()
 		if expired {
 			return responseCacheLookupResult{Kind: responseCacheLookupExpired}
 		}
@@ -568,7 +585,8 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 		return responseCacheLookupResult{Kind: responseCacheLookupReconstructionTooLarge}
 	}
 	items = trimResponseContextTail(items, config.maxItems)
-	runtimeItems, promoted := admitResponseCache(storeKey, items)
+	runtimeItems, promoted, overL1ByteBudget := admitResponseCache(storeKey, items)
+	recordResponseCacheRemoteHit(!promoted && overL1ByteBudget)
 	return responseCacheLookupResult{
 		Items:    runtimeItems,
 		Kind:     responseCacheLookupHit,
@@ -578,8 +596,29 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 }
 
 func setResponseCacheLocal(storeKey string, items []json.RawMessage) bool {
-	_, admitted := admitResponseCache(storeKey, items)
+	_, admitted, _ := admitResponseCache(storeKey, items)
 	return admitted
+}
+
+func recordResponseCacheRemoteMiss() {
+	respCache.mu.Lock()
+	respCache.stats.RemoteMisses++
+	respCache.mu.Unlock()
+}
+
+func recordResponseCacheRemoteHit(oversizeBypass bool) {
+	respCache.mu.Lock()
+	respCache.stats.RemoteHits++
+	if oversizeBypass {
+		respCache.stats.OversizeBypasses++
+	}
+	respCache.mu.Unlock()
+}
+
+func recordResponseCacheKnownUnavailableError() {
+	respCache.mu.Lock()
+	respCache.stats.KnownUnavailableErrors++
+	respCache.mu.Unlock()
 }
 
 func readResponseContextBackend(ctx context.Context, runtimeCache cache.TokenCache, storeKey string, config responseCacheConfig) (cache.ResponseContextReadResult, error) {

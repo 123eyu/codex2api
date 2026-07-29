@@ -28,6 +28,14 @@ type ResponseCacheConfigSyncStatus struct {
 	LastSyncError        string
 }
 
+type ResponseCacheOpsSnapshot struct {
+	Stats               ResponseCacheStats
+	EffectiveConfig     ResponseCacheAppliedConfig
+	AppliedConfig       ResponseCacheAppliedConfig
+	LastConfigSyncAt    time.Time
+	LastConfigSyncError string
+}
+
 type responseCacheSettingsReader interface {
 	GetResponseCacheSettings(context.Context) (database.ResponseCacheSettings, error)
 }
@@ -52,7 +60,13 @@ func ApplyResponseCacheSettings(settings database.ResponseCacheSettings) bool {
 
 func GetResponseCacheAppliedConfig() ResponseCacheAppliedConfig {
 	respCache.mu.RLock()
-	config := ResponseCacheAppliedConfig{
+	config := responseCacheAppliedConfigLocked()
+	respCache.mu.RUnlock()
+	return config
+}
+
+func responseCacheAppliedConfigLocked() ResponseCacheAppliedConfig {
+	return ResponseCacheAppliedConfig{
 		LocalMaxBytes:       respCache.config.maxBytes,
 		LocalMaxEntryBytes:  respCache.config.maxEntryBytes,
 		ReconstructMaxBytes: respCache.config.reconstructMaxBytes,
@@ -61,8 +75,6 @@ func GetResponseCacheAppliedConfig() ResponseCacheAppliedConfig {
 		TTL:                 respCache.config.ttl,
 		MaxItems:            respCache.config.maxItems,
 	}
-	respCache.mu.RUnlock()
-	return config
 }
 
 func GetResponseCacheConfigSyncStatus() ResponseCacheConfigSyncStatus {
@@ -73,6 +85,20 @@ func GetResponseCacheConfigSyncStatus() ResponseCacheConfigSyncStatus {
 	}
 	respCache.mu.RUnlock()
 	return status
+}
+
+func GetResponseCacheOpsSnapshot() ResponseCacheOpsSnapshot {
+	respCache.mu.RLock()
+	applied := responseCacheAppliedConfigLocked()
+	snapshot := ResponseCacheOpsSnapshot{
+		Stats:               respCache.stats,
+		EffectiveConfig:     applied,
+		AppliedConfig:       applied,
+		LastConfigSyncAt:    respCache.lastSyncAt,
+		LastConfigSyncError: respCache.lastSyncErr,
+	}
+	respCache.mu.RUnlock()
+	return snapshot
 }
 
 func LoadResponseCacheSettings(ctx context.Context, reader responseCacheSettingsReader) error {
