@@ -89,7 +89,7 @@ export default function Operations() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+                <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,17rem),1fr))] gap-4">
                   <OpsMetricCard
                     label={t('ops.cpu')}
                     value={`${overview.cpu.percent.toFixed(1)}%`}
@@ -102,24 +102,36 @@ export default function Operations() {
                     label={t('ops.memory')}
                     value={`${overview.memory.percent.toFixed(1)}%`}
                     sub={
-                      <div className="space-y-1">
-                        <div>
-                          {t('ops.memoryUsage', {
-                            used: formatIECBytes(overview.memory.used_bytes),
-                            total: formatIECBytes(overview.memory.total_bytes),
-                          })} · {t('ops.processMemory', { size: formatIECBytes(overview.memory.process_bytes) })}
-                        </div>
+                      <dl className="flex flex-wrap gap-x-4 gap-y-1.5">
+                        <MemoryDetail
+                          label={t('ops.memorySystem')}
+                          value={`${formatIECBytes(overview.memory.used_bytes)} / ${formatIECBytes(overview.memory.total_bytes)}`}
+                        />
+                        <MemoryDetail
+                          label={t('ops.memoryRss')}
+                          value={formatIECBytes(overview.memory.process_bytes)}
+                        />
                         {typeof overview.memory.heap_alloc_bytes === 'number' ? (
-                          <div>
-                            {t('ops.goHeap', {
-                              alloc: formatIECBytes(overview.memory.heap_alloc_bytes),
-                              inuse: formatIECBytes(overview.memory.heap_inuse_bytes ?? 0),
-                              released: formatIECBytes(overview.memory.heap_released_bytes ?? 0),
-                              count: formatNumber(overview.memory.num_gc ?? 0),
-                            })}
-                          </div>
+                          <>
+                            <MemoryDetail
+                              label={t('ops.heapAllocated')}
+                              value={formatIECBytes(overview.memory.heap_alloc_bytes)}
+                            />
+                            <MemoryDetail
+                              label={t('ops.heapInUse')}
+                              value={formatIECBytes(overview.memory.heap_inuse_bytes ?? 0)}
+                            />
+                            <MemoryDetail
+                              label={t('ops.heapReleased')}
+                              value={formatIECBytes(overview.memory.heap_released_bytes ?? 0)}
+                            />
+                            <MemoryDetail
+                              label={t('ops.gcRuns')}
+                              value={formatNumber(overview.memory.num_gc ?? 0)}
+                            />
+                          </>
                         ) : null}
-                      </div>
+                      </dl>
                     }
                     icon={<HardDrive className="size-5" />}
                     tone={getPercentTone(overview.memory.percent, 75, 90)}
@@ -374,6 +386,15 @@ function CacheMetricTile({
   )
 }
 
+function MemoryDetail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="inline-flex min-w-0 items-baseline gap-1.5 whitespace-nowrap">
+      <dt className="text-[11px] font-medium text-muted-foreground">{label}</dt>
+      <dd className="font-medium tabular-nums text-foreground/80">{value}</dd>
+    </div>
+  )
+}
+
 function OpsMetricCard({
   label,
   value,
@@ -427,14 +448,17 @@ function OpsMetricCard({
           </span>
         </div>
 
-        <div className="mt-5 flex items-end justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-[32px] font-bold leading-none text-foreground">{value}</div>
-            <div className="mt-3 text-[13px] leading-relaxed text-muted-foreground">{sub}</div>
+        <div className="mt-5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0 text-[32px] font-bold leading-none tabular-nums text-foreground">{value}</div>
+            <div
+              className={`flex size-11 shrink-0 items-center justify-center rounded-lg ${toneStyle.icon}`}
+              aria-hidden="true"
+            >
+              {icon}
+            </div>
           </div>
-          <div className={`flex size-11 shrink-0 items-center justify-center rounded-lg ${toneStyle.icon}`}>
-            {icon}
-          </div>
+          <div className="mt-3 min-w-0 text-[13px] leading-relaxed text-muted-foreground">{sub}</div>
         </div>
       </CardContent>
     </Card>
