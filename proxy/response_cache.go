@@ -102,8 +102,11 @@ type responseCacheState struct {
 	markers      map[string]*responseCacheMarker
 	markerLRU    *list.List
 	config       responseCacheConfig
+	generation   int64
 	stats        ResponseCacheStats
 	runtimeCache cache.TokenCache
+	lastSyncAt   time.Time
+	lastSyncErr  string
 }
 
 type responseCacheLookupKind uint8
@@ -179,8 +182,11 @@ func resetResponseCacheStateForTest(config responseCacheConfig) {
 	respCache.markers = make(map[string]*responseCacheMarker)
 	respCache.markerLRU = list.New()
 	respCache.config = config
+	respCache.generation = 0
 	respCache.stats = ResponseCacheStats{}
 	respCache.runtimeCache = nil
+	respCache.lastSyncAt = time.Time{}
+	respCache.lastSyncErr = ""
 	respCache.mu.Unlock()
 }
 
