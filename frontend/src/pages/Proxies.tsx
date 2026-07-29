@@ -16,6 +16,7 @@ import {
   Unlink,
   Search,
   Users,
+  Power,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -129,36 +130,32 @@ function maskUrl(url: string): string {
   }
 }
 
-function ProxyTestStatusBadge({
-  status,
+function ProxyStatusBadge({
+  proxy,
 }: {
-  status: ProxyRow["test_status"];
+  proxy: ProxyRow;
 }) {
   const { t } = useTranslation();
-  const normalized = status || "untested";
-  const styles =
-    normalized === "error"
-      ? "border-destructive/25 bg-destructive/10 text-destructive"
-      : normalized === "success"
-        ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-        : "border-border bg-muted/50 text-muted-foreground";
-  const dot =
-    normalized === "error"
-      ? "bg-destructive"
-      : normalized === "success"
-        ? "bg-emerald-500"
-        : "bg-muted-foreground/50";
-  const label =
-    normalized === "error"
-      ? t("proxies.testStatusError")
-      : normalized === "success"
-        ? t("proxies.testStatusSuccess")
-        : t("proxies.testStatusUntested");
+  const isError = proxy.test_status === "error";
+  const styles = isError
+    ? "border-destructive/25 bg-destructive/10 text-destructive"
+    : proxy.enabled
+      ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+      : "border-border bg-muted/50 text-muted-foreground";
+  const dot = isError
+    ? "bg-destructive"
+    : proxy.enabled
+      ? "bg-emerald-500"
+      : "bg-muted-foreground/50";
+  const label = isError
+    ? t("proxies.testStatusError")
+    : proxy.enabled
+      ? t("proxies.enabled")
+      : t("proxies.disabled");
+  const className = `inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-all ${styles}`;
 
   return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold ${styles}`}
-    >
+    <span className={className}>
       <span className={`size-1.5 rounded-full ${dot}`} />
       {label}
     </span>
@@ -682,6 +679,9 @@ export default function Proxies() {
   };
 
   const enabledCount = proxies.filter((p) => p.enabled).length;
+  const untestedCount = proxies.filter(
+    (p) => !p.test_status || p.test_status === "untested",
+  ).length;
   const canEnable = proxies.some(
     (p) => p.enabled && p.test_status !== "error",
   );
@@ -860,13 +860,11 @@ export default function Proxies() {
         </Card>
         <Card className="py-0">
           <CardContent className="p-4 text-center">
-            <div
-              className={`text-2xl font-bold ${poolEnabled ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}
-            >
-              {poolEnabled ? t("proxies.roundRobin") : t("proxies.off")}
+            <div className="text-2xl font-bold tabular-nums text-amber-600 dark:text-amber-400">
+              {untestedCount}
             </div>
             <div className="text-xs text-muted-foreground mt-1">
-              {t("proxies.poolStatus")}
+              {t("proxies.untestedCount")}
             </div>
           </CardContent>
         </Card>
@@ -938,22 +936,7 @@ export default function Proxies() {
                           </div>
 
                           <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                            <ProxyTestStatusBadge status={p.test_status} />
-                            <button
-                              onClick={() => handleToggle(p)}
-                              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-all ${
-                                p.enabled
-                                  ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                                  : "border-border bg-muted/50 text-muted-foreground"
-                              }`}
-                            >
-                              <span
-                                className={`size-1.5 rounded-full ${p.enabled ? "bg-emerald-500" : "bg-muted-foreground/50"}`}
-                              />
-                              {p.enabled
-                                ? t("proxies.enabled")
-                                : t("proxies.disabled")}
-                            </button>
+                            <ProxyStatusBadge proxy={p} />
                             <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-xs font-medium text-muted-foreground">
                               <Users className="size-3" />
                               {t("proxies.boundCount", {
@@ -1004,6 +987,19 @@ export default function Proxies() {
                                 <Play className="size-3.5" />
                               )}
                               {t("proxies.test")}
+                            </button>
+                            <button
+                              onClick={() => handleToggle(p)}
+                              className={`inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+                                p.enabled
+                                  ? "border-amber-500/25 text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
+                                  : "border-emerald-500/25 text-emerald-600 hover:bg-emerald-500/10 dark:text-emerald-400"
+                              }`}
+                            >
+                              <Power className="size-3.5" />
+                              {p.enabled
+                                ? t("proxies.disableAction")
+                                : t("proxies.enableAction")}
                             </button>
                             <button
                               onClick={() => handleDelete(p.id)}
@@ -1107,24 +1103,7 @@ export default function Proxies() {
                             </div>
                           </td>
                           <td className="p-3">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <ProxyTestStatusBadge status={p.test_status} />
-                              <button
-                                onClick={() => handleToggle(p)}
-                                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all ${
-                                  p.enabled
-                                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-                                    : "bg-muted/50 text-muted-foreground border border-border"
-                                }`}
-                              >
-                                <span
-                                  className={`size-1.5 rounded-full ${p.enabled ? "bg-emerald-500" : "bg-muted-foreground/50"}`}
-                                />
-                                {p.enabled
-                                  ? t("proxies.enabled")
-                                  : t("proxies.disabled")}
-                              </button>
-                            </div>
+                            <ProxyStatusBadge proxy={p} />
                           </td>
                           {/* Bound accounts */}
                           <td className="p-3">
@@ -1210,6 +1189,24 @@ export default function Proxies() {
                                   <Play className="size-3.5" />
                                 )}
                                 {t("proxies.test")}
+                              </button>
+                              <button
+                                onClick={() => handleToggle(p)}
+                                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                                  p.enabled
+                                    ? "border-amber-500/25 text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
+                                    : "border-emerald-500/25 text-emerald-600 hover:bg-emerald-500/10 dark:text-emerald-400"
+                                }`}
+                                title={
+                                  p.enabled
+                                    ? t("proxies.disableAction")
+                                    : t("proxies.enableAction")
+                                }
+                              >
+                                <Power className="size-3.5" />
+                                {p.enabled
+                                  ? t("proxies.disableAction")
+                                  : t("proxies.enableAction")}
                               </button>
                               <button
                                 onClick={() => handleDelete(p.id)}
