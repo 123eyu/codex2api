@@ -1395,6 +1395,7 @@ export interface UsageLog {
   upstream_endpoint: string
   stream: boolean
   compact: boolean
+  has_compaction_history: boolean
   via_websocket?: boolean
   cached_tokens: number
   service_tier: string
@@ -1723,6 +1724,7 @@ export interface PublicAPIKeyUsageLog {
   service_tier: string
   stream: boolean
   compact: boolean
+  has_compaction_history: boolean
   via_websocket: boolean
   upstream_error_kind: string
   created_at: ISODateString

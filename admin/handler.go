@@ -5951,6 +5951,24 @@ func appendUniqueInt64(values []int64, value int64, limit int) []int64 {
 	return append(values, value)
 }
 
+func parseUsageLogBoolFilter(c *gin.Context, name string) (*bool, bool) {
+	raw, exists := c.GetQuery(name)
+	if !exists {
+		return nil, true
+	}
+	switch strings.TrimSpace(raw) {
+	case "true":
+		value := true
+		return &value, true
+	case "false":
+		value := false
+		return &value, true
+	default:
+		writeError(c, http.StatusBadRequest, name+" 参数无效，需要 true 或 false")
+		return nil, false
+	}
+}
+
 // GetOpsErrorSummary 获取运维错误日志概览
 func (h *Handler) GetOpsErrorSummary(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -6031,6 +6049,15 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 			if streamStr := c.Query("stream"); streamStr != "" {
 				v := streamStr == "true"
 				filter.StreamOnly = &v
+			}
+			var ok bool
+			filter.CompactOnly, ok = parseUsageLogBoolFilter(c, "compact")
+			if !ok {
+				return
+			}
+			filter.CompactionHistoryOnly, ok = parseUsageLogBoolFilter(c, "has_compaction_history")
+			if !ok {
+				return
 			}
 
 			result, err := h.db.ListUsageLogsByTimeRangePaged(ctx, filter)

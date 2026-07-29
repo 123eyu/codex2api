@@ -830,6 +830,116 @@ func TestGetUsageLogsRejectsInvalidAPIKeyID(t *testing.T) {
 	}
 }
 
+func TestGetUsageLogsRejectsInvalidCompactionFilters(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name      string
+		query     string
+		wantError string
+	}{
+		{
+			name:      "compact",
+			query:     "compact=maybe",
+			wantError: "compact 参数无效，需要 true 或 false",
+		},
+		{
+			name:      "compaction history",
+			query:     "has_compaction_history=1",
+			wantError: "has_compaction_history 参数无效，需要 true 或 false",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := &Handler{}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(
+				http.MethodGet,
+				"/api/admin/usage/logs?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&page=1&"+test.query,
+				nil,
+			)
+
+			handler.GetUsageLogs(ctx)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+			}
+			assertErrorMessage(t, recorder, test.wantError)
+		})
+	}
+}
+
+func TestGetUsageLogsAppliesCompactionFilters(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	accountID := insertTestAccount(t, db)
+	ctx := context.Background()
+	for _, input := range []*database.UsageLogInput{
+		{AccountID: accountID, Endpoint: "/v1/responses", Model: "trigger-only", StatusCode: http.StatusOK, Compact: true},
+		{AccountID: accountID, Endpoint: "/v1/responses", Model: "history-only", StatusCode: http.StatusOK, HasCompactionHistory: true},
+		{AccountID: accountID, Endpoint: "/v1/responses", Model: "both", StatusCode: http.StatusOK, Compact: true, HasCompactionHistory: true},
+		{AccountID: accountID, Endpoint: "/v1/responses", Model: "neither", StatusCode: http.StatusOK},
+	} {
+		if err := db.InsertUsageLog(ctx, input); err != nil {
+			t.Fatalf("InsertUsageLog(%s): %v", input.Model, err)
+		}
+	}
+	db.FlushUsageLogs()
+
+	handler := &Handler{db: db}
+	start := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	end := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	tests := []struct {
+		name       string
+		query      string
+		wantModels map[string]bool
+	}{
+		{
+			name:       "trigger",
+			query:      "compact=true",
+			wantModels: map[string]bool{"trigger-only": true, "both": true},
+		},
+		{
+			name:       "history",
+			query:      "has_compaction_history=true",
+			wantModels: map[string]bool{"history-only": true, "both": true},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ginCtx, _ := gin.CreateTestContext(recorder)
+			ginCtx.Request = httptest.NewRequest(
+				http.MethodGet,
+				"/api/admin/usage/logs?start="+start+"&end="+end+"&page=1&page_size=20&"+test.query,
+				nil,
+			)
+
+			handler.GetUsageLogs(ginCtx)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+			}
+			var page database.UsageLogPage
+			if err := json.Unmarshal(recorder.Body.Bytes(), &page); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if page.Total != int64(len(test.wantModels)) || len(page.Logs) != len(test.wantModels) {
+				t.Fatalf("total/logs = %d/%d, want %d; body=%s", page.Total, len(page.Logs), len(test.wantModels), recorder.Body.String())
+			}
+			for _, logRow := range page.Logs {
+				if !test.wantModels[logRow.Model] {
+					t.Fatalf("unexpected model %q for %s filter", logRow.Model, test.name)
+				}
+			}
+		})
+	}
+}
+
 func TestGetUsageLogsAllowsFiveHundredPageSize(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

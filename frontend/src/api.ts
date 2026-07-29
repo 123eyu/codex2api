@@ -629,7 +629,7 @@ export const api = {
     }
     return request<UsageLogsResponse>(`/usage/logs?${searchParams.toString()}`)
   },
-  getUsageLogsPaged: (params: { start: string; end: string; page: number; pageSize?: number; email?: string; model?: string; endpoint?: string; apiKeyId?: string; accountId?: string; fast?: string; stream?: string; channel?: string }) => {
+  getUsageLogsPaged: (params: { start: string; end: string; page: number; pageSize?: number; email?: string; model?: string; endpoint?: string; apiKeyId?: string; accountId?: string; fast?: string; stream?: string; compact?: string; hasCompactionHistory?: string; channel?: string }) => {
     const searchParams = new URLSearchParams()
     searchParams.set('start', params.start)
     searchParams.set('end', params.end)
@@ -642,6 +642,8 @@ export const api = {
     if (params.accountId) searchParams.set('account_id', params.accountId)
     if (params.fast) searchParams.set('fast', params.fast)
     if (params.stream) searchParams.set('stream', params.stream)
+    if (params.compact) searchParams.set('compact', params.compact)
+    if (params.hasCompactionHistory) searchParams.set('has_compaction_history', params.hasCompactionHistory)
     if (params.channel) searchParams.set('channel', params.channel)
     return request<UsageLogsPagedResponse>(`/usage/logs?${searchParams.toString()}`)
   },

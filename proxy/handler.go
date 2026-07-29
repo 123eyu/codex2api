@@ -877,19 +877,45 @@ func populateClientIPFromRequest(c *gin.Context, input *database.UsageLogInput) 
 }
 
 func populateCompactUsageMetaFromRequest(c *gin.Context, input *database.UsageLogInput) {
-	if input == nil || input.Compact {
+	if input == nil {
 		return
 	}
-	if isCompactUsageEndpoint(input.Endpoint) || isCompactUsageEndpoint(input.InboundEndpoint) || isCompactUsageEndpoint(input.UpstreamEndpoint) {
+
+	meta, ok := cachedRequestCompactionMeta(c)
+	if !ok {
+		if body, bodyOK := rawRequestBodyFromContext(c); bodyOK {
+			meta = requestBodyCompactionMeta(body)
+		}
+		// HTTP requests may carry the same per-turn metadata as a request header.
+		// Client WebSocket turns always cache frame-local metadata before logging,
+		// so the Upgrade request header cannot leak into individual frames here.
+		if c != nil && c.Request != nil && turnMetadataIndicatesCompaction(c.GetHeader("X-Codex-Turn-Metadata")) {
+			meta.UsageTriggered = true
+		}
+	}
+
+	// Only the original inbound path can mark an explicit Compact request.
+	// UpstreamEndpoint may be rewritten internally and must not affect this signal.
+	if isExplicitCompactUsageRequest(c, input) {
+		meta.UsageTriggered = true
+	}
+
+	if meta.UsageTriggered {
 		input.Compact = true
-		return
 	}
-	if c == nil {
-		return
+	if meta.HasHistory {
+		input.HasCompactionHistory = true
 	}
-	if body, ok := rawRequestBodyFromContext(c); ok && requestBodyHasCompactionTrigger(body) {
-		input.Compact = true
+}
+
+func isExplicitCompactUsageRequest(c *gin.Context, input *database.UsageLogInput) bool {
+	if c != nil && c.Request != nil && c.Request.URL != nil {
+		return isCompactUsageEndpoint(c.Request.URL.Path)
 	}
+	if input == nil {
+		return false
+	}
+	return isCompactUsageEndpoint(input.InboundEndpoint) || isCompactUsageEndpoint(input.Endpoint)
 }
 
 func isCompactUsageEndpoint(endpoint string) bool {
@@ -968,27 +994,103 @@ func setRawRequestBody(c *gin.Context, body []byte) {
 	}
 }
 
-// requestBodyHasCompactionTrigger reports whether input itself, or one of the direct input array
-// items, is the Codex compaction request control. Durable compaction history items and nested tool
-// output data are conversation content, not new compaction requests.
-func requestBodyHasCompactionTrigger(body []byte) bool {
-	input := gjson.GetBytes(body, "input")
-	if !input.Exists() {
-		return false
+const requestCompactionMetaContextKey = "request_compaction_meta"
+
+type requestCompactionMeta struct {
+	// ProtocolTriggered is the wire-level compaction_trigger control. Only this
+	// value may affect routing, account pinning, or protocol-specific timeouts.
+	ProtocolTriggered bool
+	// UsageTriggered is the observability signal persisted in usage_logs.compact.
+	UsageTriggered bool
+	// HasHistory marks direct durable compaction/context_compaction input items.
+	HasHistory bool
+}
+
+func cacheRequestCompactionMeta(c *gin.Context, meta requestCompactionMeta) {
+	if c != nil {
+		c.Set(requestCompactionMetaContextKey, meta)
 	}
-	if !input.IsArray() {
-		return gjsonResultIsCompactionTrigger(input)
+}
+
+func cachedRequestCompactionMeta(c *gin.Context) (requestCompactionMeta, bool) {
+	if c == nil {
+		return requestCompactionMeta{}, false
+	}
+	value, exists := c.Get(requestCompactionMetaContextKey)
+	if !exists {
+		return requestCompactionMeta{}, false
+	}
+	meta, ok := value.(requestCompactionMeta)
+	return meta, ok
+}
+
+func requestCompactionMetaForHTTP(c *gin.Context, body []byte) requestCompactionMeta {
+	meta := requestBodyCompactionMeta(body)
+	if c != nil && c.Request != nil {
+		if turnMetadataIndicatesCompaction(c.GetHeader("X-Codex-Turn-Metadata")) {
+			meta.UsageTriggered = true
+		}
+		if c.Request.URL != nil && isCompactUsageEndpoint(c.Request.URL.Path) {
+			meta.UsageTriggered = true
+		}
+	}
+	return meta
+}
+
+// requestBodyCompactionMeta inspects only direct input items plus the canonical
+// per-turn metadata field. It deliberately does not recurse into messages,
+// content, tool output, or arbitrary stringified JSON.
+func requestBodyCompactionMeta(body []byte) requestCompactionMeta {
+	meta := requestCompactionMeta{}
+	input := gjson.GetBytes(body, "input")
+	inspect := func(item gjson.Result) {
+		switch {
+		case gjsonResultIsCompactionTrigger(item):
+			meta.ProtocolTriggered = true
+		case gjsonResultIsCompactionHistory(item):
+			meta.HasHistory = true
+		}
+	}
+	if input.Exists() {
+		if input.IsArray() {
+			input.ForEach(func(_, item gjson.Result) bool {
+				inspect(item)
+				return true
+			})
+		} else {
+			inspect(input)
+		}
 	}
 
-	found := false
-	input.ForEach(func(_, item gjson.Result) bool {
-		if gjsonResultIsCompactionTrigger(item) {
-			found = true
-			return false
+	meta.UsageTriggered = meta.ProtocolTriggered
+	clientMetadata := gjson.GetBytes(body, "client_metadata")
+	if clientMetadata.IsObject() {
+		turnMetadata := clientMetadata.Get("x-codex-turn-metadata")
+		if turnMetadata.Type == gjson.String && turnMetadataIndicatesCompaction(turnMetadata.String()) {
+			meta.UsageTriggered = true
 		}
-		return true
-	})
-	return found
+	}
+	return meta
+}
+
+func turnMetadataIndicatesCompaction(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !gjson.Valid(raw) {
+		return false
+	}
+	root := gjson.Parse(raw)
+	if !root.IsObject() {
+		return false
+	}
+	requestKind := root.Get("request_kind")
+	return requestKind.Type == gjson.String &&
+		strings.EqualFold(strings.TrimSpace(requestKind.String()), "compaction")
+}
+
+// requestBodyHasCompactionTrigger reports only the protocol-level control used
+// for routing. Metadata-only local compaction turns must remain on /responses.
+func requestBodyHasCompactionTrigger(body []byte) bool {
+	return requestBodyCompactionMeta(body).ProtocolTriggered
 }
 
 // storeHasAvailableCodexAccount 判断账号池中是否还有可调度的官方（非中转）账号。
@@ -1022,6 +1124,14 @@ func excludeRelayAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
 
 func gjsonResultIsCompactionTrigger(result gjson.Result) bool {
 	return result.IsObject() && strings.EqualFold(strings.TrimSpace(result.Get("type").String()), "compaction_trigger")
+}
+
+func gjsonResultIsCompactionHistory(result gjson.Result) bool {
+	if !result.IsObject() {
+		return false
+	}
+	itemType := strings.TrimSpace(result.Get("type").String())
+	return strings.EqualFold(itemType, "compaction") || strings.EqualFold(itemType, "context_compaction")
 }
 
 // extractReasoningEffort 从请求体提取推理强度
@@ -1958,6 +2068,8 @@ func (h *Handler) Responses(c *gin.Context) {
 	}
 	h.capturePromptRequestIngress(c, rawBody)
 	bodyReadDone := time.Now()
+	compactionMeta := requestCompactionMetaForHTTP(c, rawBody)
+	cacheRequestCompactionMeta(c, compactionMeta)
 
 	// body-signal compact：较新的 Codex 客户端把会话压缩触发器作为 input item
 	// （type=compaction_trigger）嵌进普通 /responses 请求体，而不调用
@@ -1970,7 +2082,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	// 一次性 JSON 会让客户端在收到 response.completed 前遇到 EOF（issue #361）。
 	// 非流式请求仍可提升到 compact 专用链路，保留只实现 /responses/compact 的
 	// 中转兼容性。
-	bodySignalCompact := requestBodyHasCompactionTrigger(rawBody)
+	bodySignalCompact := compactionMeta.ProtocolTriggered
 	pinBodySignalToCodexAccounts := bodySignalCompact && h.storeHasAvailableCodexAccount()
 	streamingRelayBodySignal := bodySignalCompact && !pinBodySignalToCodexAccounts && gjson.GetBytes(rawBody, "stream").Bool()
 	if bodySignalCompact && !pinBodySignalToCodexAccounts && !streamingRelayBodySignal {
@@ -3186,6 +3298,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		return
 	}
 	h.capturePromptRequestIngress(c, rawBody)
+	cacheRequestCompactionMeta(c, requestCompactionMetaForHTTP(c, rawBody))
 
 	supportedModels := h.supportedModelIDs(c.Request.Context())
 	// 先让全局/渠道映射看到客户端原始模型（包括 -openai-compact 别名）；
