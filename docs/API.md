@@ -1316,9 +1316,11 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
       "url": "http://proxy1.example.com:8080",
       "label": "US Proxy",
       "enabled": true,
-      "last_tested_at": "2024-01-01T12:00:00Z",
-      "last_test_result": "ok",
-      "latency_ms": 150
+      "created_at": "2024-01-01T12:00:00Z",
+      "test_ip": "1.2.3.4",
+      "test_location": "United States·California·Los Angeles",
+      "test_latency_ms": 150,
+      "test_status": "success"
     }
   ]
 }
@@ -1377,17 +1379,19 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
 
 #### POST /api/admin/proxies/test
 
-测试代理连通性。
+测试代理连通性。传入 `id` 时会持久化 `test_status`；失败状态为 `error`，成功复测后恢复为 `success`。
 
 **请求:**
 
 ```json
 {
   "url": "http://proxy.example.com:8080",
-  "id": 1, // 可选，用于持久化测试结果
+  "id": 1,
   "lang": "zh-CN"
 }
 ```
+
+`id` 可选；省略时仅测试，不持久化结果。
 
 **响应:**
 
@@ -1401,6 +1405,20 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
   "isp": "Example ISP",
   "latency_ms": 150,
   "location": "United States·California·Los Angeles"
+}
+```
+
+#### POST /api/admin/proxies/clean-error
+
+删除全部 `test_status=error` 的代理，并清空引用这些代理的账号绑定。
+
+**响应:**
+
+```json
+{
+  "message": "已清理 2 个错误代理并解绑 3 个账号",
+  "cleaned": 2,
+  "unbound": 3
 }
 ```
 

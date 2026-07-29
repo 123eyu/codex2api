@@ -1095,6 +1095,11 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_ip VARCHAR(100) DEFAULT '';
 	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_location VARCHAR(255) DEFAULT '';
 	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_latency_ms INT DEFAULT 0;
+	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_status VARCHAR(20) NOT NULL DEFAULT 'untested';
+	UPDATE proxies
+	SET test_status = 'success'
+	WHERE COALESCE(test_status, 'untested') = 'untested'
+	  AND (COALESCE(test_ip, '') <> '' OR COALESCE(test_location, '') <> '' OR COALESCE(test_latency_ms, 0) > 0);
 
 	CREATE TABLE IF NOT EXISTS account_events (
 		id         SERIAL PRIMARY KEY,
@@ -2447,6 +2452,12 @@ func (db *DB) GetAllAPIKeyValues(ctx context.Context) ([]string, error) {
 
 // ==================== Proxies ====================
 
+const (
+	ProxyTestStatusUntested = "untested"
+	ProxyTestStatusSuccess  = "success"
+	ProxyTestStatusError    = "error"
+)
+
 // ProxyRow 代理行
 type ProxyRow struct {
 	ID            int64     `json:"id"`
@@ -2457,11 +2468,12 @@ type ProxyRow struct {
 	TestIP        string    `json:"test_ip"`
 	TestLocation  string    `json:"test_location"`
 	TestLatencyMs int       `json:"test_latency_ms"`
+	TestStatus    string    `json:"test_status"`
 }
 
 // ListProxies 获取所有代理
 func (db *DB) ListProxies(ctx context.Context) ([]*ProxyRow, error) {
-	rows, err := db.conn.QueryContext(ctx, `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_latency_ms,0) FROM proxies ORDER BY id`)
+	rows, err := db.conn.QueryContext(ctx, `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_latency_ms,0), COALESCE(test_status,'untested') FROM proxies ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -2471,7 +2483,7 @@ func (db *DB) ListProxies(ctx context.Context) ([]*ProxyRow, error) {
 	for rows.Next() {
 		p := &ProxyRow{}
 		var createdAtRaw interface{}
-		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &createdAtRaw, &p.TestIP, &p.TestLocation, &p.TestLatencyMs); err != nil {
+		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &createdAtRaw, &p.TestIP, &p.TestLocation, &p.TestLatencyMs, &p.TestStatus); err != nil {
 			return nil, err
 		}
 		p.CreatedAt, err = parseDBTimeValue(createdAtRaw)
@@ -2485,9 +2497,9 @@ func (db *DB) ListProxies(ctx context.Context) ([]*ProxyRow, error) {
 
 // ListEnabledProxies 获取已启用的代理
 func (db *DB) ListEnabledProxies(ctx context.Context) ([]*ProxyRow, error) {
-	query := `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_latency_ms,0) FROM proxies WHERE enabled = true ORDER BY id`
+	query := `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_latency_ms,0), COALESCE(test_status,'untested') FROM proxies WHERE enabled = true AND COALESCE(test_status,'untested') <> 'error' ORDER BY id`
 	if db.isSQLite() {
-		query = `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_latency_ms,0) FROM proxies WHERE enabled = 1 ORDER BY id`
+		query = `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_latency_ms,0), COALESCE(test_status,'untested') FROM proxies WHERE enabled = 1 AND COALESCE(test_status,'untested') <> 'error' ORDER BY id`
 	}
 	rows, err := db.conn.QueryContext(ctx, query)
 	if err != nil {
@@ -2499,7 +2511,7 @@ func (db *DB) ListEnabledProxies(ctx context.Context) ([]*ProxyRow, error) {
 	for rows.Next() {
 		p := &ProxyRow{}
 		var createdAtRaw interface{}
-		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &createdAtRaw, &p.TestIP, &p.TestLocation, &p.TestLatencyMs); err != nil {
+		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &createdAtRaw, &p.TestIP, &p.TestLocation, &p.TestLatencyMs, &p.TestStatus); err != nil {
 			return nil, err
 		}
 		p.CreatedAt, err = parseDBTimeValue(createdAtRaw)
@@ -2605,7 +2617,14 @@ func (db *DB) UpdateProxy(ctx context.Context, id int64, urlValue *string, label
 	args := make([]interface{}, 0, 4)
 	if urlValue != nil {
 		args = append(args, *urlValue)
-		assignments = append(assignments, fmt.Sprintf("url = $%d", len(args)))
+		urlPlaceholder := fmt.Sprintf("$%d", len(args))
+		assignments = append(assignments,
+			fmt.Sprintf("test_status = CASE WHEN url <> %s THEN 'untested' ELSE test_status END", urlPlaceholder),
+			fmt.Sprintf("test_ip = CASE WHEN url <> %s THEN '' ELSE test_ip END", urlPlaceholder),
+			fmt.Sprintf("test_location = CASE WHEN url <> %s THEN '' ELSE test_location END", urlPlaceholder),
+			fmt.Sprintf("test_latency_ms = CASE WHEN url <> %s THEN 0 ELSE test_latency_ms END", urlPlaceholder),
+			fmt.Sprintf("url = %s", urlPlaceholder),
+		)
 	}
 	if label != nil {
 		args = append(args, *label)
@@ -2631,12 +2650,108 @@ func (db *DB) UpdateProxy(ctx context.Context, id int64, urlValue *string, label
 	return nil
 }
 
-// UpdateProxyTestResult 更新代理测试结果
-func (db *DB) UpdateProxyTestResult(ctx context.Context, id int64, ip, location string, latencyMs int) error {
-	_, err := db.conn.ExecContext(ctx,
-		`UPDATE proxies SET test_ip = $1, test_location = $2, test_latency_ms = $3 WHERE id = $4`,
-		ip, location, latencyMs, id)
-	return err
+// UpdateProxyTestResult 更新代理测试结果和持久化测试状态。
+func (db *DB) UpdateProxyTestResult(ctx context.Context, id int64, status, ip, location string, latencyMs int) error {
+	switch status {
+	case ProxyTestStatusUntested, ProxyTestStatusSuccess, ProxyTestStatusError:
+	default:
+		return fmt.Errorf("invalid proxy test status: %q", status)
+	}
+	if status != ProxyTestStatusSuccess {
+		ip = ""
+		location = ""
+		latencyMs = 0
+	}
+	res, err := db.conn.ExecContext(ctx,
+		`UPDATE proxies SET test_status = $1, test_ip = $2, test_location = $3, test_latency_ms = $4 WHERE id = $5`,
+		status, ip, location, latencyMs, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// ProxyErrorCleanupResult 汇总错误代理清理的持久化结果。
+type ProxyErrorCleanupResult struct {
+	Deleted           int
+	Unbound           int
+	UnboundAccountIDs []int64
+}
+
+// CleanErrorProxies 删除全部测试错误的代理，并在同一事务中解绑引用它们的账号。
+func (db *DB) CleanErrorProxies(ctx context.Context) (ProxyErrorCleanupResult, error) {
+	var result ProxyErrorCleanupResult
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		rows, err := tx.QueryContext(ctx, `
+			SELECT id
+			FROM accounts
+			WHERE TRIM(COALESCE(proxy_url, '')) IN (
+				SELECT TRIM(url) FROM proxies WHERE test_status = $1
+			)
+		`, ProxyTestStatusError)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			result.UnboundAccountIDs = append(result.UnboundAccountIDs, id)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		unbindResult, err := tx.ExecContext(ctx, `
+			UPDATE accounts
+			SET proxy_url = '', updated_at = CURRENT_TIMESTAMP
+			WHERE TRIM(COALESCE(proxy_url, '')) IN (
+				SELECT TRIM(url) FROM proxies WHERE test_status = $1
+			)
+		`, ProxyTestStatusError)
+		if err != nil {
+			return err
+		}
+		unbound, err := unbindResult.RowsAffected()
+		if err != nil {
+			return err
+		}
+		result.Unbound = int(unbound)
+
+		deleteResult, err := tx.ExecContext(ctx, `DELETE FROM proxies WHERE test_status = $1`, ProxyTestStatusError)
+		if err != nil {
+			return err
+		}
+		deleted, err := deleteResult.RowsAffected()
+		if err != nil {
+			return err
+		}
+		result.Deleted = int(deleted)
+
+		return tx.Commit()
+	})
+	if err != nil {
+		return ProxyErrorCleanupResult{}, err
+	}
+	return result, nil
 }
 
 // ==================== Usage Logs（批量写入） ====================
