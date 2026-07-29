@@ -11,6 +11,7 @@ import type { HealthResponse, ModelInfo, SiteBranding, SystemSettings } from '..
 import { countPayloadRules } from './PayloadRules'
 import { getErrorMessage } from '../utils/error'
 import { DEFAULT_CLAUDE_MODEL_MAP } from '../lib/modelMapping'
+import { buildWritableSettingsPayload } from '../lib/settingsPayload'
 import { DEFAULT_SITE_LOGO, isBrandingVideo, sanitizeBrandingImage, sanitizeBrandingLogo, useBranding } from '../branding'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -1414,7 +1415,9 @@ export default function Settings() {
     setSavingSettings(true)
     try {
       const adminSecretChanged = settingsForm.admin_auth_source !== 'env' && settingsForm.admin_secret !== loadedAdminSecret
-      const updated = await api.updateSettings(normalizeLazySettingsForm(settingsForm))
+      const updated = await api.updateSettings(
+        buildWritableSettingsPayload(normalizeLazySettingsForm(settingsForm)),
+      )
       commitSettingsForm(updated)
       const branding = {
         site_name: updated.site_name,
