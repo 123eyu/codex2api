@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/codex2api/cache"
 )
 
 func responseCacheTestItem(index int, extra string) json.RawMessage {
@@ -135,6 +138,51 @@ func TestTrimResponseContextTailRetainsPendingUnmatchedCall(t *testing.T) {
 	}
 }
 
+func TestTrimResponseContextTailMatchesRepeatedCallIDsByOccurrence(t *testing.T) {
+	items := make([]json.RawMessage, 205)
+	for i := range items {
+		items[i] = responseCacheTestItem(i, "")
+	}
+	items[0] = responseCacheCallItem("function_call", "reused")
+	items[1] = responseCacheCallItem("function_call_output", "reused")
+	items[6] = responseCacheCallItem("function_call", "reused")
+	items[7] = responseCacheCallItem("function_call_output", "reused")
+
+	got := trimResponseContextTail(items, 200)
+	if len(got) != 200 || string(got[0]) != string(items[5]) {
+		t.Fatalf("independent repeated pairs were merged: got %d items starting %s, want item 5", len(got), got[0])
+	}
+}
+
+func TestTrimResponseContextTailKeepsPendingRepeatedCall(t *testing.T) {
+	items := make([]json.RawMessage, 205)
+	for i := range items {
+		items[i] = responseCacheTestItem(i, "")
+	}
+	items[0] = responseCacheCallItem("shell_call", "reused")
+	items[1] = responseCacheCallItem("shell_call_output", "reused")
+	items[5] = responseCacheCallItem("shell_call", "reused")
+
+	got := trimResponseContextTail(items, 200)
+	if len(got) != 200 || string(got[0]) != string(items[5]) {
+		t.Fatalf("pending repeated call was paired with an old output: got %d items starting %s", len(got), got[0])
+	}
+}
+
+func TestTrimResponseContextTailDoesNotMatchDifferentCallFamilies(t *testing.T) {
+	items := make([]json.RawMessage, 205)
+	for i := range items {
+		items[i] = responseCacheTestItem(i, "")
+	}
+	items[4] = responseCacheCallItem("function_call", "shared")
+	items[6] = responseCacheCallItem("mcp_tool_call_output", "shared")
+
+	got := trimResponseContextTail(items, 200)
+	if len(got) != 200 || string(got[0]) != string(items[5]) {
+		t.Fatalf("different call families were paired: got %d items starting %s, want item 5", len(got), got[0])
+	}
+}
+
 func TestResponseCacheLRUEvictionAndStats(t *testing.T) {
 	config := testResponseCacheConfig()
 	config.maxEntries = 2
@@ -177,6 +225,122 @@ func TestResponseCacheAdmissionUsesPairAwareTailTrim(t *testing.T) {
 	got := getResponseCache("key:1", "trimmed")
 	if len(got) != 199 || string(got[0]) != string(items[3]) {
 		t.Fatalf("admitted tail = %d items starting %s, want 199 items starting at item 3", len(got), got[0])
+	}
+}
+
+func TestResponseCacheLocalHitReturnsIsolatedCopy(t *testing.T) {
+	config := testResponseCacheConfig()
+	resetResponseCacheStateForTest(config)
+	original := responseCacheTestItem(1, "immutable")
+	setResponseCache("key:1", "isolated", []json.RawMessage{original})
+
+	first := getResponseCache("key:1", "isolated")
+	statsBeforeMutation := GetResponseCacheStats()
+	first[0][0] = 'X'
+	second := getResponseCache("key:1", "isolated")
+	statsAfterMutation := GetResponseCacheStats()
+
+	if string(second[0]) != string(original) {
+		t.Fatalf("caller mutation escaped into cache: got %s, want %s", second[0], original)
+	}
+	if statsAfterMutation.Entries != statsBeforeMutation.Entries ||
+		statsAfterMutation.Bytes != statsBeforeMutation.Bytes ||
+		statsAfterMutation.HighWaterBytes != statsBeforeMutation.HighWaterBytes ||
+		statsAfterMutation.LargestSeenEntryBytes != statsBeforeMutation.LargestSeenEntryBytes {
+		t.Fatalf("caller mutation changed retained stats: before=%+v after=%+v", statsBeforeMutation, statsAfterMutation)
+	}
+}
+
+func TestResponseCacheConcurrentReturnedValueMutationIsIsolated(t *testing.T) {
+	config := testResponseCacheConfig()
+	resetResponseCacheStateForTest(config)
+	original := responseCacheTestItem(1, "concurrent")
+	setResponseCache("key:1", "concurrent", []json.RawMessage{original})
+	left := getResponseCache("key:1", "concurrent")
+	right := getResponseCache("key:1", "concurrent")
+
+	var workers sync.WaitGroup
+	start := make(chan struct{})
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		<-start
+		for i := 0; i < 1000; i++ {
+			left[0][0] = byte('X' + i%2)
+		}
+		left[0][0] = 'X'
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		var sink byte
+		for i := 0; i < 1000; i++ {
+			sink ^= right[0][0]
+		}
+		_ = sink
+	}()
+	close(start)
+	workers.Wait()
+
+	if got := getResponseCache("key:1", "concurrent"); string(got[0]) != string(original) {
+		t.Fatalf("concurrent caller mutation escaped into cache: got %s, want %s", got[0], original)
+	}
+}
+
+func TestResponseCacheRuntimeRefillDoesNotReturnRetainedCopy(t *testing.T) {
+	config := testResponseCacheConfig()
+	resetResponseCacheStateForTest(config)
+	runtimeCache := cache.NewMemory(10)
+	SetResponseContextCache(runtimeCache)
+	t.Cleanup(func() {
+		SetResponseContextCache(nil)
+		_ = runtimeCache.Close()
+	})
+
+	original := responseCacheTestItem(1, "runtime")
+	storeKey := responseCacheStoreKey("key:1", "runtime")
+	if err := runtimeCache.SetResponseContext(context.Background(), storeKey, []json.RawMessage{original}, time.Minute); err != nil {
+		t.Fatalf("SetResponseContext: %v", err)
+	}
+	refilled := getResponseCache("key:1", "runtime")
+	refilled[0][0] = 'X'
+
+	if got := getResponseCache("key:1", "runtime"); string(got[0]) != string(original) {
+		t.Fatalf("runtime refill exposed retained copy: got %s, want %s", got[0], original)
+	}
+}
+
+type mutatingResponseContextCache struct {
+	cache.TokenCache
+}
+
+func (c *mutatingResponseContextCache) SetResponseContext(_ context.Context, _ string, items []json.RawMessage, _ time.Duration) error {
+	if len(items) > 0 && len(items[0]) > 0 {
+		items[0][0] = 'X'
+	}
+	return nil
+}
+
+func TestResponseCacheRuntimeWriterCannotMutateRetainedCopy(t *testing.T) {
+	config := testResponseCacheConfig()
+	resetResponseCacheStateForTest(config)
+	baseCache := cache.NewMemory(10)
+	runtimeCache := &mutatingResponseContextCache{TokenCache: baseCache}
+	SetResponseContextCache(runtimeCache)
+	t.Cleanup(func() {
+		SetResponseContextCache(nil)
+		_ = baseCache.Close()
+	})
+
+	original := responseCacheTestItem(1, "runtime-writer")
+	want := append(json.RawMessage(nil), original...)
+	setResponseCache("key:1", "runtime-writer", []json.RawMessage{original})
+
+	if original[0] != 'X' {
+		t.Fatal("mutating runtime writer did not exercise its input mutation")
+	}
+	if got := getResponseCache("key:1", "runtime-writer"); string(got[0]) != string(want) {
+		t.Fatalf("runtime writer mutated retained copy: got %s, want %s", got[0], want)
 	}
 }
 

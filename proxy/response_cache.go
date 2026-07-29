@@ -147,7 +147,7 @@ func configureResponseCacheForTest(config responseCacheConfig) {
 // setResponseCache 存储响应上下文（按 owner 命名空间隔离）
 func setResponseCache(owner, responseID string, items []json.RawMessage) {
 	storeKey := responseCacheStoreKey(owner, responseID)
-	itemsCopy, admitted := admitResponseCache(storeKey, items)
+	runtimeItems, admitted := admitResponseCache(storeKey, items)
 	if !admitted {
 		return
 	}
@@ -159,7 +159,7 @@ func setResponseCache(owner, responseID string, items []json.RawMessage) {
 	if runtimeCache != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
-		if err := runtimeCache.SetResponseContext(ctx, storeKey, itemsCopy, responseCacheTTL); err != nil {
+		if err := runtimeCache.SetResponseContext(ctx, storeKey, runtimeItems, responseCacheTTL); err != nil {
 			log.Printf("写入 Redis response context 失败: response_id=%s err=%v", responseID, err)
 		}
 	}
@@ -184,10 +184,7 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 		return nil, false
 	}
 
-	itemsCopy := make([]json.RawMessage, len(items))
-	for i, item := range items {
-		itemsCopy[i] = append(json.RawMessage(nil), item...)
-	}
+	retainedItems := cloneResponseContextItems(items)
 	if existing := respCache.store[storeKey]; existing != nil {
 		respCache.removeEntryLocked(existing, responseCacheRemovalReplace)
 	}
@@ -207,7 +204,7 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 
 	entry := &responseCacheEntry{
 		key:       storeKey,
-		items:     itemsCopy,
+		items:     retainedItems,
 		bytes:     entryBytes,
 		expiresAt: time.Now().Add(respCache.config.ttl),
 	}
@@ -218,7 +215,15 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 	if respCache.stats.Bytes > respCache.stats.HighWaterBytes {
 		respCache.stats.HighWaterBytes = respCache.stats.Bytes
 	}
-	return itemsCopy, true
+	return items, true
+}
+
+func cloneResponseContextItems(items []json.RawMessage) []json.RawMessage {
+	itemsCopy := make([]json.RawMessage, len(items))
+	for i, item := range items {
+		itemsCopy[i] = append(json.RawMessage(nil), item...)
+	}
+	return itemsCopy
 }
 
 type responseCacheRemovalReason uint8
@@ -285,9 +290,9 @@ func (c *responseCacheState) enforceConfigLocked() {
 }
 
 // trimResponseContextTail keeps one contiguous suffix no longer than maxItems.
-// If the initial boundary splits a known call/output pair, the whole crossing
-// group is excluded. Moving the boundary can expose another crossing group, so
-// the scan repeats until every retained pair is complete.
+// If the initial boundary splits a known one-to-one call/output match, that
+// interval is excluded. Moving the boundary can expose another crossing
+// interval, so the scan repeats until every retained matched pair is complete.
 func trimResponseContextTail(items []json.RawMessage, maxItems int) []json.RawMessage {
 	if maxItems <= 0 {
 		return nil
@@ -296,49 +301,80 @@ func trimResponseContextTail(items []json.RawMessage, maxItems int) []json.RawMe
 		return items
 	}
 
-	type callGroup struct {
-		first     int
-		last      int
-		hasCall   bool
-		hasOutput bool
+	type callKey struct {
+		callID   string
+		callType string
 	}
-	groups := make(map[string]callGroup)
+	type matchedInterval struct {
+		callIndex   int
+		outputIndex int
+	}
+	pendingCalls := make(map[callKey][]int)
+	var intervals []matchedInterval
 	for index, item := range items {
 		typ := gjson.GetBytes(item, "type").String()
-		isCall := isCodexToolCallContextType(typ)
-		isOutput := isCodexToolCallOutputType(typ)
-		if !isCall && !isOutput {
+		callType, isCall, isOutput := responseContextPairType(typ)
+		if callType == "" {
 			continue
 		}
 		callID := gjson.GetBytes(item, "call_id").String()
 		if callID == "" {
 			continue
 		}
-		group, exists := groups[callID]
-		if !exists {
-			group.first = index
+		key := callKey{callID: callID, callType: callType}
+		if isCall {
+			pendingCalls[key] = append(pendingCalls[key], index)
+			continue
 		}
-		group.last = index
-		group.hasCall = group.hasCall || isCall
-		group.hasOutput = group.hasOutput || isOutput
-		groups[callID] = group
+		if !isOutput || len(pendingCalls[key]) == 0 {
+			continue
+		}
+		callIndex := pendingCalls[key][0]
+		pendingCalls[key] = pendingCalls[key][1:]
+		intervals = append(intervals, matchedInterval{
+			callIndex:   callIndex,
+			outputIndex: index,
+		})
 	}
 
 	start := len(items) - maxItems
 	for {
 		nextStart := start
-		for _, group := range groups {
-			if !group.hasCall || !group.hasOutput {
-				continue
-			}
-			if group.first < start && group.last >= start && group.last+1 > nextStart {
-				nextStart = group.last + 1
+		for _, interval := range intervals {
+			if interval.callIndex < start && interval.outputIndex >= start && interval.outputIndex+1 > nextStart {
+				nextStart = interval.outputIndex + 1
 			}
 		}
 		if nextStart == start {
 			return items[start:]
 		}
 		start = nextStart
+	}
+}
+
+func responseContextPairType(typ string) (callType string, isCall, isOutput bool) {
+	switch typ {
+	case "function_call", "tool_call", "local_shell_call", "shell_call",
+		"apply_patch_call", "tool_search_call", "custom_tool_call", "mcp_tool_call":
+		return typ, true, false
+	case "function_call_output":
+		return "function_call", false, true
+	case "tool_call_output":
+		return "tool_call", false, true
+	case "local_shell_call_output":
+		return "local_shell_call", false, true
+	case "shell_call_output":
+		return "shell_call", false, true
+	case "apply_patch_call_output":
+		return "apply_patch_call", false, true
+	case "tool_search_call_output":
+		return "tool_search_call", false, true
+	case "custom_tool_call_output":
+		return "custom_tool_call", false, true
+	case "mcp_tool_call_output":
+		return "mcp_tool_call", false, true
+	default:
+		return "", false, false
 	}
 }
 
@@ -355,8 +391,9 @@ func getResponseCache(owner, responseID string) []json.RawMessage {
 		} else {
 			respCache.lru.MoveToFront(entry.element)
 			respCache.stats.Hits++
+			items := cloneResponseContextItems(entry.items)
 			respCache.mu.Unlock()
-			return entry.items
+			return items
 		}
 	}
 	respCache.stats.Misses++
@@ -375,15 +412,15 @@ func getResponseCache(owner, responseID string) []json.RawMessage {
 	if len(items) == 0 {
 		return nil
 	}
-	items, admitted := setResponseCacheLocal(storeKey, items)
-	if !admitted {
+	if !setResponseCacheLocal(storeKey, items) {
 		return nil
 	}
 	return items
 }
 
-func setResponseCacheLocal(storeKey string, items []json.RawMessage) ([]json.RawMessage, bool) {
-	return admitResponseCache(storeKey, items)
+func setResponseCacheLocal(storeKey string, items []json.RawMessage) bool {
+	_, admitted := admitResponseCache(storeKey, items)
+	return admitted
 }
 
 // respCacheCleanupLoop 后台清理过期条目
