@@ -11,10 +11,7 @@ import (
 )
 
 func resetResponseCacheForTest() {
-	respCache.mu.Lock()
-	respCache.store = make(map[string]*responseCacheEntry)
-	respCache.runtimeCache = nil
-	respCache.mu.Unlock()
+	resetResponseCacheStateForTest(defaultResponseCacheConfig())
 }
 
 func TestCacheCompletedResponseCachesCodexNativeToolCalls(t *testing.T) {

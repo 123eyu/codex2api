@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -25,8 +26,10 @@ import (
 
 const (
 	responseCacheTTL        = 10 * time.Minute
+	responseCacheMaxBytes   = 64 << 20
+	responseCacheMaxEntry   = 8 << 20
 	responseCacheMaxItems   = 2000 // 缓存条目上限，防止内存膨胀
-	responseCacheMaxPerItem = 200  // 单条缓存最大 items 数，截断过长对话
+	responseCacheMaxPerItem = 200  // 单条缓存最大 raw items 数
 	responseCleanupInterval = 2 * time.Minute
 )
 
@@ -48,18 +51,61 @@ func responseCacheStoreKey(owner, responseID string) string {
 }
 
 type responseCacheEntry struct {
+	key       string
 	items     []json.RawMessage
-	createdAt time.Time
+	bytes     int64
+	expiresAt time.Time
+	element   *list.Element
 }
 
-var respCache struct {
+type responseCacheConfig struct {
+	maxBytes      int64
+	maxEntryBytes int64
+	maxEntries    int
+	ttl           time.Duration
+	maxItems      int
+}
+
+func defaultResponseCacheConfig() responseCacheConfig {
+	return responseCacheConfig{
+		maxBytes:      responseCacheMaxBytes,
+		maxEntryBytes: responseCacheMaxEntry,
+		maxEntries:    responseCacheMaxItems,
+		ttl:           responseCacheTTL,
+		maxItems:      responseCacheMaxPerItem,
+	}
+}
+
+// ResponseCacheStats is a point-in-time snapshot of the bounded local cache.
+// Bytes are logical retained JSON payload bytes; they are not an RSS estimate.
+type ResponseCacheStats struct {
+	Entries               int
+	Bytes                 int64
+	HighWaterBytes        int64
+	LargestSeenEntryBytes int64
+	Hits                  uint64
+	Misses                uint64
+	Expirations           uint64
+	CountEvictions        uint64
+	ByteEvictions         uint64
+	OversizeSkips         uint64
+}
+
+type responseCacheState struct {
 	mu           sync.RWMutex
 	store        map[string]*responseCacheEntry
+	lru          *list.List
+	config       responseCacheConfig
+	stats        ResponseCacheStats
 	runtimeCache cache.TokenCache
 }
 
+var respCache responseCacheState
+
 func init() {
 	respCache.store = make(map[string]*responseCacheEntry)
+	respCache.lru = list.New()
+	respCache.config = defaultResponseCacheConfig()
 	go respCacheCleanupLoop()
 }
 
@@ -69,37 +115,46 @@ func SetResponseContextCache(tc cache.TokenCache) {
 	respCache.mu.Unlock()
 }
 
+// GetResponseCacheStats returns a thread-safe local-cache snapshot.
+func GetResponseCacheStats() ResponseCacheStats {
+	respCache.mu.RLock()
+	stats := respCache.stats
+	respCache.mu.RUnlock()
+	return stats
+}
+
+// resetResponseCacheStateForTest replaces all local state with a deterministic
+// test configuration. It deliberately remains package-private.
+func resetResponseCacheStateForTest(config responseCacheConfig) {
+	respCache.mu.Lock()
+	respCache.store = make(map[string]*responseCacheEntry)
+	respCache.lru = list.New()
+	respCache.config = config
+	respCache.stats = ResponseCacheStats{}
+	respCache.runtimeCache = nil
+	respCache.mu.Unlock()
+}
+
+// configureResponseCacheForTest exercises the same immediate runtime-shrink
+// path future configuration wiring will use, without exposing configuration.
+func configureResponseCacheForTest(config responseCacheConfig) {
+	respCache.mu.Lock()
+	respCache.config = config
+	respCache.enforceConfigLocked()
+	respCache.mu.Unlock()
+}
+
 // setResponseCache 存储响应上下文（按 owner 命名空间隔离）
 func setResponseCache(owner, responseID string, items []json.RawMessage) {
 	storeKey := responseCacheStoreKey(owner, responseID)
-	// 截断过长对话，只保留最后 responseCacheMaxPerItem 条
-	if len(items) > responseCacheMaxPerItem {
-		items = items[len(items)-responseCacheMaxPerItem:]
+	itemsCopy, admitted := admitResponseCache(storeKey, items)
+	if !admitted {
+		return
 	}
 
-	respCache.mu.Lock()
-	// 超过上限时随机清理10%的条目
-	if len(respCache.store) >= responseCacheMaxItems {
-		deleteCount := responseCacheMaxItems / 10
-		for k := range respCache.store {
-			delete(respCache.store, k)
-			deleteCount--
-			if deleteCount <= 0 {
-				break
-			}
-		}
-	}
-
-	// 复制 items 避免外部修改
-	itemsCopy := make([]json.RawMessage, len(items))
-	copy(itemsCopy, items)
-
-	respCache.store[storeKey] = &responseCacheEntry{
-		items:     itemsCopy,
-		createdAt: time.Now(),
-	}
+	respCache.mu.RLock()
 	runtimeCache := respCache.runtimeCache
-	respCache.mu.Unlock()
+	respCache.mu.RUnlock()
 
 	if runtimeCache != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -110,28 +165,202 @@ func setResponseCache(owner, responseID string, items []json.RawMessage) {
 	}
 }
 
+func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMessage, bool) {
+	respCache.mu.Lock()
+	defer respCache.mu.Unlock()
+
+	items = trimResponseContextTail(items, respCache.config.maxItems)
+	var entryBytes int64
+	for _, item := range items {
+		entryBytes += int64(len(item))
+	}
+	if entryBytes > respCache.stats.LargestSeenEntryBytes {
+		respCache.stats.LargestSeenEntryBytes = entryBytes
+	}
+	if respCache.config.maxEntries <= 0 ||
+		entryBytes > respCache.config.maxEntryBytes ||
+		entryBytes > respCache.config.maxBytes {
+		respCache.stats.OversizeSkips++
+		return nil, false
+	}
+
+	itemsCopy := make([]json.RawMessage, len(items))
+	for i, item := range items {
+		itemsCopy[i] = append(json.RawMessage(nil), item...)
+	}
+	if existing := respCache.store[storeKey]; existing != nil {
+		respCache.removeEntryLocked(existing, responseCacheRemovalReplace)
+	}
+	for len(respCache.store)+1 > respCache.config.maxEntries ||
+		respCache.stats.Bytes+entryBytes > respCache.config.maxBytes {
+		oldest := respCache.oldestLocked()
+		if oldest == nil {
+			respCache.stats.OversizeSkips++
+			return nil, false
+		}
+		reason := responseCacheRemovalByteEviction
+		if len(respCache.store)+1 > respCache.config.maxEntries {
+			reason = responseCacheRemovalCountEviction
+		}
+		respCache.removeEntryLocked(oldest, reason)
+	}
+
+	entry := &responseCacheEntry{
+		key:       storeKey,
+		items:     itemsCopy,
+		bytes:     entryBytes,
+		expiresAt: time.Now().Add(respCache.config.ttl),
+	}
+	entry.element = respCache.lru.PushFront(entry)
+	respCache.store[storeKey] = entry
+	respCache.stats.Entries = len(respCache.store)
+	respCache.stats.Bytes += entryBytes
+	if respCache.stats.Bytes > respCache.stats.HighWaterBytes {
+		respCache.stats.HighWaterBytes = respCache.stats.Bytes
+	}
+	return itemsCopy, true
+}
+
+type responseCacheRemovalReason uint8
+
+const (
+	responseCacheRemovalReplace responseCacheRemovalReason = iota
+	responseCacheRemovalExpiration
+	responseCacheRemovalCountEviction
+	responseCacheRemovalByteEviction
+)
+
+func (c *responseCacheState) oldestLocked() *responseCacheEntry {
+	if c.lru == nil {
+		return nil
+	}
+	element := c.lru.Back()
+	if element == nil {
+		return nil
+	}
+	entry, _ := element.Value.(*responseCacheEntry)
+	return entry
+}
+
+func (c *responseCacheState) removeEntryLocked(entry *responseCacheEntry, reason responseCacheRemovalReason) {
+	if entry == nil || c.store[entry.key] != entry {
+		return
+	}
+	delete(c.store, entry.key)
+	if entry.element != nil {
+		c.lru.Remove(entry.element)
+	}
+	c.stats.Entries = len(c.store)
+	c.stats.Bytes -= entry.bytes
+	switch reason {
+	case responseCacheRemovalExpiration:
+		c.stats.Expirations++
+	case responseCacheRemovalCountEviction:
+		c.stats.CountEvictions++
+	case responseCacheRemovalByteEviction:
+		c.stats.ByteEvictions++
+	}
+}
+
+func (c *responseCacheState) enforceConfigLocked() {
+	for element := c.lru.Back(); element != nil; {
+		previous := element.Prev()
+		entry, _ := element.Value.(*responseCacheEntry)
+		if entry != nil && entry.bytes > c.config.maxEntryBytes {
+			c.removeEntryLocked(entry, responseCacheRemovalByteEviction)
+		}
+		element = previous
+	}
+	for len(c.store) > c.config.maxEntries || c.stats.Bytes > c.config.maxBytes {
+		oldest := c.oldestLocked()
+		if oldest == nil {
+			break
+		}
+		reason := responseCacheRemovalByteEviction
+		if len(c.store) > c.config.maxEntries {
+			reason = responseCacheRemovalCountEviction
+		}
+		c.removeEntryLocked(oldest, reason)
+	}
+}
+
+// trimResponseContextTail keeps one contiguous suffix no longer than maxItems.
+// If the initial boundary splits a known call/output pair, the whole crossing
+// group is excluded. Moving the boundary can expose another crossing group, so
+// the scan repeats until every retained pair is complete.
+func trimResponseContextTail(items []json.RawMessage, maxItems int) []json.RawMessage {
+	if maxItems <= 0 {
+		return nil
+	}
+	if len(items) <= maxItems {
+		return items
+	}
+
+	type callGroup struct {
+		first     int
+		last      int
+		hasCall   bool
+		hasOutput bool
+	}
+	groups := make(map[string]callGroup)
+	for index, item := range items {
+		typ := gjson.GetBytes(item, "type").String()
+		isCall := isCodexToolCallContextType(typ)
+		isOutput := isCodexToolCallOutputType(typ)
+		if !isCall && !isOutput {
+			continue
+		}
+		callID := gjson.GetBytes(item, "call_id").String()
+		if callID == "" {
+			continue
+		}
+		group, exists := groups[callID]
+		if !exists {
+			group.first = index
+		}
+		group.last = index
+		group.hasCall = group.hasCall || isCall
+		group.hasOutput = group.hasOutput || isOutput
+		groups[callID] = group
+	}
+
+	start := len(items) - maxItems
+	for {
+		nextStart := start
+		for _, group := range groups {
+			if !group.hasCall || !group.hasOutput {
+				continue
+			}
+			if group.first < start && group.last >= start && group.last+1 > nextStart {
+				nextStart = group.last + 1
+			}
+		}
+		if nextStart == start {
+			return items[start:]
+		}
+		start = nextStart
+	}
+}
+
 // getResponseCache 查找缓存的响应上下文；owner 不匹配等同缓存未命中，
 // 防止跨 API Key 用 response_id 拉取他人对话历史。
 func getResponseCache(owner, responseID string) []json.RawMessage {
 	storeKey := responseCacheStoreKey(owner, responseID)
-	respCache.mu.RLock()
+	respCache.mu.Lock()
 	entry, ok := respCache.store[storeKey]
 	runtimeCache := respCache.runtimeCache
-	respCache.mu.RUnlock()
 	if ok {
-		// entry.createdAt 在创建后不可变，无锁访问安全
-		if time.Since(entry.createdAt) > responseCacheTTL {
-			// 同步删除过期条目，避免goroutine爆炸
-			respCache.mu.Lock()
-			// 双重检查：确认条目仍然存在且已过期
-			if e, exists := respCache.store[storeKey]; exists && time.Since(e.createdAt) > responseCacheTTL {
-				delete(respCache.store, storeKey)
-			}
-			respCache.mu.Unlock()
+		if !time.Now().Before(entry.expiresAt) {
+			respCache.removeEntryLocked(entry, responseCacheRemovalExpiration)
 		} else {
+			respCache.lru.MoveToFront(entry.element)
+			respCache.stats.Hits++
+			respCache.mu.Unlock()
 			return entry.items
 		}
 	}
+	respCache.stats.Misses++
+	respCache.mu.Unlock()
 
 	if runtimeCache == nil {
 		return nil
@@ -146,21 +375,15 @@ func getResponseCache(owner, responseID string) []json.RawMessage {
 	if len(items) == 0 {
 		return nil
 	}
-	setResponseCacheLocal(storeKey, items)
+	items, admitted := setResponseCacheLocal(storeKey, items)
+	if !admitted {
+		return nil
+	}
 	return items
 }
 
-func setResponseCacheLocal(storeKey string, items []json.RawMessage) {
-	itemsCopy := make([]json.RawMessage, len(items))
-	for i, item := range items {
-		itemsCopy[i] = append(json.RawMessage(nil), item...)
-	}
-	respCache.mu.Lock()
-	respCache.store[storeKey] = &responseCacheEntry{
-		items:     itemsCopy,
-		createdAt: time.Now(),
-	}
-	respCache.mu.Unlock()
+func setResponseCacheLocal(storeKey string, items []json.RawMessage) ([]json.RawMessage, bool) {
+	return admitResponseCache(storeKey, items)
 }
 
 // respCacheCleanupLoop 后台清理过期条目
@@ -170,15 +393,10 @@ func respCacheCleanupLoop() {
 	for range ticker.C {
 		now := time.Now()
 		respCache.mu.Lock()
-		// 批量删除，减少锁持有时间
-		var toDelete []string
-		for k, v := range respCache.store {
-			if now.Sub(v.createdAt) > responseCacheTTL {
-				toDelete = append(toDelete, k)
+		for _, entry := range respCache.store {
+			if !now.Before(entry.expiresAt) {
+				respCache.removeEntryLocked(entry, responseCacheRemovalExpiration)
 			}
-		}
-		for _, k := range toDelete {
-			delete(respCache.store, k)
 		}
 		respCache.mu.Unlock()
 	}
