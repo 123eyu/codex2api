@@ -55,6 +55,10 @@ type Handler struct {
 	queryResetCredits      func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error)
 	consumeResetCredit     func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error)
 	recordAccountEvent     func(int64, string, string)
+	proxyProbe             func(context.Context, string, string) proxyProbeResult
+	reloadProxyPoolFn      func() error
+	proxyBatchEventSender  func(*gin.Context, proxyBatchTestEvent) bool
+	proxyBatchTestMu       sync.Mutex
 	cpuSampler             *cpuSampler
 	startedAt              time.Time
 	pgMaxConns             int
@@ -598,6 +602,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/proxies/batch-delete", h.BatchDeleteProxies)
 	api.POST("/proxies/clean-error", h.CleanErrorProxies)
 	api.POST("/proxies/test", h.TestProxy)
+	api.POST("/proxies/test-all", h.TestAllProxies)
 
 	// OAuth 授权流程
 	api.POST("/oauth/generate-auth-url", h.GenerateOAuthURL)
@@ -3960,17 +3965,18 @@ func setupSSE(c *gin.Context) {
 	c.Writer.Flush()
 }
 
-func sendSSEJSON(c *gin.Context, event any) {
+func sendSSEJSON(c *gin.Context, event any) bool {
 	data, err := json.Marshal(event)
 	if err != nil {
 		log.Printf("序列化 SSE 事件失败: %v", err)
-		return
+		return false
 	}
 	if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", data); err != nil {
 		log.Printf("写入 SSE 事件失败: %v", err)
-		return
+		return false
 	}
 	c.Writer.Flush()
+	return true
 }
 
 // importAccountsCommon 公共的去重、并发插入、SSE 进度推送逻辑（支持 RT 和 AT-only 混合导入）
@@ -9447,6 +9453,17 @@ func (h *Handler) cleanByStatus(c *gin.Context, targetStatus string) {
 
 // ==================== Proxies ====================
 
+func normalizeManagedProxyURL(raw string) (string, error) {
+	normalized := strings.TrimSpace(raw)
+	if err := security.ValidateProxyURL(normalized); err != nil {
+		return "", err
+	}
+	if _, err := security.ParseProxyURL(normalized); err != nil {
+		return "", err
+	}
+	return normalized, nil
+}
+
 // ListProxies 获取代理列表
 func (h *Handler) ListProxies(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
@@ -9488,10 +9505,18 @@ func (h *Handler) AddProxies(c *gin.Context) {
 	// 过滤空行
 	cleaned := make([]string, 0, len(urls))
 	for _, u := range urls {
-		u = strings.TrimSpace(u)
-		if u != "" {
-			cleaned = append(cleaned, u)
+		if strings.TrimSpace(u) != "" {
+			normalizedURL, err := normalizeManagedProxyURL(u)
+			if err != nil {
+				writeError(c, http.StatusBadRequest, "无效的代理 URL: "+err.Error())
+				return
+			}
+			cleaned = append(cleaned, normalizedURL)
 		}
+	}
+	if len(cleaned) == 0 {
+		writeError(c, http.StatusBadRequest, "请提供至少一个有效的代理 URL")
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -9557,6 +9582,14 @@ func (h *Handler) UpdateProxy(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
+	if req.URL != nil {
+		normalizedURL, err := normalizeManagedProxyURL(*req.URL)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "无效的代理 URL: "+err.Error())
+			return
+		}
+		req.URL = &normalizedURL
+	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -9606,17 +9639,25 @@ func (h *Handler) CleanErrorProxies(c *gin.Context) {
 
 	result, err := h.db.CleanErrorProxies(ctx)
 	if err != nil {
+		log.Printf("清理错误代理失败: %v", err)
 		writeError(c, http.StatusInternalServerError, "清理错误代理失败")
 		return
 	}
 
 	if h.store != nil {
 		for _, accountID := range result.UnboundAccountIDs {
-			h.store.ApplyAccountProxyURL(accountID, "")
+			h.store.ClearAccountProxyURLIfMatches(accountID, result.DeletedProxyURLs)
 		}
-		if err := h.store.ReloadProxyPool(); err != nil {
-			log.Printf("错误代理已清理，但代理池刷新失败: %v", err)
-		}
+		h.removeProxyURLsFromRuntime(result.DeletedProxyURLs)
+	}
+	if err := h.reloadProxyPool(); err != nil {
+		log.Printf("错误代理已清理，但代理池刷新失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "错误代理已清理，但代理池刷新失败",
+			"cleaned": result.Deleted,
+			"unbound": result.Unbound,
+		})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -9626,34 +9667,35 @@ func (h *Handler) CleanErrorProxies(c *gin.Context) {
 	})
 }
 
-func (h *Handler) persistProxyTestResult(ctx context.Context, id int64, status, ip, location string, latencyMs int) error {
+func (h *Handler) persistProxyTestResult(ctx context.Context, id int64, expectedURL, status, ip, location string, latencyMs int) error {
 	if id <= 0 {
 		return nil
 	}
-	saveCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
-	if err := h.db.UpdateProxyTestResult(saveCtx, id, status, ip, location, latencyMs); err != nil {
+	if err := h.db.UpdateProxyTestResult(saveCtx, id, expectedURL, status, ip, location, latencyMs); err != nil {
 		return err
 	}
-	if h.store != nil {
-		if err := h.store.ReloadProxyPool(); err != nil {
-			log.Printf("代理测试状态已保存，但代理池刷新失败: %v", err)
-		}
+	if status == database.ProxyTestStatusError {
+		h.removeProxyURLsFromRuntime([]string{expectedURL})
+	}
+	if err := h.reloadProxyPool(); err != nil {
+		return fmt.Errorf("代理测试状态已保存，但代理池刷新失败: %w", err)
 	}
 	return nil
 }
 
-func (h *Handler) respondProxyTestFailure(c *gin.Context, id int64, message string, latencyMs int) {
-	if strings.TrimSpace(message) == "" {
-		message = "代理检测失败"
+func respondProxyTestSaveError(c *gin.Context, err error, probeMessage string) {
+	if errors.Is(err, database.ErrProxyTestTargetChanged) {
+		c.JSON(http.StatusConflict, gin.H{"error": "代理在测试期间已被修改，请重新测试"})
+		return
 	}
-	if err := h.persistProxyTestResult(c.Request.Context(), id, database.ProxyTestStatusError, "", "", 0); err != nil {
-		message = "代理测试结果保存失败: " + err.Error()
+	if strings.TrimSpace(probeMessage) == "" {
+		probeMessage = "代理测试已完成"
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"success":    false,
-		"error":      message,
-		"latency_ms": latencyMs,
+	log.Printf("同步代理测试结果失败: probe_error=%q err=%v", probeMessage, err)
+	c.JSON(http.StatusInternalServerError, gin.H{
+		"error": fmt.Sprintf("%s；保存测试结果或刷新代理池失败: %v", probeMessage, err),
 	})
 }
 
@@ -9673,64 +9715,44 @@ func (h *Handler) TestProxy(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请提供代理 URL")
 		return
 	}
-
-	// 创建使用指定代理的 HTTP client
-	transport := &http.Transport{}
-	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	transport.DialContext = baseDialer.DialContext
-	if err := auth.ConfigureTransportProxy(transport, proxyURL, baseDialer); err != nil {
-		h.respondProxyTestFailure(c, req.ID, fmt.Sprintf("代理 URL 格式错误: %v", err), 0)
-		return
-	}
-	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
-
-	apiLang := req.Lang
-	if apiLang == "" {
-		apiLang = "en"
-	}
-	start := time.Now()
-	resp, err := client.Get(fmt.Sprintf("http://ip-api.com/json/?lang=%s&fields=status,message,country,regionName,city,isp,query", apiLang))
-	latencyMs := int(time.Since(start).Milliseconds())
-
-	if err != nil {
-		h.respondProxyTestFailure(c, req.ID, fmt.Sprintf("连接失败: %v", err), latencyMs)
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		h.respondProxyTestFailure(c, req.ID, fmt.Sprintf("读取检测结果失败: %v", err), latencyMs)
-		return
-	}
-	result := gjson.ParseBytes(body)
-
-	if result.Get("status").String() != "success" {
-		h.respondProxyTestFailure(c, req.ID, result.Get("message").String(), latencyMs)
-		return
+	expectedURL := proxyURL
+	if req.ID > 0 {
+		row, err := h.db.GetProxy(c.Request.Context(), req.ID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(c, http.StatusNotFound, "代理不存在")
+				return
+			}
+			writeError(c, http.StatusInternalServerError, "获取代理信息失败")
+			return
+		}
+		storedURL := row.URL
+		if strings.TrimSpace(storedURL) != proxyURL {
+			c.JSON(http.StatusConflict, gin.H{"error": "代理已被修改，请刷新后重新测试"})
+			return
+		}
+		expectedURL = storedURL
+		proxyURL = strings.TrimSpace(storedURL)
 	}
 
-	ip := result.Get("query").String()
-	country := result.Get("country").String()
-	region := result.Get("regionName").String()
-	city := result.Get("city").String()
-	isp := result.Get("isp").String()
-	location := country + "·" + region + "·" + city
-
-	// 持久化测试结果；成功复测会让代理重新进入轮询池。
-	if err := h.persistProxyTestResult(c.Request.Context(), req.ID, database.ProxyTestStatusSuccess, ip, location, latencyMs); err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "error": "代理测试结果保存失败: " + err.Error(), "latency_ms": latencyMs})
-		return
+	result := h.runProxyProbe(c.Request.Context(), proxyURL, req.Lang)
+	if result.Conclusive {
+		status := database.ProxyTestStatusError
+		if result.Success {
+			status = database.ProxyTestStatusSuccess
+		}
+		if err := h.persistProxyTestResult(
+			c.Request.Context(),
+			req.ID,
+			expectedURL,
+			status,
+			result.IP,
+			result.Location,
+			result.LatencyMs,
+		); err != nil {
+			respondProxyTestSaveError(c, err, result.Error)
+			return
+		}
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success":    true,
-		"ip":         ip,
-		"country":    country,
-		"region":     region,
-		"city":       city,
-		"isp":        isp,
-		"latency_ms": latencyMs,
-		"location":   location,
-	})
+	c.JSON(http.StatusOK, result)
 }

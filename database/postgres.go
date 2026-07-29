@@ -2460,6 +2460,8 @@ const (
 	ProxyTestStatusError    = "error"
 )
 
+var ErrProxyTestTargetChanged = errors.New("proxy test target changed")
+
 // ProxyRow 代理行
 type ProxyRow struct {
 	ID            int64     `json:"id"`
@@ -2486,6 +2488,82 @@ func (db *DB) ListProxies(ctx context.Context) ([]*ProxyRow, error) {
 		p := &ProxyRow{}
 		var createdAtRaw interface{}
 		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &createdAtRaw, &p.TestIP, &p.TestLocation, &p.TestLatencyMs, &p.TestStatus); err != nil {
+			return nil, err
+		}
+		p.CreatedAt, err = parseDBTimeValue(createdAtRaw)
+		if err != nil {
+			return nil, err
+		}
+		proxies = append(proxies, p)
+	}
+	return proxies, rows.Err()
+}
+
+// GetProxy returns one proxy by ID.
+func (db *DB) GetProxy(ctx context.Context, id int64) (*ProxyRow, error) {
+	p := &ProxyRow{}
+	var createdAtRaw interface{}
+	err := db.conn.QueryRowContext(ctx, `
+		SELECT id, url, label, enabled, created_at,
+		       COALESCE(test_ip,''), COALESCE(test_location,''),
+		       COALESCE(test_latency_ms,0), COALESCE(test_status,'untested')
+		FROM proxies
+		WHERE id = $1
+	`, id).Scan(
+		&p.ID,
+		&p.URL,
+		&p.Label,
+		&p.Enabled,
+		&createdAtRaw,
+		&p.TestIP,
+		&p.TestLocation,
+		&p.TestLatencyMs,
+		&p.TestStatus,
+	)
+	if err != nil {
+		return nil, err
+	}
+	p.CreatedAt, err = parseDBTimeValue(createdAtRaw)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// ListProxiesByIDs returns only the requested proxy rows.
+func (db *DB) ListProxiesByIDs(ctx context.Context, ids []int64) ([]*ProxyRow, error) {
+	if len(ids) == 0 {
+		return []*ProxyRow{}, nil
+	}
+	query := fmt.Sprintf(`
+		SELECT id, url, label, enabled, created_at,
+		       COALESCE(test_ip,''), COALESCE(test_location,''),
+		       COALESCE(test_latency_ms,0), COALESCE(test_status,'untested')
+		FROM proxies
+		WHERE id IN (%s)
+		ORDER BY id
+	`, strings.Join(dbPlaceholders(db.isSQLite(), 1, len(ids)), ","))
+	rows, err := db.conn.QueryContext(ctx, query, argsFromInt64s(ids)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	proxies := make([]*ProxyRow, 0, len(ids))
+	for rows.Next() {
+		p := &ProxyRow{}
+		var createdAtRaw interface{}
+		if err := rows.Scan(
+			&p.ID,
+			&p.URL,
+			&p.Label,
+			&p.Enabled,
+			&createdAtRaw,
+			&p.TestIP,
+			&p.TestLocation,
+			&p.TestLatencyMs,
+			&p.TestStatus,
+		); err != nil {
 			return nil, err
 		}
 		p.CreatedAt, err = parseDBTimeValue(createdAtRaw)
@@ -2618,7 +2696,8 @@ func (db *DB) UpdateProxy(ctx context.Context, id int64, urlValue *string, label
 	assignments := make([]string, 0, 3)
 	args := make([]interface{}, 0, 4)
 	if urlValue != nil {
-		args = append(args, *urlValue)
+		normalizedURL := strings.TrimSpace(*urlValue)
+		args = append(args, normalizedURL)
 		urlPlaceholder := fmt.Sprintf("$%d", len(args))
 		assignments = append(assignments,
 			fmt.Sprintf("test_status = CASE WHEN url <> %s THEN 'untested' ELSE test_status END", urlPlaceholder),
@@ -2652,8 +2731,8 @@ func (db *DB) UpdateProxy(ctx context.Context, id int64, urlValue *string, label
 	return nil
 }
 
-// UpdateProxyTestResult 更新代理测试结果和持久化测试状态。
-func (db *DB) UpdateProxyTestResult(ctx context.Context, id int64, status, ip, location string, latencyMs int) error {
+// UpdateProxyTestResult 仅在代理 URL 与测试目标仍一致时更新测试结果。
+func (db *DB) UpdateProxyTestResult(ctx context.Context, id int64, expectedURL, status, ip, location string, latencyMs int) error {
 	switch status {
 	case ProxyTestStatusUntested, ProxyTestStatusSuccess, ProxyTestStatusError:
 	default:
@@ -2665,8 +2744,8 @@ func (db *DB) UpdateProxyTestResult(ctx context.Context, id int64, status, ip, l
 		latencyMs = 0
 	}
 	res, err := db.conn.ExecContext(ctx,
-		`UPDATE proxies SET test_status = $1, test_ip = $2, test_location = $3, test_latency_ms = $4 WHERE id = $5`,
-		status, ip, location, latencyMs, id)
+		`UPDATE proxies SET test_status = $1, test_ip = $2, test_location = $3, test_latency_ms = $4 WHERE id = $5 AND url = $6`,
+		status, ip, location, latencyMs, id, expectedURL)
 	if err != nil {
 		return err
 	}
@@ -2675,7 +2754,7 @@ func (db *DB) UpdateProxyTestResult(ctx context.Context, id int64, status, ip, l
 		return err
 	}
 	if affected == 0 {
-		return sql.ErrNoRows
+		return ErrProxyTestTargetChanged
 	}
 	return nil
 }
@@ -2685,6 +2764,7 @@ type ProxyErrorCleanupResult struct {
 	Deleted           int
 	Unbound           int
 	UnboundAccountIDs []int64
+	DeletedProxyURLs  []string
 }
 
 // CleanErrorProxies 删除全部测试错误的代理，并在同一事务中解绑引用它们的账号。
@@ -2697,23 +2777,31 @@ func (db *DB) CleanErrorProxies(ctx context.Context) (ProxyErrorCleanupResult, e
 		}
 		defer tx.Rollback()
 
+		lockClause := ""
+		if !db.isSQLite() {
+			lockClause = " FOR UPDATE"
+		}
 		rows, err := tx.QueryContext(ctx, `
-			SELECT id
-			FROM accounts
-			WHERE TRIM(COALESCE(proxy_url, '')) IN (
-				SELECT TRIM(url) FROM proxies WHERE test_status = $1
-			)
-		`, ProxyTestStatusError)
+			SELECT id, TRIM(url)
+			FROM proxies
+			WHERE test_status = $1
+			ORDER BY id`+lockClause,
+			ProxyTestStatusError,
+		)
 		if err != nil {
 			return err
 		}
+		var proxyIDs []int64
+		var proxyURLs []string
 		for rows.Next() {
 			var id int64
-			if err := rows.Scan(&id); err != nil {
+			var proxyURL string
+			if err := rows.Scan(&id, &proxyURL); err != nil {
 				rows.Close()
 				return err
 			}
-			result.UnboundAccountIDs = append(result.UnboundAccountIDs, id)
+			proxyIDs = append(proxyIDs, id)
+			proxyURLs = append(proxyURLs, proxyURL)
 		}
 		if err := rows.Close(); err != nil {
 			return err
@@ -2721,32 +2809,64 @@ func (db *DB) CleanErrorProxies(ctx context.Context) (ProxyErrorCleanupResult, e
 		if err := rows.Err(); err != nil {
 			return err
 		}
+		if len(proxyIDs) == 0 {
+			return tx.Commit()
+		}
 
-		unbindResult, err := tx.ExecContext(ctx, `
+		unbindArgs := make([]interface{}, len(proxyURLs))
+		for i, proxyURL := range proxyURLs {
+			unbindArgs[i] = proxyURL
+		}
+		unbindQuery := fmt.Sprintf(`
 			UPDATE accounts
 			SET proxy_url = '', updated_at = CURRENT_TIMESTAMP
-			WHERE TRIM(COALESCE(proxy_url, '')) IN (
-				SELECT TRIM(url) FROM proxies WHERE test_status = $1
-			)
-		`, ProxyTestStatusError)
+			WHERE TRIM(COALESCE(proxy_url, '')) IN (%s)
+			RETURNING id
+		`, strings.Join(dbPlaceholders(db.isSQLite(), 1, len(proxyURLs)), ","))
+		rows, err = tx.QueryContext(ctx, unbindQuery, unbindArgs...)
 		if err != nil {
 			return err
 		}
-		unbound, err := unbindResult.RowsAffected()
-		if err != nil {
+		for rows.Next() {
+			var accountID int64
+			if err := rows.Scan(&accountID); err != nil {
+				rows.Close()
+				return err
+			}
+			result.UnboundAccountIDs = append(result.UnboundAccountIDs, accountID)
+		}
+		if err := rows.Close(); err != nil {
 			return err
 		}
-		result.Unbound = int(unbound)
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		result.Unbound = len(result.UnboundAccountIDs)
 
-		deleteResult, err := tx.ExecContext(ctx, `DELETE FROM proxies WHERE test_status = $1`, ProxyTestStatusError)
+		deleteQuery := fmt.Sprintf(
+			`DELETE FROM proxies WHERE id IN (%s) RETURNING id, TRIM(url)`,
+			strings.Join(dbPlaceholders(db.isSQLite(), 1, len(proxyIDs)), ","),
+		)
+		rows, err = tx.QueryContext(ctx, deleteQuery, argsFromInt64s(proxyIDs)...)
 		if err != nil {
 			return err
 		}
-		deleted, err := deleteResult.RowsAffected()
-		if err != nil {
+		for rows.Next() {
+			var proxyID int64
+			var proxyURL string
+			if err := rows.Scan(&proxyID, &proxyURL); err != nil {
+				rows.Close()
+				return err
+			}
+			result.Deleted++
+			result.DeletedProxyURLs = append(result.DeletedProxyURLs, proxyURL)
+		}
+		if err := rows.Close(); err != nil {
 			return err
 		}
-		result.Deleted = int(deleted)
+		if err := rows.Err(); err != nil {
+			return err
+		}
 
 		return tx.Commit()
 	})

@@ -891,6 +891,7 @@ export interface ProxyRow {
 
 export interface ProxyTestResult {
   success: boolean
+  conclusive?: boolean
   ip?: string
   country?: string
   region?: string

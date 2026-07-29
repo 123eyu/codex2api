@@ -33,9 +33,14 @@ import {
 } from "../hooks/usePersistedPageSize";
 import { useToast } from "../hooks/useToast";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
+import { postAdminSSE } from "../hooks/useOperationProgress";
+import {
+  applyProxyTestResult,
+  chunkProxyTestIDs,
+  getProxyStatusBadgeKind,
+  readProxyBatchTestSSE,
+} from "../lib/proxyTestState";
 import { getErrorMessage } from "../utils/error";
-
-const TEST_ALL_CONCURRENCY = 4;
 
 const PROXY_SCHEMES = ["http:", "https:", "socks5:", "socks5h:"];
 
@@ -136,22 +141,31 @@ function ProxyStatusBadge({
   proxy: ProxyRow;
 }) {
   const { t } = useTranslation();
-  const isError = proxy.test_status === "error";
-  const styles = isError
-    ? "border-destructive/25 bg-destructive/10 text-destructive"
-    : proxy.enabled
-      ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-      : "border-border bg-muted/50 text-muted-foreground";
-  const dot = isError
-    ? "bg-destructive"
-    : proxy.enabled
-      ? "bg-emerald-500"
-      : "bg-muted-foreground/50";
-  const label = isError
-    ? t("proxies.testStatusError")
-    : proxy.enabled
-      ? t("proxies.enabled")
-      : t("proxies.disabled");
+  const kind = getProxyStatusBadgeKind(proxy);
+  const styles =
+    kind === "error"
+      ? "border-destructive/25 bg-destructive/10 text-destructive"
+      : kind === "untested"
+        ? "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+        : kind === "enabled"
+          ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+          : "border-border bg-muted/50 text-muted-foreground";
+  const dot =
+    kind === "error"
+      ? "bg-destructive"
+      : kind === "untested"
+        ? "bg-amber-500"
+        : kind === "enabled"
+          ? "bg-emerald-500"
+          : "bg-muted-foreground/50";
+  const label =
+    kind === "error"
+      ? t("proxies.testStatusError")
+      : kind === "untested"
+        ? t("proxies.testStatusUntested")
+        : kind === "enabled"
+          ? t("proxies.enabled")
+          : t("proxies.disabled");
   const className = `inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-all ${styles}`;
 
   return (
@@ -178,6 +192,7 @@ export default function Proxies() {
   const [testAllLoading, setTestAllLoading] = useState(false);
   const [testAllDone, setTestAllDone] = useState(0);
   const [testAllFailed, setTestAllFailed] = useState(0);
+  const [testAllTotal, setTestAllTotal] = useState(0);
   const [cleaningErrors, setCleaningErrors] = useState(false);
   const [page, setPage] = useState(1);
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS;
@@ -492,39 +507,17 @@ export default function Proxies() {
     setTestingIds((prev) => new Set(prev).add(p.id));
     try {
       const result = await api.testProxy(p.url, p.id, ipApiLang);
+      setProxies((prev) =>
+        prev.map((px) =>
+          px.id === p.id ? applyProxyTestResult(px, result) : px,
+        ),
+      );
       if (!result.success) {
-        setProxies((prev) =>
-          prev.map((px) =>
-            px.id === p.id
-              ? {
-                  ...px,
-                  test_status: "error",
-                  test_ip: "",
-                  test_location: "",
-                  test_latency_ms: 0,
-                }
-              : px,
-          ),
-        );
         showToast(
           t("proxies.testFailed", {
             error: result.error || t("proxies.testFailedUnknown"),
           }),
           "error",
-        );
-      } else {
-        setProxies((prev) =>
-          prev.map((px) =>
-            px.id === p.id
-              ? {
-                  ...px,
-                  test_ip: result.ip || "",
-                  test_location: result.location || "",
-                  test_latency_ms: result.latency_ms || 0,
-                  test_status: "success",
-                }
-              : px,
-          ),
         );
       }
     } catch (error) {
@@ -541,88 +534,91 @@ export default function Proxies() {
   };
 
   const handleTestAll = async () => {
-    if (cleaningErrors) return;
+    if (cleaningErrors || testAllLoading || testingIds.size > 0) return;
+    const queue = [...proxies];
+    if (queue.length === 0) return;
     setTestAllLoading(true);
     setTestAllDone(0);
     setTestAllFailed(0);
+    setTestAllTotal(queue.length);
+    let completedCount = 0;
     let failedCount = 0;
     let firstError = "";
-    let nextIndex = 0;
-    const queue = [...proxies];
-    const testOne = async (p: ProxyRow) => {
-      setTestingIds((prev) => new Set(prev).add(p.id));
-      try {
-        const result = await api.testProxy(p.url, p.id, ipApiLang);
-        if (!result.success) {
-          failedCount += 1;
-          setTestAllFailed(failedCount);
-          if (!firstError)
-            firstError = result.error || t("proxies.testFailedUnknown");
-          setProxies((prev) =>
-            prev.map((px) =>
-              px.id === p.id
-                ? {
-                    ...px,
-                    test_status: "error",
-                    test_ip: "",
-                    test_location: "",
-                    test_latency_ms: 0,
-                  }
-                : px,
-            ),
-          );
-        } else {
-          setProxies((prev) =>
-            prev.map((px) =>
-              px.id === p.id
-                ? {
-                    ...px,
-                    test_ip: result.ip || "",
-                    test_location: result.location || "",
-                    test_latency_ms: result.latency_ms || 0,
-                    test_status: "success",
-                  }
-                : px,
-            ),
-          );
-        }
-      } catch (error) {
-        failedCount += 1;
-        setTestAllFailed(failedCount);
-        if (!firstError) firstError = getErrorMessage(error);
-      } finally {
-        setTestAllDone((prev) => prev + 1);
-        setTestingIds((prev) => {
-          const next = new Set(prev);
-          next.delete(p.id);
-          return next;
+    let completionError = "";
+    setTestingIds(new Set(queue.map((proxy) => proxy.id)));
+
+    try {
+      for (const batchIDs of chunkProxyTestIDs(
+        queue.map((proxy) => proxy.id),
+      )) {
+        const response = await postAdminSSE("/proxies/test-all", {
+          ids: batchIDs,
+          lang: ipApiLang,
         });
-      }
-    };
+        const completeEvent = await readProxyBatchTestSSE(response, (event) => {
+          if (event.type === "complete") {
+            if (!completionError && event.error) {
+              completionError = event.error;
+            }
+            return;
+          }
+          if (event.type !== "progress" || event.proxy_id === undefined) {
+            return;
+          }
 
-    const worker = async () => {
-      for (;;) {
-        const current = nextIndex;
-        nextIndex += 1;
-        const proxy = queue[current];
-        if (!proxy) return;
-        await testOne(proxy);
+          const proxyID = event.proxy_id;
+          const result = event.result;
+          if (result) {
+            setProxies((prev) =>
+              prev.map((proxy) =>
+                proxy.id === proxyID
+                  ? applyProxyTestResult(proxy, result)
+                  : proxy,
+              ),
+            );
+            if (!result.success && !firstError) {
+              firstError = result.error || t("proxies.testFailedUnknown");
+            }
+          }
+          setTestAllDone(completedCount + (event.current ?? 0));
+          setTestAllFailed(failedCount + (event.failed ?? 0));
+          setTestingIds((prev) => {
+            const next = new Set(prev);
+            next.delete(proxyID);
+            return next;
+          });
+        });
+        const batchCompleted = completeEvent?.current ?? 0;
+        if (!completeEvent || batchCompleted !== batchIDs.length) {
+          throw new Error(t("proxies.testAllInterrupted"));
+        }
+        completedCount += batchCompleted;
+        failedCount += completeEvent.failed ?? 0;
+        setTestAllDone(completedCount);
+        setTestAllFailed(failedCount);
       }
-    };
-
-    await Promise.all(
-      Array.from(
-        { length: Math.min(TEST_ALL_CONCURRENCY, queue.length) },
-        worker,
-      ),
-    );
-    if (failedCount > 0) {
+      await reload();
+      if (completionError) {
+        showToast(completionError, "error");
+      } else if (failedCount > 0) {
+        showToast(
+          t("proxies.testAllFailed", {
+            count: failedCount,
+            error: firstError,
+          }),
+          "error",
+        );
+      }
+    } catch (error) {
+      await reload();
       showToast(
-        t("proxies.testAllFailed", { count: failedCount, error: firstError }),
+        t("proxies.testFailed", { error: getErrorMessage(error) }),
         "error",
       );
+    } finally {
+      setTestingIds(new Set());
+      setTestAllLoading(false);
     }
-    setTestAllLoading(false);
   };
 
   const errorCount = proxies.filter((p) => p.test_status === "error").length;
@@ -762,7 +758,7 @@ export default function Proxies() {
           {proxies.length > 0 && (
             <button
               onClick={handleTestAll}
-              disabled={testAllLoading || cleaningErrors}
+              disabled={testsRunning || cleaningErrors}
               className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-muted/50 disabled:opacity-50"
             >
               {testAllLoading ? (
@@ -773,7 +769,7 @@ export default function Proxies() {
               {testAllLoading
                 ? t("proxies.testingAllProgress", {
                     current: testAllDone,
-                    total: proxies.length,
+                    total: testAllTotal,
                     failed: testAllFailed,
                   })
                 : t("proxies.testAll")}

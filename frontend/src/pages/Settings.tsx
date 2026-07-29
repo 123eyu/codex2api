@@ -1255,7 +1255,7 @@ export default function Settings() {
   const settingsFormRef = useRef(settingsForm)
   const autoSavePendingCountRef = useRef(0)
   const autoSaveFieldVersionsRef = useRef<Record<string, number>>({})
-  const autoSaveStatusTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
+  const autoSaveStatusTimerRef = useRef<number | null>(null)
   const { toast, showToast } = useToast()
 
   useEffect(() => {
