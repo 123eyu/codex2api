@@ -456,6 +456,43 @@ func (tc *redisTokenCache) GetResponseContext(ctx context.Context, responseID st
 	return items, nil
 }
 
+// GetResponseContextBounded reads at most maxWireBytes+1 bytes so an oversized
+// Redis value can be rejected before the complete value is fetched or decoded.
+func (tc *redisTokenCache) GetResponseContextBounded(ctx context.Context, responseID string, maxWireBytes int64) (ResponseContextReadResult, error) {
+	responseID = strings.TrimSpace(responseID)
+	if responseID == "" {
+		return ResponseContextReadResult{Status: ResponseContextReadMiss}, nil
+	}
+	if maxWireBytes < 0 {
+		maxWireBytes = 0
+	}
+	val, err := tc.client.GetRange(ctx, responseContextKey(responseID), 0, maxWireBytes).Bytes()
+	if err == redis.Nil {
+		return ResponseContextReadResult{Status: ResponseContextReadMiss}, nil
+	}
+	if err != nil {
+		return ResponseContextReadResult{}, err
+	}
+	if len(val) == 0 {
+		return ResponseContextReadResult{Status: ResponseContextReadMiss}, nil
+	}
+	if int64(len(val)) > maxWireBytes {
+		return ResponseContextReadResult{Status: ResponseContextReadTooLarge}, nil
+	}
+	var record redisResponseContextRecord
+	if err := json.Unmarshal(val, &record); err != nil {
+		return ResponseContextReadResult{Status: ResponseContextReadCorrupt}, nil
+	}
+	if len(record.Items) == 0 {
+		return ResponseContextReadResult{Status: ResponseContextReadMiss}, nil
+	}
+	items := make([]json.RawMessage, len(record.Items))
+	for i, item := range record.Items {
+		items[i] = append(json.RawMessage(nil), item...)
+	}
+	return ResponseContextReadResult{Status: ResponseContextReadFound, Items: items}, nil
+}
+
 func (tc *redisTokenCache) SetRuntime(ctx context.Context, namespace string, key string, value json.RawMessage, ttl time.Duration) error {
 	key = strings.TrimSpace(key)
 	if key == "" || len(value) == 0 {

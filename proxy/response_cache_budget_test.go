@@ -29,11 +29,12 @@ func responseCacheItemsBytes(items []json.RawMessage) int64 {
 
 func testResponseCacheConfig() responseCacheConfig {
 	return responseCacheConfig{
-		maxBytes:      1 << 20,
-		maxEntryBytes: 1 << 20,
-		maxEntries:    100,
-		ttl:           time.Hour,
-		maxItems:      200,
+		maxBytes:            1 << 20,
+		maxEntryBytes:       1 << 20,
+		reconstructMaxBytes: 1 << 20,
+		maxEntries:          100,
+		ttl:                 time.Hour,
+		maxItems:            200,
 	}
 }
 
@@ -44,6 +45,9 @@ func TestResponseCacheDefaultBudget(t *testing.T) {
 	}
 	if config.maxEntryBytes != 8<<20 {
 		t.Fatalf("maxEntryBytes = %d, want %d", config.maxEntryBytes, 8<<20)
+	}
+	if config.reconstructMaxBytes != 64<<20 {
+		t.Fatalf("reconstructMaxBytes = %d, want %d", config.reconstructMaxBytes, 64<<20)
 	}
 	if config.maxEntries != 2000 {
 		t.Fatalf("maxEntries = %d, want 2000", config.maxEntries)
@@ -290,18 +294,18 @@ func TestResponseCacheConcurrentReturnedValueMutationIsIsolated(t *testing.T) {
 func TestResponseCacheRuntimeRefillDoesNotReturnRetainedCopy(t *testing.T) {
 	config := testResponseCacheConfig()
 	resetResponseCacheStateForTest(config)
-	runtimeCache := cache.NewMemory(10)
+	runtimeCache := newRecordingResponseContextBackend(true)
+	runtimeCache.bounded = cache.ResponseContextReadResult{
+		Status: cache.ResponseContextReadFound,
+		Items:  []json.RawMessage{responseCacheTestItem(1, "runtime")},
+	}
 	SetResponseContextCache(runtimeCache)
 	t.Cleanup(func() {
 		SetResponseContextCache(nil)
-		_ = runtimeCache.Close()
+		_ = runtimeCache.TokenCache.Close()
 	})
 
 	original := responseCacheTestItem(1, "runtime")
-	storeKey := responseCacheStoreKey("key:1", "runtime")
-	if err := runtimeCache.SetResponseContext(context.Background(), storeKey, []json.RawMessage{original}, time.Minute); err != nil {
-		t.Fatalf("SetResponseContext: %v", err)
-	}
 	refilled := getResponseCache("key:1", "runtime")
 	refilled[0][0] = 'X'
 
@@ -313,6 +317,8 @@ func TestResponseCacheRuntimeRefillDoesNotReturnRetainedCopy(t *testing.T) {
 type mutatingResponseContextCache struct {
 	cache.TokenCache
 }
+
+func (c *mutatingResponseContextCache) SharedAcrossInstances() bool { return true }
 
 func (c *mutatingResponseContextCache) SetResponseContext(_ context.Context, _ string, items []json.RawMessage, _ time.Duration) error {
 	if len(items) > 0 && len(items[0]) > 0 {

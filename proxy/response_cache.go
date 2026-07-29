@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -30,6 +31,7 @@ const (
 	responseCacheMaxEntry   = 8 << 20
 	responseCacheMaxItems   = 2000 // 缓存条目上限，防止内存膨胀
 	responseCacheMaxPerItem = 200  // 单条缓存最大 raw items 数
+	responseCacheMaxMarkers = 2000
 	responseCleanupInterval = 2 * time.Minute
 )
 
@@ -59,20 +61,22 @@ type responseCacheEntry struct {
 }
 
 type responseCacheConfig struct {
-	maxBytes      int64
-	maxEntryBytes int64
-	maxEntries    int
-	ttl           time.Duration
-	maxItems      int
+	maxBytes            int64
+	maxEntryBytes       int64
+	reconstructMaxBytes int64
+	maxEntries          int
+	ttl                 time.Duration
+	maxItems            int
 }
 
 func defaultResponseCacheConfig() responseCacheConfig {
 	return responseCacheConfig{
-		maxBytes:      responseCacheMaxBytes,
-		maxEntryBytes: responseCacheMaxEntry,
-		maxEntries:    responseCacheMaxItems,
-		ttl:           responseCacheTTL,
-		maxItems:      responseCacheMaxPerItem,
+		maxBytes:            responseCacheMaxBytes,
+		maxEntryBytes:       responseCacheMaxEntry,
+		reconstructMaxBytes: responseCacheMaxBytes,
+		maxEntries:          responseCacheMaxItems,
+		ttl:                 responseCacheTTL,
+		maxItems:            responseCacheMaxPerItem,
 	}
 }
 
@@ -95,9 +99,47 @@ type responseCacheState struct {
 	mu           sync.RWMutex
 	store        map[string]*responseCacheEntry
 	lru          *list.List
+	markers      map[string]*responseCacheMarker
+	markerLRU    *list.List
 	config       responseCacheConfig
 	stats        ResponseCacheStats
 	runtimeCache cache.TokenCache
+}
+
+type responseCacheLookupKind uint8
+
+const (
+	responseCacheLookupMiss responseCacheLookupKind = iota
+	responseCacheLookupHit
+	responseCacheLookupExpired
+	responseCacheLookupKnownEvicted
+	responseCacheLookupKnownOversize
+	responseCacheLookupReconstructionTooLarge
+	responseCacheLookupBackendCorrupt
+	responseCacheLookupBackendError
+)
+
+type responseCacheLookupSource uint8
+
+const (
+	responseCacheSourceNone responseCacheLookupSource = iota
+	responseCacheSourceLocal
+	responseCacheSourceBackend
+)
+
+type responseCacheLookupResult struct {
+	Items    []json.RawMessage
+	Kind     responseCacheLookupKind
+	Source   responseCacheLookupSource
+	Promoted bool
+	Err      error
+}
+
+type responseCacheMarker struct {
+	key       string
+	kind      responseCacheLookupKind
+	expiresAt time.Time
+	element   *list.Element
 }
 
 var respCache responseCacheState
@@ -105,13 +147,18 @@ var respCache responseCacheState
 func init() {
 	respCache.store = make(map[string]*responseCacheEntry)
 	respCache.lru = list.New()
+	respCache.markers = make(map[string]*responseCacheMarker)
+	respCache.markerLRU = list.New()
 	respCache.config = defaultResponseCacheConfig()
 	go respCacheCleanupLoop()
 }
 
 func SetResponseContextCache(tc cache.TokenCache) {
 	respCache.mu.Lock()
-	respCache.runtimeCache = tc
+	respCache.runtimeCache = nil
+	if tc != nil && tc.SharedAcrossInstances() {
+		respCache.runtimeCache = tc
+	}
 	respCache.mu.Unlock()
 }
 
@@ -129,6 +176,8 @@ func resetResponseCacheStateForTest(config responseCacheConfig) {
 	respCache.mu.Lock()
 	respCache.store = make(map[string]*responseCacheEntry)
 	respCache.lru = list.New()
+	respCache.markers = make(map[string]*responseCacheMarker)
+	respCache.markerLRU = list.New()
 	respCache.config = config
 	respCache.stats = ResponseCacheStats{}
 	respCache.runtimeCache = nil
@@ -147,16 +196,13 @@ func configureResponseCacheForTest(config responseCacheConfig) {
 // setResponseCache 存储响应上下文（按 owner 命名空间隔离）
 func setResponseCache(owner, responseID string, items []json.RawMessage) {
 	storeKey := responseCacheStoreKey(owner, responseID)
-	runtimeItems, admitted := admitResponseCache(storeKey, items)
-	if !admitted {
-		return
-	}
+	runtimeItems, _ := admitResponseCache(storeKey, items)
 
 	respCache.mu.RLock()
 	runtimeCache := respCache.runtimeCache
 	respCache.mu.RUnlock()
 
-	if runtimeCache != nil {
+	if runtimeCache != nil && len(runtimeItems) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
 		if err := runtimeCache.SetResponseContext(ctx, storeKey, runtimeItems, responseCacheTTL); err != nil {
@@ -177,23 +223,29 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 	if entryBytes > respCache.stats.LargestSeenEntryBytes {
 		respCache.stats.LargestSeenEntryBytes = entryBytes
 	}
+	if existing := respCache.store[storeKey]; existing != nil {
+		respCache.removeEntryLocked(existing, responseCacheRemovalReplace)
+	}
 	if respCache.config.maxEntries <= 0 ||
 		entryBytes > respCache.config.maxEntryBytes ||
 		entryBytes > respCache.config.maxBytes {
 		respCache.stats.OversizeSkips++
-		return nil, false
+		if respCache.runtimeCache == nil {
+			respCache.setMarkerLocked(storeKey, responseCacheLookupKnownOversize, time.Now().Add(respCache.config.ttl))
+		}
+		return items, false
 	}
 
 	retainedItems := cloneResponseContextItems(items)
-	if existing := respCache.store[storeKey]; existing != nil {
-		respCache.removeEntryLocked(existing, responseCacheRemovalReplace)
-	}
 	for len(respCache.store)+1 > respCache.config.maxEntries ||
 		respCache.stats.Bytes+entryBytes > respCache.config.maxBytes {
 		oldest := respCache.oldestLocked()
 		if oldest == nil {
 			respCache.stats.OversizeSkips++
-			return nil, false
+			if respCache.runtimeCache == nil {
+				respCache.setMarkerLocked(storeKey, responseCacheLookupKnownOversize, time.Now().Add(respCache.config.ttl))
+			}
+			return items, false
 		}
 		reason := responseCacheRemovalByteEviction
 		if len(respCache.store)+1 > respCache.config.maxEntries {
@@ -210,6 +262,7 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 	}
 	entry.element = respCache.lru.PushFront(entry)
 	respCache.store[storeKey] = entry
+	respCache.removeMarkerLocked(storeKey)
 	respCache.stats.Entries = len(respCache.store)
 	respCache.stats.Bytes += entryBytes
 	if respCache.stats.Bytes > respCache.stats.HighWaterBytes {
@@ -262,8 +315,52 @@ func (c *responseCacheState) removeEntryLocked(entry *responseCacheEntry, reason
 		c.stats.Expirations++
 	case responseCacheRemovalCountEviction:
 		c.stats.CountEvictions++
+		if c.runtimeCache == nil {
+			c.setMarkerLocked(entry.key, responseCacheLookupKnownEvicted, entry.expiresAt)
+		}
 	case responseCacheRemovalByteEviction:
 		c.stats.ByteEvictions++
+		if c.runtimeCache == nil {
+			c.setMarkerLocked(entry.key, responseCacheLookupKnownEvicted, entry.expiresAt)
+		}
+	}
+}
+
+func (c *responseCacheState) setMarkerLocked(key string, kind responseCacheLookupKind, expiresAt time.Time) {
+	if key == "" || (kind != responseCacheLookupKnownEvicted && kind != responseCacheLookupKnownOversize) {
+		return
+	}
+	maxExpiry := time.Now().Add(c.config.ttl)
+	if expiresAt.IsZero() || expiresAt.After(maxExpiry) {
+		expiresAt = maxExpiry
+	}
+	if existing := c.markers[key]; existing != nil {
+		existing.kind = kind
+		existing.expiresAt = expiresAt
+		c.markerLRU.MoveToFront(existing.element)
+		return
+	}
+	marker := &responseCacheMarker{key: key, kind: kind, expiresAt: expiresAt}
+	marker.element = c.markerLRU.PushFront(marker)
+	c.markers[key] = marker
+	for len(c.markers) > responseCacheMaxMarkers {
+		element := c.markerLRU.Back()
+		if element == nil {
+			break
+		}
+		oldest, _ := element.Value.(*responseCacheMarker)
+		c.removeMarkerLocked(oldest.key)
+	}
+}
+
+func (c *responseCacheState) removeMarkerLocked(key string) {
+	marker := c.markers[key]
+	if marker == nil {
+		return
+	}
+	delete(c.markers, key)
+	if marker.element != nil {
+		c.markerLRU.Remove(marker.element)
 	}
 }
 
@@ -381,41 +478,90 @@ func responseContextPairType(typ string) (callType string, isCall, isOutput bool
 // getResponseCache 查找缓存的响应上下文；owner 不匹配等同缓存未命中，
 // 防止跨 API Key 用 response_id 拉取他人对话历史。
 func getResponseCache(owner, responseID string) []json.RawMessage {
+	result := getResponseCacheResult(owner, responseID)
+	if result.Kind != responseCacheLookupHit {
+		return nil
+	}
+	return result.Items
+}
+
+// getResponseCacheResult preserves enough lookup state for the HTTP handlers
+// to distinguish a reconstructable hit from a final local/backend failure.
+func getResponseCacheResult(owner, responseID string) responseCacheLookupResult {
 	storeKey := responseCacheStoreKey(owner, responseID)
 	respCache.mu.Lock()
 	entry, ok := respCache.store[storeKey]
 	runtimeCache := respCache.runtimeCache
+	config := respCache.config
+	expired := false
 	if ok {
 		if !time.Now().Before(entry.expiresAt) {
 			respCache.removeEntryLocked(entry, responseCacheRemovalExpiration)
+			expired = true
 		} else {
 			respCache.lru.MoveToFront(entry.element)
 			respCache.stats.Hits++
 			items := cloneResponseContextItems(entry.items)
 			respCache.mu.Unlock()
-			return items
+			return responseCacheLookupResult{
+				Items:  items,
+				Kind:   responseCacheLookupHit,
+				Source: responseCacheSourceLocal,
+			}
 		}
 	}
 	respCache.stats.Misses++
+	if runtimeCache == nil {
+		if marker := respCache.markers[storeKey]; marker != nil {
+			if time.Now().Before(marker.expiresAt) {
+				respCache.markerLRU.MoveToFront(marker.element)
+				kind := marker.kind
+				respCache.mu.Unlock()
+				return responseCacheLookupResult{Kind: kind}
+			}
+			respCache.removeMarkerLocked(storeKey)
+		}
+	}
 	respCache.mu.Unlock()
 
 	if runtimeCache == nil {
-		return nil
+		if expired {
+			return responseCacheLookupResult{Kind: responseCacheLookupExpired}
+		}
+		return responseCacheLookupResult{Kind: responseCacheLookupMiss}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	items, err := runtimeCache.GetResponseContext(ctx, storeKey)
+	backendResult, err := readResponseContextBackend(ctx, runtimeCache, storeKey, config)
 	if err != nil {
 		log.Printf("读取 Redis response context 失败: response_id=%s err=%v", responseID, err)
-		return nil
+		return responseCacheLookupResult{Kind: responseCacheLookupBackendError, Err: err}
 	}
-	if len(items) == 0 {
-		return nil
+	switch backendResult.Status {
+	case cache.ResponseContextReadMiss:
+		if expired {
+			return responseCacheLookupResult{Kind: responseCacheLookupExpired}
+		}
+		return responseCacheLookupResult{Kind: responseCacheLookupMiss}
+	case cache.ResponseContextReadTooLarge:
+		return responseCacheLookupResult{Kind: responseCacheLookupReconstructionTooLarge}
+	case cache.ResponseContextReadCorrupt:
+		return responseCacheLookupResult{Kind: responseCacheLookupBackendCorrupt}
+	case cache.ResponseContextReadFound:
+	default:
+		return responseCacheLookupResult{Kind: responseCacheLookupBackendCorrupt}
 	}
-	if !setResponseCacheLocal(storeKey, items) {
-		return nil
+	if responseContextLogicalBytes(backendResult.Items) > config.reconstructMaxBytes {
+		return responseCacheLookupResult{Kind: responseCacheLookupReconstructionTooLarge}
 	}
-	return items
+	items := trimResponseContextTail(backendResult.Items, config.maxItems)
+	runtimeItems, promoted := admitResponseCache(storeKey, items)
+	return responseCacheLookupResult{
+		Items:    runtimeItems,
+		Kind:     responseCacheLookupHit,
+		Source:   responseCacheSourceBackend,
+		Promoted: promoted,
+	}
 }
 
 func setResponseCacheLocal(storeKey string, items []json.RawMessage) bool {
@@ -423,20 +569,66 @@ func setResponseCacheLocal(storeKey string, items []json.RawMessage) bool {
 	return admitted
 }
 
+func readResponseContextBackend(ctx context.Context, runtimeCache cache.TokenCache, storeKey string, config responseCacheConfig) (cache.ResponseContextReadResult, error) {
+	if bounded, ok := runtimeCache.(cache.BoundedResponseContextReader); ok {
+		return bounded.GetResponseContextBounded(ctx, storeKey, responseContextWireLimit(config))
+	}
+	// Third-party shared caches retain compatibility through the original
+	// TokenCache method. Only the official Redis implementation guarantees the
+	// pre-deserialization bound provided by BoundedResponseContextReader.
+	items, err := runtimeCache.GetResponseContext(ctx, storeKey)
+	if err != nil {
+		var syntaxErr *json.SyntaxError
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+			return cache.ResponseContextReadResult{Status: cache.ResponseContextReadCorrupt}, nil
+		}
+		return cache.ResponseContextReadResult{}, err
+	}
+	if len(items) == 0 {
+		return cache.ResponseContextReadResult{Status: cache.ResponseContextReadMiss}, nil
+	}
+	return cache.ResponseContextReadResult{Status: cache.ResponseContextReadFound, Items: items}, nil
+}
+
+func responseContextWireLimit(config responseCacheConfig) int64 {
+	maxItems := config.maxItems
+	if maxItems < 1 {
+		maxItems = 1
+	}
+	return config.reconstructMaxBytes + int64(len(`{"items":[`)+len(`]}`)+maxItems-1)
+}
+
+func responseContextLogicalBytes(items []json.RawMessage) int64 {
+	var total int64
+	for _, item := range items {
+		total += int64(len(item))
+	}
+	return total
+}
+
 // respCacheCleanupLoop 后台清理过期条目
 func respCacheCleanupLoop() {
 	ticker := time.NewTicker(responseCleanupInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		now := time.Now()
-		respCache.mu.Lock()
-		for _, entry := range respCache.store {
-			if !now.Before(entry.expiresAt) {
-				respCache.removeEntryLocked(entry, responseCacheRemovalExpiration)
-			}
-		}
-		respCache.mu.Unlock()
+		cleanupResponseCacheExpired(time.Now())
 	}
+}
+
+func cleanupResponseCacheExpired(now time.Time) {
+	respCache.mu.Lock()
+	for _, entry := range respCache.store {
+		if !now.Before(entry.expiresAt) {
+			respCache.removeEntryLocked(entry, responseCacheRemovalExpiration)
+		}
+	}
+	for key, marker := range respCache.markers {
+		if !now.Before(marker.expiresAt) {
+			respCache.removeMarkerLocked(key)
+		}
+	}
+	respCache.mu.Unlock()
 }
 
 // expandPreviousResponse 检查请求中是否有 previous_response_id，
