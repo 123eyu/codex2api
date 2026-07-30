@@ -1241,6 +1241,8 @@ type APIKeyRow struct {
 //   - MaxConcurrency: 同一 API Key 在当前实例内允许的最大并发请求数。
 //   - CostLimit5h / CostLimit7d: 美元成本上限,滑动 5h / 7d 窗口,与账号侧窗口语义一致。
 //   - TokenLimit5h / TokenLimit7d: token 上限,滑动 5h / 7d 窗口。
+//   - CostLimitDaily / TokenLimitDaily: 自然日(服务器本地时区,零点清零)上限。与滑动窗口
+//     不同,到点全额恢复;与 scope 维度的 1d(滚动 24h)也刻意区分(issue #460)。
 //   - PlanAllow: 账号套餐白名单(plus/pro/team/...)。非空时该 Key 仅调度命中其一的账号,
 //     语义与 AllowedGroupIDs 类似,均在账号选择阶段过滤。空表示不限套餐。
 type APIKeyLimits struct {
@@ -1256,9 +1258,11 @@ type APIKeyLimits struct {
 	CostLimit5h        float64 `json:"cost_limit_5h,omitempty"`
 	CostLimit7d        float64 `json:"cost_limit_7d,omitempty"`
 	CostLimit30d       float64 `json:"cost_limit_30d,omitempty"`
+	CostLimitDaily     float64 `json:"cost_limit_daily,omitempty"`
 	TokenLimit5h       int64   `json:"token_limit_5h,omitempty"`
 	TokenLimit7d       int64   `json:"token_limit_7d,omitempty"`
 	TokenLimit30d      int64   `json:"token_limit_30d,omitempty"`
+	TokenLimitDaily    int64   `json:"token_limit_daily,omitempty"`
 	// DisableImageGeneration 为 true 时，该 Key 禁止访问生图模型(gpt-image-*)与
 	// 生图工具链路(image_generation 工具 / /v1/images 端点)，命中一律 403。
 	// 保留为向后兼容字段：新配置改用 ImageGenerationPolicy；未设 policy 时该 bool=true
@@ -1332,8 +1336,8 @@ func (l APIKeyLimits) IsZero() bool {
 	return len(l.ModelAllow) == 0 && len(l.ModelDeny) == 0 && len(l.PlanAllow) == 0 &&
 		len(l.NoAffinityGroupIDs) == 0 &&
 		l.RPM == 0 && l.RPD == 0 && l.MaxConcurrency == 0 &&
-		l.CostLimit5h == 0 && l.CostLimit7d == 0 && l.CostLimit30d == 0 &&
-		l.TokenLimit5h == 0 && l.TokenLimit7d == 0 && l.TokenLimit30d == 0 &&
+		l.CostLimit5h == 0 && l.CostLimit7d == 0 && l.CostLimit30d == 0 && l.CostLimitDaily == 0 &&
+		l.TokenLimit5h == 0 && l.TokenLimit7d == 0 && l.TokenLimit30d == 0 && l.TokenLimitDaily == 0 &&
 		len(l.ScopeLimits) == 0 &&
 		!l.DisableImageGeneration &&
 		!l.AutoCompactOnOverflow &&

@@ -6215,7 +6215,7 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 	}
 
 	// 检查是否有任何 key 配置了窗口 cost limit
-	var need5h, need7d, need30d bool
+	var need5h, need7d, need30d, needDaily bool
 	for _, k := range keys {
 		if k.Limits.CostLimit5h > 0 {
 			need5h = true
@@ -6226,10 +6226,13 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 		if k.Limits.CostLimit30d > 0 {
 			need30d = true
 		}
+		if k.Limits.CostLimitDaily > 0 {
+			needDaily = true
+		}
 	}
 
 	// 按需批量查询窗口用量
-	var cost5h, cost7d, cost30d map[int64]float64
+	var cost5h, cost7d, cost30d, costToday map[int64]float64
 	if need5h {
 		cost5h, _ = h.db.GetAllAPIKeysWindowCost(ctx, 5*time.Hour)
 	}
@@ -6239,6 +6242,9 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 	if need30d {
 		cost30d, _ = h.db.GetAllAPIKeysWindowCost(ctx, 30*24*time.Hour)
 	}
+	if needDaily {
+		costToday, _ = h.db.GetAllAPIKeysCostSince(ctx, database.StartOfDay(time.Now()))
+	}
 
 	// 最近使用时间：一次聚合，失败不阻断列表
 	lastUsedByID, _ := h.db.ListAPIKeyLastUsedAt(ctx)
@@ -6247,7 +6253,7 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 	maskedKeys := make([]*MaskedAPIKeyRow, 0, len(keys))
 	for _, k := range keys {
 		mk := NewMaskedAPIKeyRow(k)
-		if k.Limits.CostLimit5h > 0 || k.Limits.CostLimit7d > 0 || k.Limits.CostLimit30d > 0 {
+		if k.Limits.CostLimit5h > 0 || k.Limits.CostLimit7d > 0 || k.Limits.CostLimit30d > 0 || k.Limits.CostLimitDaily > 0 {
 			detail := &APIKeyWindowUsageDetail{}
 			if cost5h != nil {
 				detail.Cost5h = cost5h[k.ID]
@@ -6257,6 +6263,9 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 			}
 			if cost30d != nil {
 				detail.Cost30d = cost30d[k.ID]
+			}
+			if costToday != nil {
+				detail.CostToday = costToday[k.ID]
 			}
 			mk.WindowUsage = detail
 		}
@@ -6596,9 +6605,11 @@ func sanitizeAPIKeyLimits(in database.APIKeyLimits) database.APIKeyLimits {
 		CostLimit5h:            maxFloat(in.CostLimit5h, 0),
 		CostLimit7d:            maxFloat(in.CostLimit7d, 0),
 		CostLimit30d:           maxFloat(in.CostLimit30d, 0),
+		CostLimitDaily:         maxFloat(in.CostLimitDaily, 0),
 		TokenLimit5h:           maxInt64(in.TokenLimit5h, 0),
 		TokenLimit7d:           maxInt64(in.TokenLimit7d, 0),
 		TokenLimit30d:          maxInt64(in.TokenLimit30d, 0),
+		TokenLimitDaily:        maxInt64(in.TokenLimitDaily, 0),
 		DisableImageGeneration: in.DisableImageGeneration,
 		ImageGenerationPolicy:  sanitizeImageGenerationPolicy(in),
 		AutoCompactOnOverflow:  in.AutoCompactOnOverflow,

@@ -81,9 +81,10 @@ type MaskedAPIKeyRow struct {
 
 // APIKeyWindowUsageDetail 5h/7d/30d 滑动窗口内的累计成本
 type APIKeyWindowUsageDetail struct {
-	Cost5h  float64 `json:"cost_5h"`
-	Cost7d  float64 `json:"cost_7d"`
-	Cost30d float64 `json:"cost_30d"`
+	Cost5h    float64 `json:"cost_5h"`
+	Cost7d    float64 `json:"cost_7d"`
+	Cost30d   float64 `json:"cost_30d"`
+	CostToday float64 `json:"cost_today"`
 }
 
 // NewMaskedAPIKeyRow 创建 API Key 响应
