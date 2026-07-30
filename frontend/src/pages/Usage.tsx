@@ -32,7 +32,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert } from 'lucide-react'
+import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert, RefreshCw } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 
@@ -1381,11 +1381,11 @@ function TimingPill({
   return (
     <span
       className={cn(
-        'inline-flex h-[1.375rem] items-center gap-1 rounded-full px-1.5 whitespace-nowrap',
+        'inline-flex h-5 items-center gap-0.5 rounded-full px-1.5 whitespace-nowrap',
         shell,
       )}
     >
-      <span className={cn('text-[10px] font-semibold tracking-tight', labelClass)}>
+      <span className={cn('text-[10px] font-semibold leading-none tracking-tight', labelClass)}>
         {label}
       </span>
       <span
@@ -1400,7 +1400,7 @@ function TimingPill({
   )
 }
 
-/** 首字 + 总耗时聚合列：双色胶囊 + 独立快慢色阶。 */
+/** 首字 + 总耗时聚合列：横向双色胶囊，避免把整行撑高。 */
 function TimingCell({ log }: { log: UsageLog }) {
   const { t } = useTranslation()
   const firstMs = log.first_token_ms || 0
@@ -1419,7 +1419,7 @@ function TimingCell({ log }: { log: UsageLog }) {
     .join(' · ')
 
   return (
-    <div className="inline-flex flex-col items-start gap-1" title={title || undefined}>
+    <div className="inline-flex items-center gap-1" title={title || undefined}>
       <TimingPill
         kind="first"
         label={t('usage.timingFirst')}
@@ -1932,8 +1932,22 @@ export default function Usage() {
                   />
                 )}
               </div>
-              <div className="flex shrink-0 items-center gap-3">
+              <div className="flex shrink-0 items-center gap-2">
                 <span className="whitespace-nowrap text-xs text-muted-foreground">{logsLoading ? t('common.loading') : t('usage.recordsCount', { count: logsTotal })}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={logsLoading}
+                  title={t('common.refresh')}
+                  aria-label={t('common.refresh')}
+                  onClick={() => {
+                    void reloadSilently()
+                    void loadLogs()
+                  }}
+                >
+                  <RefreshCw className={cn('size-3.5', logsLoading && 'animate-spin')} />
+                  {t('common.refresh')}
+                </Button>
                 <Button
                   variant="destructive"
                   size="sm"
@@ -2219,8 +2233,8 @@ export default function Usage() {
               </div>
               </TooltipProvider>
 
-              {/* Desktop table */}
-              <div className="data-table-shell hidden lg:block">
+              {/* Desktop table — denser py so multi-badge columns don't leave empty vertical air */}
+              <div className="data-table-shell usage-logs-table hidden lg:block">
                 <TooltipProvider>
                 <Table>
                   <TableHeader>
