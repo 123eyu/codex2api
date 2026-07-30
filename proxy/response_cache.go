@@ -525,10 +525,12 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 			respCache.lru.MoveToFront(entry.element)
 			respCache.stats.Hits++
 			respCache.stats.LocalHits++
-			items := cloneResponseContextItems(entry.items)
+			// entry.items 插入后不可变（admit 时已存私有克隆），
+			// 取引用后在锁外克隆，避免大条目命中时锁内做兆级拷贝。
+			items := entry.items
 			respCache.mu.Unlock()
 			return responseCacheLookupResult{
-				Items:  items,
+				Items:  cloneResponseContextItems(items),
 				Kind:   responseCacheLookupHit,
 				Source: responseCacheSourceLocal,
 			}
