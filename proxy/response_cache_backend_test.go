@@ -417,3 +417,51 @@ func TestResponseCacheOversizeReplacementRemovesStaleLocalEntry(t *testing.T) {
 		t.Fatalf("replacement lookup = %+v, want newest oversize marker instead of stale local hit", got)
 	}
 }
+
+// 聚合 Hits/Misses 是端到端口径：远端命中计 Hit 而非 Miss。
+// 钉住不变量 Hits = LocalHits + RemoteHits、Hits + Misses = LocalHits + LocalMisses。
+func TestResponseCacheAggregateHitMissEndToEnd(t *testing.T) {
+	resetResponseCacheStateForTest(testResponseCacheConfig())
+	backend := newRecordingResponseContextBackend(true)
+	SetResponseContextCache(backend)
+	t.Cleanup(func() {
+		SetResponseContextCache(nil)
+		_ = backend.TokenCache.Close()
+	})
+
+	setResponseCache("key:1", "local", []json.RawMessage{responseCacheTestItem(1, "local")})
+	if got := getResponseCacheResult("key:1", "local"); got.Kind != responseCacheLookupHit || got.Source != responseCacheSourceLocal {
+		t.Fatalf("local lookup = %+v, want local hit", got)
+	}
+
+	backend.mu.Lock()
+	backend.bounded = cache.ResponseContextReadResult{
+		Status: cache.ResponseContextReadFound,
+		Items:  []json.RawMessage{responseCacheTestItem(2, "remote")},
+	}
+	backend.mu.Unlock()
+	if got := getResponseCacheResult("key:1", "remote"); got.Kind != responseCacheLookupHit || got.Source != responseCacheSourceBackend {
+		t.Fatalf("remote lookup = %+v, want backend hit", got)
+	}
+
+	backend.mu.Lock()
+	backend.bounded = cache.ResponseContextReadResult{Status: cache.ResponseContextReadMiss}
+	backend.mu.Unlock()
+	if got := getResponseCacheResult("key:1", "missing"); got.Kind != responseCacheLookupMiss {
+		t.Fatalf("missing lookup = %+v, want miss", got)
+	}
+
+	stats := GetResponseCacheStats()
+	if stats.Hits != 2 || stats.Misses != 1 {
+		t.Fatalf("aggregate hits/misses = %d/%d, want 2/1", stats.Hits, stats.Misses)
+	}
+	if stats.LocalHits != 1 || stats.LocalMisses != 2 || stats.RemoteHits != 1 || stats.RemoteMisses != 1 {
+		t.Fatalf("layer stats = %+v, want local 1/2 remote 1/1", stats)
+	}
+	if stats.Hits != stats.LocalHits+stats.RemoteHits {
+		t.Fatalf("invariant broken: hits=%d, local+remote=%d", stats.Hits, stats.LocalHits+stats.RemoteHits)
+	}
+	if stats.Hits+stats.Misses != stats.LocalHits+stats.LocalMisses {
+		t.Fatalf("invariant broken: hits+misses=%d, lookups=%d", stats.Hits+stats.Misses, stats.LocalHits+stats.LocalMisses)
+	}
+}

@@ -82,6 +82,9 @@ func defaultResponseCacheConfig() responseCacheConfig {
 
 // ResponseCacheStats is a point-in-time snapshot of the bounded local cache.
 // Bytes are logical retained JSON payload bytes; they are not an RSS estimate.
+// Hits/Misses 是端到端口径：本次查询最终拿到上下文（本地或共享后端）计 Hit，
+// 否则计 Miss（含负标记、后端错误/损坏、重建超限）。Local*/Remote* 是分层口径。
+// 不变量：Hits = LocalHits + RemoteHits；Hits + Misses = LocalHits + LocalMisses。
 type ResponseCacheStats struct {
 	Entries                int
 	Bytes                  int64
@@ -143,6 +146,10 @@ type responseCacheLookupResult struct {
 	Source   responseCacheLookupSource
 	Promoted bool
 	Err      error
+	// 记账辅助位：由 lookupResponseCacheResult 填写，getResponseCacheResult
+	// 在单一临界区内据此更新全部计数器，保证快照不变量任意瞬间成立。
+	remoteMiss     bool
+	oversizeBypass bool
 }
 
 type responseCacheMarker struct {
@@ -510,7 +517,34 @@ func getResponseCache(owner, responseID string) []json.RawMessage {
 
 // getResponseCacheResult preserves enough lookup state for the HTTP handlers
 // to distinguish a reconstructable hit from a final local/backend failure.
+// 命中/未命中计数只在这个出口、单一临界区内记账一次：聚合 Hits/Misses 是
+// 端到端口径，Local*/Remote* 是分层口径，两组在任意快照瞬间保持一致。
 func getResponseCacheResult(owner, responseID string) responseCacheLookupResult {
+	result := lookupResponseCacheResult(owner, responseID)
+	respCache.mu.Lock()
+	if result.Kind == responseCacheLookupHit {
+		respCache.stats.Hits++
+		if result.Source == responseCacheSourceBackend {
+			respCache.stats.LocalMisses++
+			respCache.stats.RemoteHits++
+			if result.oversizeBypass {
+				respCache.stats.OversizeBypasses++
+			}
+		} else {
+			respCache.stats.LocalHits++
+		}
+	} else {
+		respCache.stats.Misses++
+		respCache.stats.LocalMisses++
+		if result.remoteMiss {
+			respCache.stats.RemoteMisses++
+		}
+	}
+	respCache.mu.Unlock()
+	return result
+}
+
+func lookupResponseCacheResult(owner, responseID string) responseCacheLookupResult {
 	storeKey := responseCacheStoreKey(owner, responseID)
 	respCache.mu.Lock()
 	entry, ok := respCache.store[storeKey]
@@ -523,8 +557,6 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 			expired = true
 		} else {
 			respCache.lru.MoveToFront(entry.element)
-			respCache.stats.Hits++
-			respCache.stats.LocalHits++
 			// entry.items 插入后不可变（admit 时已存私有克隆），
 			// 取引用后在锁外克隆，避免大条目命中时锁内做兆级拷贝。
 			items := entry.items
@@ -536,8 +568,6 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 			}
 		}
 	}
-	respCache.stats.Misses++
-	respCache.stats.LocalMisses++
 	if runtimeCache == nil {
 		if marker := respCache.markers[storeKey]; marker != nil {
 			if time.Now().Before(marker.expiresAt) {
@@ -566,11 +596,10 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 	}
 	switch backendResult.Status {
 	case cache.ResponseContextReadMiss:
-		recordResponseCacheRemoteMiss()
 		if expired {
-			return responseCacheLookupResult{Kind: responseCacheLookupExpired}
+			return responseCacheLookupResult{Kind: responseCacheLookupExpired, remoteMiss: true}
 		}
-		return responseCacheLookupResult{Kind: responseCacheLookupMiss}
+		return responseCacheLookupResult{Kind: responseCacheLookupMiss, remoteMiss: true}
 	case cache.ResponseContextReadTooLarge:
 		return responseCacheLookupResult{Kind: responseCacheLookupReconstructionTooLarge}
 	case cache.ResponseContextReadCorrupt:
@@ -588,33 +617,18 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 	}
 	items = trimResponseContextTail(items, config.maxItems)
 	runtimeItems, promoted, overL1ByteBudget := admitResponseCache(storeKey, items)
-	recordResponseCacheRemoteHit(!promoted && overL1ByteBudget)
 	return responseCacheLookupResult{
-		Items:    runtimeItems,
-		Kind:     responseCacheLookupHit,
-		Source:   responseCacheSourceBackend,
-		Promoted: promoted,
+		Items:          runtimeItems,
+		Kind:           responseCacheLookupHit,
+		Source:         responseCacheSourceBackend,
+		Promoted:       promoted,
+		oversizeBypass: !promoted && overL1ByteBudget,
 	}
 }
 
 func setResponseCacheLocal(storeKey string, items []json.RawMessage) bool {
 	_, admitted, _ := admitResponseCache(storeKey, items)
 	return admitted
-}
-
-func recordResponseCacheRemoteMiss() {
-	respCache.mu.Lock()
-	respCache.stats.RemoteMisses++
-	respCache.mu.Unlock()
-}
-
-func recordResponseCacheRemoteHit(oversizeBypass bool) {
-	respCache.mu.Lock()
-	respCache.stats.RemoteHits++
-	if oversizeBypass {
-		respCache.stats.OversizeBypasses++
-	}
-	respCache.mu.Unlock()
 }
 
 func recordResponseCacheKnownUnavailableError() {

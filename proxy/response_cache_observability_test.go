@@ -117,8 +117,16 @@ func TestResponseCacheDetailedLookupCounters(t *testing.T) {
 				t.Fatalf("lookup = %+v, want kind %v", got, tt.wantKind)
 			}
 			stats := GetResponseCacheStats()
-			if stats.LocalMisses != 1 || stats.Misses != 1 {
-				t.Fatalf("backend lookup local miss counters = %+v, want one", stats)
+			// 聚合是端到端口径：远端命中最终拿到上下文，计 Hit 不计 Miss。
+			wantMisses, wantHits := uint64(1), uint64(0)
+			if tt.wantKind == responseCacheLookupHit {
+				wantMisses, wantHits = 0, 1
+			}
+			if stats.LocalMisses != 1 || stats.Misses != wantMisses || stats.Hits != wantHits {
+				t.Fatalf(
+					"backend lookup counters = %+v, want localMisses=1 misses=%d hits=%d",
+					stats, wantMisses, wantHits,
+				)
 			}
 			if stats.RemoteHits != tt.wantRemoteHits || stats.RemoteMisses != tt.wantRemoteMiss {
 				t.Fatalf(
