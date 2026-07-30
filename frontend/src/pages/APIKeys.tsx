@@ -256,6 +256,7 @@ export default function APIKeys() {
   const [editTab, setEditTab] = useState<"basic" | "limits">("basic");
   const [editDirty, setEditDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [resettingAll, setResettingAll] = useState(false);
   const [savingPublicUsagePage, setSavingPublicUsagePage] = useState(false);
   const [savingPublicImageStudioPage, setSavingPublicImageStudioPage] =
     useState(false);
@@ -710,7 +711,7 @@ export default function APIKeys() {
       ),
     }));
     try {
-      await api.updateAPIKey(keyRow.id, { reset_quota: true });
+      await api.resetAPIKeyQuota(keyRow.id);
       showToast(t("apiKeys.resetQuotaSuccess"));
       void reloadSilently();
     } catch (error) {
@@ -732,6 +733,41 @@ export default function APIKeys() {
         next.delete(keyRow.id);
         return next;
       });
+    }
+  };
+
+  const handleResetAllQuotas = async () => {
+    const quotaKeyCount = keys.filter((keyRow) => keyRow.quota_limit > 0).length;
+    if (quotaKeyCount === 0) return;
+    const confirmed = await confirm({
+      title: t("apiKeys.resetAllQuotasTitle"),
+      description: t("apiKeys.resetAllQuotasDesc", { count: quotaKeyCount }),
+      confirmText: t("apiKeys.resetAllQuotasConfirm"),
+      tone: "destructive",
+      confirmVariant: "destructive",
+    });
+    if (!confirmed) return;
+
+    setResettingAll(true);
+    try {
+      const result = await api.resetAllAPIKeyQuotas();
+      setData((current) => ({
+        ...current,
+        keys: current.keys.map((item) =>
+          item.quota_limit > 0 ? { ...item, quota_used: 0 } : item,
+        ),
+      }));
+      showToast(
+        t("apiKeys.resetAllQuotasSuccess", { count: result.reset_count }),
+      );
+      void reloadSilently();
+    } catch (error) {
+      showToast(
+        `${t("apiKeys.resetAllQuotasFailed")}: ${getErrorMessage(error)}`,
+        "error",
+      );
+    } finally {
+      setResettingAll(false);
     }
   };
 
@@ -983,13 +1019,32 @@ export default function APIKeys() {
             </span>
           }
           actions={
-            <Button
-              onClick={() => setCreateDialogOpen(true)}
-              className="max-sm:w-full"
-            >
-              <Plus className="size-3.5" />
-              {t("apiKeys.createKey")}
-            </Button>
+            <>
+              <Button
+                variant="outline"
+                disabled={
+                  resettingAll ||
+                  !keys.some((keyRow) => keyRow.quota_limit > 0)
+                }
+                onClick={() => void handleResetAllQuotas()}
+                className="max-sm:flex-1"
+              >
+                {resettingAll ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <RotateCcw className="size-3.5" />
+                )}
+                {t("apiKeys.resetAllQuotas")}
+              </Button>
+              <Button
+                disabled={resettingAll}
+                onClick={() => setCreateDialogOpen(true)}
+                className="max-sm:flex-1"
+              >
+                <Plus className="size-3.5" />
+                {t("apiKeys.createKey")}
+              </Button>
+            </>
           }
         />
 
@@ -1235,6 +1290,7 @@ export default function APIKeys() {
                         const isVisible = visibleKeys.has(keyRow.id);
                         const isNew = createdKeyId === keyRow.id;
                         const isBusy =
+                          resettingAll ||
                           deletingIds.has(keyRow.id) ||
                           resettingIds.has(keyRow.id);
                         const displayKey = isVisible
@@ -1359,7 +1415,9 @@ export default function APIKeys() {
                                 <Button
                                   variant="outline"
                                   size="sm"
-                                  disabled={resettingIds.has(keyRow.id)}
+                                  disabled={
+                                    resettingAll || resettingIds.has(keyRow.id)
+                                  }
                                   onClick={() => void handleResetQuota(keyRow)}
                                   className="min-w-[7rem] flex-1"
                                 >
@@ -1422,6 +1480,7 @@ export default function APIKeys() {
                             const isVisible = visibleKeys.has(keyRow.id);
                             const isNew = createdKeyId === keyRow.id;
                             const isBusy =
+                              resettingAll ||
                               deletingIds.has(keyRow.id) ||
                               resettingIds.has(keyRow.id);
                             const displayKey = isVisible
@@ -1568,7 +1627,10 @@ export default function APIKeys() {
                                       <Button
                                         variant="outline"
                                         size="sm"
-                                        disabled={resettingIds.has(keyRow.id)}
+                                        disabled={
+                                          resettingAll ||
+                                          resettingIds.has(keyRow.id)
+                                        }
                                         onClick={() =>
                                           void handleResetQuota(keyRow)
                                         }
@@ -3934,5 +3996,4 @@ function FormField({
     </Component>
   );
 }
-
 

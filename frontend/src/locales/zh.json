@@ -3137,6 +3137,12 @@
     "resetQuotaConfirm": "确认重置",
     "resetQuotaSuccess": "用量已重置",
     "resetQuotaFailed": "重置失败",
+    "resetAllQuotas": "重置全部额度",
+    "resetAllQuotasTitle": "重置所有 API Key 额度？",
+    "resetAllQuotasDesc": "将 {{count}} 个已配置额度限制的 Key 本期用量全部归零，历史总用量不变。此操作无法撤销。",
+    "resetAllQuotasConfirm": "确认全部重置",
+    "resetAllQuotasSuccess": "已重置 {{count}} 个 Key 的额度",
+    "resetAllQuotasFailed": "全部重置失败",
     "status": {
       "active": "正常",
       "expired": "已过期",
