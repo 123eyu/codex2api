@@ -664,6 +664,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/proxies/clean-error", h.CleanErrorProxies)
 	api.POST("/proxies/test", h.TestProxy)
 	api.POST("/proxies/test-all", h.TestAllProxies)
+	api.POST("/proxies/auto-balance", h.AutoBalanceProxies)
 
 	// OAuth 授权流程
 	api.POST("/oauth/generate-auth-url", h.GenerateOAuthURL)
@@ -1027,6 +1028,14 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
+	// ?view=lite — 轻量视图:只返回身份/绑定字段,跳过用量富化与探测触发。
+	// 供代理绑定弹窗等只需要"账号是谁、绑了哪条代理"的场景,大号池下不再传输
+	// 全量调度指标(代理页卡死问题)。
+	if strings.EqualFold(strings.TrimSpace(c.Query("view")), "lite") {
+		h.listAccountsLite(c, ctx)
+		return
+	}
+
 	h.store.TriggerUsageProbeAsync()
 	h.store.TriggerRecoveryProbeAsync()
 
@@ -1335,6 +1344,80 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, accountsResponse{Accounts: accounts})
+}
+
+// accountLiteResponse 是 ?view=lite 的账号条目:身份 + 绑定字段,无调度/用量指标。
+// 字段名与完整版 accountResponse 对齐,前端可直接当 AccountRow 子集消费。
+type accountLiteResponse struct {
+	ID                 int64  `json:"id"`
+	Name               string `json:"name"`
+	Email              string `json:"email"`
+	PlanType           string `json:"plan_type"`
+	Status             string `json:"status"`
+	Enabled            bool   `json:"enabled"`
+	ProxyURL           string `json:"proxy_url"`
+	ATOnly             bool   `json:"at_only"`
+	OpenAIResponsesAPI bool   `json:"openai_responses_api"`
+	GrokAPI            bool   `json:"grok_api"`
+	AgentIdentity      bool   `json:"agent_identity"`
+	GrokAuthKind       string `json:"grok_auth_kind,omitempty"`
+}
+
+func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
+	channel := parseUsageChannel(c)
+	rows, err := h.db.ListActiveByChannel(ctx, channel)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+
+	// 运行时状态覆盖 DB 状态(与完整视图一致),其余富化一律跳过。
+	runtimeStatus := make(map[int64]string)
+	for _, acc := range h.store.Accounts() {
+		runtimeStatus[acc.DBID] = acc.RuntimeStatus()
+	}
+
+	accounts := make([]accountLiteResponse, 0, len(rows))
+	for _, row := range rows {
+		upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
+		isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
+		isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
+		grokAuthKind := ""
+		if isGrokAccount {
+			if strings.TrimSpace(row.GetCredential("api_key")) != "" {
+				grokAuthKind = auth.GrokAuthKindAPIKey
+			} else {
+				grokAuthKind = auth.GrokAuthKindOAuth
+			}
+		}
+		email := row.GetCredential("email")
+		if isOpenAIResponsesAccount && email == "" {
+			email = row.GetCredential("base_url")
+		}
+		planType := row.GetCredential("plan_type")
+		if (isOpenAIResponsesAccount || (isGrokAccount && grokAuthKind == auth.GrokAuthKindAPIKey)) && planType == "" {
+			planType = "api"
+		}
+		status := row.Status
+		if rt, ok := runtimeStatus[row.ID]; ok && rt != "" {
+			status = rt
+		}
+		accounts = append(accounts, accountLiteResponse{
+			ID:                 row.ID,
+			Name:               row.Name,
+			Email:              email,
+			PlanType:           planType,
+			Status:             status,
+			Enabled:            row.Enabled,
+			ProxyURL:           row.ProxyURL,
+			ATOnly:             !isOpenAIResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+			OpenAIResponsesAPI: isOpenAIResponsesAccount,
+			GrokAPI:            isGrokAccount,
+			AgentIdentity:      isAgentIdentityCredentialRow(row),
+			GrokAuthKind:       grokAuthKind,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"accounts": accounts})
 }
 
 type updateAccountSchedulerReq struct {
@@ -1939,6 +2022,9 @@ func parseOptionalIntegerField(raw json.RawMessage, field string, minValue, maxV
 		return database.OptionalNullInt64{}, fmt.Errorf("%s 必须是整数或 null", field)
 	}
 	if value < minValue || value > maxValue {
+		if maxValue == math.MaxInt64 {
+			return database.OptionalNullInt64{}, fmt.Errorf("%s 超出范围，必须 >= %d", field, minValue)
+		}
 		return database.OptionalNullInt64{}, fmt.Errorf("%s 超出范围，必须在 %d..%d 之间", field, minValue, maxValue)
 	}
 	return database.OptionalNullInt64{Set: true, Value: sql.NullInt64{Int64: value, Valid: true}}, nil
@@ -3288,7 +3374,7 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 		// Grok 账号：用自身凭据拉取 Grok 上游模型目录
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 		defer cancel()
-		models, err := proxy.FetchGrokModelIDs(ctx, account)
+		models, err := proxy.FetchGrokModelIDs(ctx, account, h.store.ResolveProxyForAccount(account))
 		if err != nil {
 			writeError(c, http.StatusBadGateway, fmt.Sprintf("拉取 Grok 上游模型目录失败: %s", err.Error()))
 			return
@@ -8016,9 +8102,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		if v < 1 {
 			v = 1
 		}
-		if v > 50 {
-			v = 50
-		}
+		// 不再设上限：由运营按机器与上游承载自行决定
 		h.store.SetMaxConcurrency(v)
 		log.Printf("设置已更新: max_concurrency = %d", v)
 	}
@@ -9663,6 +9747,12 @@ func (h *Handler) ListProxies(c *gin.Context) {
 	}
 	if proxies == nil {
 		proxies = []*database.ProxyRow{}
+	}
+	// 绑定数服务端聚合;失败不阻断列表(前端把 0 当"无绑定"展示)。
+	if boundCounts, err := h.db.CountAccountsByProxyURL(ctx); err == nil {
+		for _, p := range proxies {
+			p.BoundCount = boundCounts[strings.TrimSpace(p.URL)]
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"proxies": proxies})
 }

@@ -2502,6 +2502,66 @@ type ProxyRow struct {
 	TestLocation  string    `json:"test_location"`
 	TestLatencyMs int       `json:"test_latency_ms"`
 	TestStatus    string    `json:"test_status"`
+	// BoundCount 是绑定到该代理的账号数,由列表接口按 proxy_url 聚合填充,
+	// 前端据此免拉全量账号(代理页大号池卡死问题)。
+	BoundCount int64 `json:"bound_count"`
+}
+
+// SetAccountProxyURLs 在单事务里批量更新账号的 proxy_url(代理均衡绑定)。
+// 调用方负责同步运行时 store(ApplyAccountProxyURL)。
+func (db *DB) SetAccountProxyURLs(ctx context.Context, assignments map[int64]string) error {
+	if len(assignments) == 0 {
+		return nil
+	}
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	query := `UPDATE accounts SET proxy_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
+	if db.isSQLite() {
+		query = `UPDATE accounts SET proxy_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	}
+	stmt, err := tx.PrepareContext(ctx, query)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for id, proxyURL := range assignments {
+		if _, err := stmt.ExecContext(ctx, strings.TrimSpace(proxyURL), id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// CountAccountsByProxyURL 统计各 proxy_url 绑定的未删除账号数。
+// 供代理列表页展示绑定数,替代前端拉全量账号自行聚合。
+func (db *DB) CountAccountsByProxyURL(ctx context.Context) (map[string]int64, error) {
+	rows, err := db.conn.QueryContext(ctx, `
+		SELECT TRIM(proxy_url), COUNT(*)
+		FROM accounts
+		WHERE TRIM(COALESCE(proxy_url, '')) <> ''
+		  AND status <> 'deleted'
+		  AND COALESCE(error_message, '') <> 'deleted'
+		GROUP BY TRIM(proxy_url)
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]int64)
+	for rows.Next() {
+		var url string
+		var count int64
+		if err := rows.Scan(&url, &count); err != nil {
+			return nil, err
+		}
+		out[url] = count
+	}
+	return out, rows.Err()
 }
 
 // ListProxies 获取所有代理
