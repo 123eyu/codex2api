@@ -1999,7 +1999,6 @@ export default function Settings() {
                 <SettingField label={t('settings.maxConcurrency')} description={t('settings.maxConcurrencyRange')} suffix={t('settings.unit.concurrency')}>
                   <DraftNumberInput
                     min={1}
-                    max={50}
                     value={settingsForm.max_concurrency}
                     onValueChange={(value) => setSettingsForm(f => ({ ...f, max_concurrency: value }))}
                   />

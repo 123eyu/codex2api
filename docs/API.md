@@ -470,7 +470,7 @@ data: [DONE]
 | 参数                      | 类型           | 必填 | 说明                                                                                                       |
 | ------------------------- | -------------- | ---- | ---------------------------------------------------------------------------------------------------------- |
 | score_bias_override       | integer/null   | 否   | 总加权分覆盖值，范围 `-200..200`，`null` 表示恢复套餐默认                                                  |
-| base_concurrency_override | integer/null   | 否   | 基础并发覆盖值，范围 `1..50`，`null` 表示恢复全局默认                                                      |
+| base_concurrency_override | integer/null   | 否   | 基础并发覆盖值，`≥1` 无上限，`null` 表示恢复全局默认                                                      |
 | skip_warm_tier            | boolean/null   | 否   | 是否跳过 warm 层级；`null` 等同 `false`，字段省略时保持原值                                                |
 | allowed_api_key_ids       | integer[]/null | 否   | 允许调用该账号的 API Key ID 列表，去重升序保存；字段省略时保持原值，传 `null` 或 `[]` 表示恢复为全部可调用 |
 
@@ -546,7 +546,7 @@ data: [DONE]
 | 字段 | 类型 | 范围/语义 |
 |------|------|-----------|
 | `score_bias_override` | integer/null | `-200..200`；`null` 恢复套餐默认分数偏置 |
-| `base_concurrency_override` | integer/null | `1..50`；`null` 恢复分组或全局继承值 |
+| `base_concurrency_override` | integer/null | `≥1` 无上限；`null` 恢复分组或全局继承值 |
 | `scheduler_priority` | integer/null | `-100..100`；`null` 恢复默认优先级 `0` |
 | `tags` | string[] | 替换账号标签；空数组清空 |
 | `group_ids` | integer[] | 替换账号分组；空数组清空 |
@@ -1210,7 +1210,7 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 }
 ```
 
-`base_concurrency_override` 的有效范围为 `1..50`。创建时省略或传 `null` 表示不设置分组覆盖；PATCH 时传 `null` 会清除已有值并恢复继承。该值只决定基础并发，健康档位、用量保护和智能配速仍可能继续下调实际并发。
+`base_concurrency_override` 最小为 `1`，无上限。创建时省略或传 `null` 表示不设置分组覆盖；PATCH 时传 `null` 会清除已有值并恢复继承。该值只决定基础并发，健康档位、用量保护和智能配速仍可能继续下调实际并发。
 
 **响应:**
 

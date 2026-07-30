@@ -1673,7 +1673,7 @@ func TestUpdateAccountSchedulerRejectsOutOfRangeValues(t *testing.T) {
 		{
 			name:    "base concurrency out of range",
 			body:    `{"base_concurrency_override":0}`,
-			message: "base_concurrency_override 超出范围，必须在 1..50 之间",
+			message: "base_concurrency_override 超出范围，必须 >= 1",
 		},
 		{
 			name:    "5h auto pause threshold out of range",

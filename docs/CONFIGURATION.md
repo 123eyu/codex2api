@@ -154,7 +154,7 @@ Redis 模式会把 response context 保存到共享后端。后端值在重建�
 
 | 字段 | 类型 | 默认值 | 范围 | 说明 |
 |------|------|--------|------|------|
-| `MaxConcurrency` | int | 2 | 1-50 | 单账号最大并发请求数 |
+| `MaxConcurrency` | int | 2 | ≥1（无上限） | 单账号最大并发请求数 |
 | `GlobalRPM` | int | 0 | 0-∞ | 全局每分钟请求限制，0 表示不限 |
 | `MaxRetries` | int | 3 | 0-10 | 请求失败最大重试次数 |
 | `MaxRateLimitRetries` | int | 2 | 0-10 | 遇到 429 限流时的最大额外重试次数 |
@@ -196,7 +196,7 @@ Redis 模式会把 response context 保存到共享后端。后端值在重建�
 | `credit_enabled` | bool | false | 标记账号为信用计费模式 |
 | `credit_skip_usage_window` | bool | false | 跳过 7 天/5 小时用量窗口惩罚（适用于信用账号） |
 | `score_bias_override` | int/null | null | 手工覆盖调度权重分，`null` 跟随套餐默认 |
-| `base_concurrency_override` | int/null | null | 手工覆盖基础并发值，`null` 时先继承所属分组的最小有效值，再回退到全局默认 |
+| `base_concurrency_override` | int/null | null | 手工覆盖基础并发值（`≥1` 无上限）；`null` 时先继承所属分组的最小有效值，再回退到全局默认 |
 | `scheduler_priority` | int/null | null | 严格调度优先级（`-100..100`）；`null` 恢复默认值 `0` |
 | `skip_warm_tier` | bool | false | 跳过 warm 层级；仅把 warm 提升为 healthy，不覆盖 risky/banned |
 
@@ -204,7 +204,7 @@ Redis 模式会把 response context 保存到共享后端。后端值在重建�
 
 ### 分组级基础并发
 
-账号分组可设置 `base_concurrency_override`（`1..50`，`null` 表示不覆盖）。基础并发按“账号显式覆盖 > 所属分组中最小的有效值 > 全局 `max_concurrency`”解析；最终动态并发仍会受健康档位、用量保护和智能配速限制。
+账号分组可设置 `base_concurrency_override`（`≥1`，无上限，`null` 表示不覆盖）。基础并发按“账号显式覆盖 > 所属分组中最小的有效值 > 全局 `max_concurrency`”解析；最终动态并发仍会受健康档位、用量保护和智能配速限制。
 
 ### WebSocket 连接池与 1009 降级
 
