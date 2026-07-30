@@ -672,6 +672,10 @@ export const api = {
     request<MessageResponse>(`/keys/${id}`, { method: 'DELETE' }),
   updateAPIKey: (id: number, data: UpdateAPIKeyRequest) =>
     request<MessageResponse>(`/keys/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  resetAPIKeyQuota: (id: number) =>
+    request<MessageResponse>(`/keys/${id}/reset-quota`, { method: 'POST' }),
+  resetAllAPIKeyQuotas: () =>
+    request<MessageResponse & { reset_count: number }>('/keys/reset-all-quotas', { method: 'POST' }),
   // 分组 / 账号维度限额的当前用量（issue #439）。
   getAPIKeyScopeUsage: (id: number) =>
     request<{ items: APIKeyScopeUsageItem[] }>(`/keys/${id}/scope-usage`),

@@ -3194,6 +3194,12 @@
     "resetQuotaConfirm": "Confirm Reset",
     "resetQuotaSuccess": "Usage has been reset",
     "resetQuotaFailed": "Reset failed",
+    "resetAllQuotas": "Reset All Quotas",
+    "resetAllQuotasTitle": "Reset all API key quotas?",
+    "resetAllQuotasDesc": "Reset current usage for all {{count}} keys with a configured quota. Total historical usage is preserved. This cannot be undone.",
+    "resetAllQuotasConfirm": "Reset All",
+    "resetAllQuotasSuccess": "Reset quotas for {{count}} keys",
+    "resetAllQuotasFailed": "Failed to reset all quotas",
     "status": {
       "active": "Active",
       "expired": "Expired",

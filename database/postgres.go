@@ -1633,7 +1633,7 @@ func (db *DB) UpdateAPIKey(ctx context.Context, id int64, update APIKeyUpdate) e
 // total_used (cumulative history). Increments reset_count and sets last_reset_at.
 func (db *DB) ResetAPIKeyQuota(ctx context.Context, id int64) error {
 	res, err := db.conn.ExecContext(ctx,
-		`UPDATE api_keys SET quota_used = 0, reset_count = COALESCE(reset_count, 0) + 1, last_reset_at = NOW() WHERE id = $1`, id)
+		`UPDATE api_keys SET quota_used = 0, reset_count = COALESCE(reset_count, 0) + 1, last_reset_at = CURRENT_TIMESTAMP WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -1645,6 +1645,23 @@ func (db *DB) ResetAPIKeyQuota(ctx context.Context, id int64) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// ResetAllAPIKeyQuotas resets the current-period usage for every API key that
+// has a quota configured. Unlimited keys are intentionally excluded because
+// they do not have a renewable quota period.
+func (db *DB) ResetAllAPIKeyQuotas(ctx context.Context) (int64, error) {
+	res, err := db.conn.ExecContext(ctx, `
+		UPDATE api_keys
+		SET quota_used = 0,
+			reset_count = COALESCE(reset_count, 0) + 1,
+			last_reset_at = CURRENT_TIMESTAMP
+		WHERE COALESCE(quota_limit, 0) > 0
+	`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ==================== System Settings ====================
