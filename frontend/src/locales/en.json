@@ -94,6 +94,7 @@
     "fileImporting": "Importing…",
     "fileImportProgress": "Importing… batch {{done}}/{{total}}",
     "fileImportDone": "Imported {{imported}}/{{total}} accounts",
+    "importProgressTitle": "Importing Grok accounts",
     "importPickerTitle": "Import Grok accounts",
     "importPickerDesc": "Choose a source. All entries are added to the Grok account pool.",
     "importOptJson": "CPA / auth.json files",
