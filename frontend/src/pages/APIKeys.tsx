@@ -710,11 +710,10 @@ export default function APIKeys() {
     if (!confirmed) return;
 
     setResettingIds((prev) => new Set(prev).add(keyRow.id));
-    const previousUsed = keyRow.quota_used;
     setData((current) => ({
       ...current,
       keys: current.keys.map((item) =>
-        item.id === keyRow.id ? { ...item, quota_used: 0 } : item,
+        item.id === keyRow.id ? resetAPIKeyQuotaUsage(item) : item,
       ),
     }));
     try {
@@ -725,9 +724,7 @@ export default function APIKeys() {
       setData((current) => ({
         ...current,
         keys: current.keys.map((item) =>
-          item.id === keyRow.id
-            ? { ...item, quota_used: previousUsed }
-            : item,
+          item.id === keyRow.id ? keyRow : item,
         ),
       }));
       showToast(
@@ -744,11 +741,10 @@ export default function APIKeys() {
   };
 
   const handleResetAllQuotas = async () => {
-    const quotaKeyCount = keys.filter((keyRow) => keyRow.quota_limit > 0).length;
-    if (quotaKeyCount === 0) return;
+    if (keys.length === 0) return;
     const confirmed = await confirm({
       title: t("apiKeys.resetAllQuotasTitle"),
-      description: t("apiKeys.resetAllQuotasDesc", { count: quotaKeyCount }),
+      description: t("apiKeys.resetAllQuotasDesc", { count: keys.length }),
       confirmText: t("apiKeys.resetAllQuotasConfirm"),
       tone: "destructive",
       confirmVariant: "destructive",
@@ -760,9 +756,7 @@ export default function APIKeys() {
       const result = await api.resetAllAPIKeyQuotas();
       setData((current) => ({
         ...current,
-        keys: current.keys.map((item) =>
-          item.quota_limit > 0 ? { ...item, quota_used: 0 } : item,
-        ),
+        keys: current.keys.map(resetAPIKeyQuotaUsage),
       }));
       showToast(
         t("apiKeys.resetAllQuotasSuccess", { count: result.reset_count }),
@@ -1029,10 +1023,7 @@ export default function APIKeys() {
             <>
               <Button
                 variant="outline"
-                disabled={
-                  resettingAll ||
-                  !keys.some((keyRow) => keyRow.quota_limit > 0)
-                }
+                disabled={resettingAll || keys.length === 0}
                 onClick={() => void handleResetAllQuotas()}
                 className="max-sm:flex-1"
               >
@@ -1418,24 +1409,22 @@ export default function APIKeys() {
                             </div>
 
                             <div className="mt-3 flex flex-wrap gap-1.5">
-                              {keyRow.quota_limit > 0 ? (
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  disabled={
-                                    resettingAll || resettingIds.has(keyRow.id)
-                                  }
-                                  onClick={() => void handleResetQuota(keyRow)}
-                                  className="min-w-[7rem] flex-1"
-                                >
-                                  {resettingIds.has(keyRow.id) ? (
-                                    <Loader2 className="size-3.5 animate-spin" />
-                                  ) : (
-                                    <RotateCcw className="size-3.5" />
-                                  )}
-                                  {t("apiKeys.resetQuota")}
-                                </Button>
-                              ) : null}
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={
+                                  resettingAll || resettingIds.has(keyRow.id)
+                                }
+                                onClick={() => void handleResetQuota(keyRow)}
+                                className="min-w-[7rem] flex-1"
+                              >
+                                {resettingIds.has(keyRow.id) ? (
+                                  <Loader2 className="size-3.5 animate-spin" />
+                                ) : (
+                                  <RotateCcw className="size-3.5" />
+                                )}
+                                {t("apiKeys.resetQuota")}
+                              </Button>
                               <Button
                                 variant="outline"
                                 size="sm"
@@ -1449,7 +1438,7 @@ export default function APIKeys() {
                               <Button
                                 variant="destructive"
                                 size="sm"
-                                disabled={deletingIds.has(keyRow.id)}
+                                disabled={isBusy}
                                 onClick={() => void handleDeleteKey(keyRow.id)}
                                 className="min-w-[6rem] flex-1"
                               >
@@ -1630,27 +1619,25 @@ export default function APIKeys() {
                                 </TableCell>
                                 <TableCell>
                                   <div className="flex flex-wrap items-center justify-end gap-1.5">
-                                    {keyRow.quota_limit > 0 ? (
-                                      <Button
-                                        variant="outline"
-                                        size="sm"
-                                        disabled={
-                                          resettingAll ||
-                                          resettingIds.has(keyRow.id)
-                                        }
-                                        onClick={() =>
-                                          void handleResetQuota(keyRow)
-                                        }
-                                        title={t("apiKeys.resetQuota")}
-                                      >
-                                        {resettingIds.has(keyRow.id) ? (
-                                          <Loader2 className="size-3.5 animate-spin" />
-                                        ) : (
-                                          <RotateCcw className="size-3.5" />
-                                        )}
-                                        {t("apiKeys.resetQuota")}
-                                      </Button>
-                                    ) : null}
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      disabled={
+                                        resettingAll ||
+                                        resettingIds.has(keyRow.id)
+                                      }
+                                      onClick={() =>
+                                        void handleResetQuota(keyRow)
+                                      }
+                                      title={t("apiKeys.resetQuota")}
+                                    >
+                                      {resettingIds.has(keyRow.id) ? (
+                                        <Loader2 className="size-3.5 animate-spin" />
+                                      ) : (
+                                        <RotateCcw className="size-3.5" />
+                                      )}
+                                      {t("apiKeys.resetQuota")}
+                                    </Button>
                                     <Button
                                       variant="outline"
                                       size="sm"
@@ -1664,7 +1651,7 @@ export default function APIKeys() {
                                     <Button
                                       variant="destructive"
                                       size="sm"
-                                      disabled={deletingIds.has(keyRow.id)}
+                                      disabled={isBusy}
                                       onClick={() =>
                                         void handleDeleteKey(keyRow.id)
                                       }
@@ -2703,6 +2690,20 @@ function getAPIKeyStatus(keyRow: APIKeyRow): APIKeyStatus {
     return "quota_exhausted";
   }
   return "active";
+}
+
+function resetAPIKeyQuotaUsage(keyRow: APIKeyRow): APIKeyRow {
+  return {
+    ...keyRow,
+    quota_used: 0,
+    window_usage: keyRow.window_usage
+      ? {
+          ...keyRow.window_usage,
+          cost_5h: 0,
+          cost_7d: 0,
+        }
+      : keyRow.window_usage,
+  };
 }
 
 function usageToneClass(pct: number) {
@@ -4039,4 +4040,3 @@ function FormField({
     </Component>
   );
 }
-

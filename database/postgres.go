@@ -1633,39 +1633,59 @@ func (db *DB) UpdateAPIKey(ctx context.Context, id int64, update APIKeyUpdate) e
 	return nil
 }
 
-// ResetAPIKeyQuota resets the current period usage (quota_used) to 0 while preserving
-// total_used (cumulative history). Increments reset_count and sets last_reset_at.
-func (db *DB) ResetAPIKeyQuota(ctx context.Context, id int64) error {
-	res, err := db.conn.ExecContext(ctx,
-		`UPDATE api_keys SET quota_used = 0, reset_count = COALESCE(reset_count, 0) + 1, last_reset_at = CURRENT_TIMESTAMP WHERE id = $1`, id)
-	if err != nil {
-		return err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+// APIKeyQuotaResetTarget identifies one row changed by a quota reset. Returning
+// the raw key lets callers evict exactly the affected authentication cache.
+type APIKeyQuotaResetTarget struct {
+	ID  int64
+	Key string
 }
 
-// ResetAllAPIKeyQuotas resets the current-period usage for every API key that
-// has a quota configured. Unlimited keys are intentionally excluded because
-// they do not have a renewable quota period.
-func (db *DB) ResetAllAPIKeyQuotas(ctx context.Context) (int64, error) {
-	res, err := db.conn.ExecContext(ctx, `
+// ResetAPIKeyQuota clears cumulative usage and records a cutoff that restarts
+// the API key's 5h/7d windows without deleting historical usage logs.
+func (db *DB) ResetAPIKeyQuota(ctx context.Context, id int64) (*APIKeyQuotaResetTarget, error) {
+	db.FlushUsageLogs()
+	target := &APIKeyQuotaResetTarget{}
+	err := db.conn.QueryRowContext(ctx, `
 		UPDATE api_keys
 		SET quota_used = 0,
 			reset_count = COALESCE(reset_count, 0) + 1,
-			last_reset_at = CURRENT_TIMESTAMP
-		WHERE COALESCE(quota_limit, 0) > 0
-	`)
+			last_reset_at = $1
+		WHERE id = $2
+		RETURNING id, key
+	`, db.timeArg(time.Now()), id).Scan(&target.ID, &target.Key)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return res.RowsAffected()
+	return target, nil
+}
+
+// ResetAllAPIKeyQuotas restarts cumulative and 5h/7d usage periods for every
+// API key in one statement and returns the exact affected rows for cache eviction.
+func (db *DB) ResetAllAPIKeyQuotas(ctx context.Context) ([]APIKeyQuotaResetTarget, error) {
+	db.FlushUsageLogs()
+	rows, err := db.conn.QueryContext(ctx, `
+		UPDATE api_keys
+		SET quota_used = 0,
+			reset_count = COALESCE(reset_count, 0) + 1,
+			last_reset_at = $1
+		RETURNING id, key
+	`, db.timeArg(time.Now()))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	targets := make([]APIKeyQuotaResetTarget, 0)
+	for rows.Next() {
+		var target APIKeyQuotaResetTarget
+		if err := rows.Scan(&target.ID, &target.Key); err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return targets, nil
 }
 
 // ==================== System Settings ====================
