@@ -27,6 +27,12 @@ const (
 	// 正常请求和有心跳回执的长推理不会产生这次额外往返。
 	ActiveReadProbeTimeout = 5 * time.Second
 
+	// 活跃流业务帧静默上限：存活复核证明传输层活着,但证明不了上游还在处理
+	// 本请求;单轮响应两个业务帧之间的静默超过该值即按超时收尾,防止 worker
+	// 卡死但心跳仍通的连接把请求与租约无限钉死。
+	// env CODEX_WS_MAX_TURN_SILENCE 可调("0" 关闭)。
+	ActiveReadMaxTurnSilence = 15 * time.Minute
+
 	// 写超时：30 秒
 	WriteTimeout = 30 * time.Second
 
@@ -41,9 +47,6 @@ const (
 
 	// 握手超时：30 秒
 	HandshakeTimeout = 30 * time.Second
-
-	// Pending 请求超时：2 分钟
-	PendingRequestTimeout = 2 * time.Minute
 
 	// 复用同一 session 的连接时，等待其空闲的轮询退避参数。
 	AcquireInitialBackoff = 10 * time.Millisecond  // 初始退避
@@ -83,7 +86,10 @@ type PendingRequest struct {
 
 // NewPendingRequest 创建新的等待请求
 func NewPendingRequest(sessionID string) *PendingRequest {
-	ctx, cancel := context.WithTimeout(context.Background(), PendingRequestTimeout)
+	// Ctx 仅用于 Close 时的取消广播;请求时长的应用层上限由读路径的业务帧
+	// 静默上限(ActiveReadMaxTurnSilence)执行。历史上这里的 2min WithTimeout
+	// 从无消费者,却让"Pending 有 2 分钟兜底"的注释在别处流传,故改为 WithCancel。
+	ctx, cancel := context.WithCancel(context.Background())
 	return &PendingRequest{
 		RequestID:    uuid.New().String(),
 		SessionID:    sessionID,

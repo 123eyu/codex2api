@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -92,6 +93,15 @@ func (wc *WsConnection) ensureReadState() *wsReadState {
 		}
 	})
 	return wc.readState
+}
+
+// appendQueueItemLocked 是队列 append 的唯一入口:queuedPayload 与 queueSequence
+// 必须与 append 原子同步推进——探针快路径靠 queueSequence 识别并发队列活动,
+// 任何绕过本方法的 append 都会让探针漏看新帧、在检查点边界误杀活流。
+func (state *wsReadState) appendQueueItemLocked(item readPumpItem) {
+	state.queue = append(state.queue, item)
+	state.queuedPayload += len(item.payload)
+	state.queueSequence++
 }
 
 func (state *wsReadState) notifyReaderLocked() {
@@ -332,14 +342,12 @@ func (wc *WsConnection) enqueueBusinessFrameForCapturedLease(messageType int, pa
 		return errReadPumpQueueOverflow
 	}
 
-	state.queue = append(state.queue, readPumpItem{
+	state.appendQueueItemLocked(readPumpItem{
 		messageType: messageType,
 		payload:     payload,
 		leaseID:     leaseID,
 		captured:    captured,
 	})
-	state.queuedPayload += len(payload)
-	state.queueSequence++
 	if isReadLeaseTerminal(payload) {
 		if captured.write != nil && !captured.write.resolved {
 			state.leaseTerminalQueued = true
@@ -401,8 +409,7 @@ func (wc *WsConnection) recordReadPumpFailureLocked(state *wsReadState, readErr 
 		state.leaseWrite != nil &&
 		isNormalPeerClose(readErr)
 	if leaseID != "" && state.activeLease == leaseID && len(state.queue) < readPumpMaxQueuedItems {
-		state.queue = append(state.queue, readPumpItem{err: readErr, leaseID: leaseID})
-		state.queueSequence++
+		state.appendQueueItemLocked(readPumpItem{err: readErr, leaseID: leaseID})
 	}
 	if !deferTerminalCommit {
 		state.resolveLeaseWriteLocked(false, readErr)
@@ -753,14 +760,39 @@ func (wc *WsConnection) ReadMessage() (int, []byte, error) {
 		ReadLivenessCheckInterval,
 		ActiveReadRecentInboundWindow,
 		ActiveReadProbeTimeout,
+		activeReadMaxTurnSilence(),
 	)
+}
+
+// activeReadMaxTurnSilence 单轮响应业务帧静默上限。存活复核只证明传输层活着,
+// 证明不了上游还在处理本请求;env CODEX_WS_MAX_TURN_SILENCE 可调
+// (Go duration 格式,如 "30m";设 "0" 关闭上限,恢复只看传输存活的行为)。
+func activeReadMaxTurnSilence() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("CODEX_WS_MAX_TURN_SILENCE"))
+	if raw == "" {
+		return ActiveReadMaxTurnSilence
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed < 0 {
+		return ActiveReadMaxTurnSilence
+	}
+	return parsed
+}
+
+func (wc *WsConnection) sessionAccountID() int64 {
+	if wc.session != nil {
+		return wc.session.AccountID
+	}
+	return 0
 }
 
 // readMessageWithLiveness accepts explicit timings so the liveness state
 // machine can be covered by fast deterministic tests. The permanent read pump
 // remains the connection's sole Gorilla reader; probes only write control
 // frames and matching Pongs are dispatched by the installed Pong handler.
-func (wc *WsConnection) readMessageWithLiveness(checkInterval, recentInboundWindow, probeTimeout time.Duration) (int, []byte, error) {
+// maxTurnSilence caps total business-frame silence within this call regardless
+// of transport liveness; <= 0 disables the cap.
+func (wc *WsConnection) readMessageWithLiveness(checkInterval, recentInboundWindow, probeTimeout, maxTurnSilence time.Duration) (int, []byte, error) {
 	if wc == nil {
 		return 0, nil, fmt.Errorf("websocket connection is nil")
 	}
@@ -776,6 +808,8 @@ func (wc *WsConnection) readMessageWithLiveness(checkInterval, recentInboundWind
 	state := wc.ensureReadState()
 	wc.StartReadPump()
 
+	started := time.Now()
+	rescuedCheckpoints := 0
 	timer := time.NewTimer(checkInterval)
 	defer timer.Stop()
 	for {
@@ -823,9 +857,24 @@ func (wc *WsConnection) readMessageWithLiveness(checkInterval, recentInboundWind
 				continue
 			}
 
+			// 静默上限:存活复核只证明传输层活着,证明不了上游还在处理本请求。
+			// 上游 worker 卡死而 LB/心跳仍答 Ping 时,若无此上限,请求、租约与
+			// 连接会被无限钉死(PendingRequest.Ctx 无消费者,应用层唯一的时长
+			// 约束就在这里)。文案含 "timed out" 供故障归因识别为超时。
+			silence := time.Since(started)
+			if maxTurnSilence > 0 && silence >= maxTurnSilence {
+				log.Printf("[WS] 读路径静默超限 account=%d 静默=%s 上限=%s 已续命%d次", wc.sessionAccountID(), silence.Round(time.Second), maxTurnSilence, rescuedCheckpoints)
+				return 0, nil, fmt.Errorf(
+					"websocket read timed out: no business frame within %s (%d liveness checkpoint(s) rescued)",
+					maxTurnSilence,
+					rescuedCheckpoints,
+				)
+			}
+
 			// Ping/Pong/Data activity proves the transport is alive even when a
 			// long reasoning turn has not emitted a business frame recently.
 			if recentInbound {
+				rescuedCheckpoints++
 				timer.Reset(checkInterval)
 				continue
 			}
@@ -843,7 +892,7 @@ func (wc *WsConnection) readMessageWithLiveness(checkInterval, recentInboundWind
 			if !probeAlive && !hasQueuedItem && !readerStopped && !recentInbound {
 				state.mu.Unlock()
 				return 0, nil, fmt.Errorf(
-					"websocket liveness check failed after %s: no inbound activity within %s and no matching pong within %s",
+					"websocket liveness check timed out after %s: no inbound activity within %s and no matching pong within %s",
 					checkInterval,
 					recentInboundWindow,
 					probeTimeout,
@@ -854,6 +903,10 @@ func (wc *WsConnection) readMessageWithLiveness(checkInterval, recentInboundWind
 			if hasQueuedItem || readerStopped {
 				continue
 			}
+			rescuedCheckpoints++
+			// 探针续命是罕见路径(近期无任何入站、但对端仍答复了带唯一 payload
+			// 的 Ping),留一行归因日志,供事后诊断"流看似卡住"类报告。
+			log.Printf("[WS] 读路径探活续命 account=%d 静默=%s 第%d次复核", wc.sessionAccountID(), silence.Round(time.Second), rescuedCheckpoints)
 			timer.Reset(checkInterval)
 		}
 	}
@@ -921,6 +974,10 @@ func probeConnectionWithTimeoutInternal(wc *WsConnection, timeout time.Duration,
 		if queueAdvanced {
 			return true
 		}
+		// 不变量:notify 是容量 1 的信号通道,由 ReadMessage 的主 select 与本
+		// 探针共享。仅因探针同步运行在 ReadMessage 自身 goroutine 内(消费者
+		// 此刻不可能同时挂在 select 上),这里取走 token 才是安全的;若未来把
+		// 探针挪到独立 goroutine 或新增 notify 消费者,必须重新设计唤醒通道。
 		queueNotify = state.notify
 	}
 
