@@ -541,6 +541,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PATCH("/accounts/:id/openai-responses", h.UpdateOpenAIResponsesAccount)
 	api.POST("/accounts/grok", h.AddGrokAccount)
 	api.POST("/accounts/grok/models", h.FetchGrokModels)
+	api.GET("/accounts/grok/export", h.ExportGrokAccounts)
 	api.POST("/accounts/grok/oauth/device/start", h.StartGrokDeviceAuth)
 	api.POST("/accounts/grok/oauth/device/poll", h.PollGrokDeviceAuth)
 	api.POST("/accounts/grok/sso/import", h.ImportGrokSSO)
@@ -9408,7 +9409,7 @@ func (h *Handler) ExportAccounts(c *gin.Context) {
 		}
 	}
 
-	var entries []cpaExportEntry
+	entries := make([]any, 0, len(rows))
 	for _, row := range rows {
 		if idSet != nil && !idSet[row.ID] {
 			continue
@@ -9419,16 +9420,13 @@ func (h *Handler) ExportAccounts(c *gin.Context) {
 				continue
 			}
 		}
-		entry, ok := accountRowToCPAExportEntry(row)
+		entry, ok := accountRowToExportEntry(row)
 		if !ok {
 			continue
 		}
 		entries = append(entries, entry)
 	}
 
-	if entries == nil {
-		entries = []cpaExportEntry{}
-	}
 	c.JSON(http.StatusOK, entries)
 }
 
@@ -9446,12 +9444,12 @@ func (h *Handler) ExportRecycleBinAccounts(c *gin.Context) {
 	}
 
 	idSet := parseExportIDSet(c.Query("ids"))
-	entries := make([]cpaExportEntry, 0, len(rows))
+	entries := make([]any, 0, len(rows))
 	for _, row := range rows {
 		if idSet != nil && !idSet[row.ID] {
 			continue
 		}
-		entry, ok := accountRowToCPAExportEntry(row)
+		entry, ok := accountRowToExportEntry(row)
 		if !ok {
 			continue
 		}
