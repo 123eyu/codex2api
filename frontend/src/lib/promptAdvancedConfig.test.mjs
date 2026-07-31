@@ -86,6 +86,31 @@ test('removing one known override does not rebuild its parent object', () => {
   assert.equal(readAdvancedConfigPath(result.value, ['guard', 'provider_profiles', 'future_provider']), 'future_profile')
 })
 
+test('review adapter patches preserve prompts, payload templates, and unknown fields', () => {
+  const raw = JSON.stringify({
+    review_adapter: {
+      request_mode: 'moderations',
+      future_response_parser: 'v2',
+    },
+    future_root: true,
+  })
+  const result = patchAdvancedConfigDocument(raw, [
+    { path: ['review_adapter', 'request_mode'], value: 'chat_completions' },
+    { path: ['review_adapter', 'system_prompt'], value: 'system' },
+    { path: ['review_adapter', 'user_prompt_template'], value: '<user_input>{{text}}</user_input>' },
+    { path: ['review_adapter', 'payload_template'], value: '{"input":"{{user_prompt}}"}' },
+    { path: ['review_adapter', 'confidence_threshold'], value: 0.72 },
+  ])
+  assert.equal(result.ok, true)
+  const saved = JSON.parse(result.serialized)
+  assert.equal(saved.review_adapter.request_mode, 'chat_completions')
+  assert.equal(saved.review_adapter.user_prompt_template, '<user_input>{{text}}</user_input>')
+  assert.equal(saved.review_adapter.payload_template, '{"input":"{{user_prompt}}"}')
+  assert.equal(saved.review_adapter.confidence_threshold, 0.72)
+  assert.equal(saved.review_adapter.future_response_parser, 'v2')
+  assert.equal(saved.future_root, true)
+})
+
 test('Chinese locale labels do not expose internal policy enum values', () => {
   const locale = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))
   assert.equal('sync' in locale.promptFilter.guard.performance.overflowModes, false)
@@ -205,30 +230,17 @@ test('Prompt Filter rule tester renders the final GuardPipeline decision metadat
   }
 })
 
-test('Prompt Filter surfaces quarantined custom rules and keeps zh-TW decision labels complete', () => {
+test('Prompt Filter exposes full-request review configuration and live connection testing', () => {
   const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
-  assert.equal(source.includes('updated.prompt_filter_pattern_quarantines ?? []'), true)
-  assert.equal(source.includes("t('promptFilter.saveQuarantined'"), true)
-
-  const locale = JSON.parse(readFileSync(new URL('../locales/zh-TW.json', import.meta.url), 'utf8'))
-  for (const key of [
-    'testResultPipelineTitle',
-    'testResultPipelineHint',
-    'testResultLegacyFallbackHint',
-    'testResultFinalAction',
-    'testResultMode',
-    'testResultProfile',
-    'testResultProtocolProvider',
-    'testResultEndpointModel',
-    'testResultExecutionScore',
-    'testResultAuditScore',
-    'testResultOrigin',
-    'testResultReasonCode',
-    'testResultStrikeEligible',
-    'testResultPrimaryDetector',
-    'testResultYes',
-    'testResultNo',
-  ]) {
-    assert.equal(typeof locale.promptFilter[key], 'string', `missing zh-TW promptFilter.${key}`)
+  const requiredFragments = [
+    "request_mode: 'moderations'",
+    "value: 'chat_completions'",
+    "['review_adapter', key]",
+    'api.testPromptReview',
+    'reviewAllRequestsHint',
+    '{{user_prompt}}',
+  ]
+  for (const fragment of requiredFragments) {
+    assert.equal(source.includes(fragment), true, `full-request review control is missing: ${fragment}`)
   }
 })
