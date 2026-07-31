@@ -101,6 +101,23 @@ func waitForReadPumpCondition(t *testing.T, condition func() bool, message strin
 	t.Fatal(message)
 }
 
+func commitReadPumpTestLease(t *testing.T, wc *WsConnection, requestID string) {
+	t.Helper()
+	if err := wc.BeginReadLease(requestID); err != nil {
+		t.Fatalf("BeginReadLease: %v", err)
+	}
+	state := wc.ensureReadState()
+	state.mu.Lock()
+	activeLease := state.activeLease
+	leasePhase := state.leasePhase
+	if activeLease != requestID || leasePhase != readLeaseReserved {
+		state.mu.Unlock()
+		t.Fatalf("reserved lease = (%q, %d), want (%q, %d)", activeLease, leasePhase, requestID, readLeaseReserved)
+	}
+	state.leasePhase = readLeaseCommitted
+	state.mu.Unlock()
+}
+
 func TestReadPumpProcessesPingWhileIdle(t *testing.T) {
 	pongPayload := make(chan string, 1)
 	_, wc := newReadPumpTestConnection(t, func(conn *websocket.Conn) {
@@ -323,6 +340,227 @@ func TestReadPumpProbeDoesNotWaitForDataWriteLock(t *testing.T) {
 	}
 	wc.writeMu.Unlock()
 	locked = false
+}
+
+func TestReadMessageLivenessUsesRecentInboundWithoutExtraProbe(t *testing.T) {
+	serverReady := make(chan struct{})
+	clientProbe := make(chan string, 1)
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+
+	_, wc := newReadPumpTestConnection(t, func(conn *websocket.Conn) {
+		defaultPingHandler := conn.PingHandler()
+		conn.SetPingHandler(func(appData string) error {
+			select {
+			case clientProbe <- appData:
+			default:
+			}
+			return defaultPingHandler(appData)
+		})
+		go func() {
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+		close(serverReady)
+
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; i < 8; i++ {
+			select {
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, []byte("server-heartbeat"), time.Now().Add(time.Second)); err != nil {
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"recent-inbound"}}`)); err != nil {
+			t.Errorf("write terminal response: %v", err)
+			return
+		}
+		<-stop
+	})
+
+	<-serverReady
+	commitReadPumpTestLease(t, wc, "recent-inbound")
+	messageType, payload, err := wc.readMessageWithLiveness(30*time.Millisecond, 25*time.Millisecond, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("read long-running response with inbound heartbeats: %v", err)
+	}
+	if messageType != websocket.TextMessage || !strings.Contains(string(payload), `"id":"recent-inbound"`) {
+		t.Fatalf("response = (%d, %s), want recent-inbound terminal frame", messageType, payload)
+	}
+	select {
+	case probePayload := <-clientProbe:
+		t.Fatalf("recent inbound activity still triggered an active probe %q", probePayload)
+	default:
+	}
+}
+
+func TestReadMessageLivenessProbeKeepsSilentStreamAlive(t *testing.T) {
+	serverReady := make(chan struct{})
+	twoProbes := make(chan struct{})
+	stop := make(chan struct{})
+	var probeCount atomic.Int32
+	t.Cleanup(func() { close(stop) })
+
+	_, wc := newReadPumpTestConnection(t, func(conn *websocket.Conn) {
+		defaultPingHandler := conn.PingHandler()
+		conn.SetPingHandler(func(appData string) error {
+			if probeCount.Add(1) == 2 {
+				close(twoProbes)
+			}
+			return defaultPingHandler(appData)
+		})
+		go func() {
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+		close(serverReady)
+
+		select {
+		case <-twoProbes:
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"probe-alive"}}`)); err != nil {
+				t.Errorf("write delayed terminal response: %v", err)
+				return
+			}
+		case <-stop:
+			return
+		}
+		<-stop
+	})
+
+	<-serverReady
+	commitReadPumpTestLease(t, wc, "probe-alive")
+	messageType, payload, err := wc.readMessageWithLiveness(25*time.Millisecond, 5*time.Millisecond, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("read response after successful liveness probes: %v", err)
+	}
+	if messageType != websocket.TextMessage || !strings.Contains(string(payload), `"id":"probe-alive"`) {
+		t.Fatalf("response = (%d, %s), want probe-alive terminal frame", messageType, payload)
+	}
+	if got := probeCount.Load(); got < 2 {
+		t.Fatalf("probe count = %d, want at least 2 checkpoints", got)
+	}
+}
+
+func TestReadMessageLivenessFailsWithoutInboundOrMatchingPong(t *testing.T) {
+	serverReady := make(chan struct{})
+	probeSeen := make(chan string, 1)
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+
+	_, wc := newReadPumpTestConnection(t, func(conn *websocket.Conn) {
+		conn.SetPingHandler(func(appData string) error {
+			select {
+			case probeSeen <- appData:
+			default:
+			}
+			return nil
+		})
+		go func() {
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+		close(serverReady)
+		<-stop
+	})
+
+	<-serverReady
+	commitReadPumpTestLease(t, wc, "probe-timeout")
+	_, _, err := wc.readMessageWithLiveness(20*time.Millisecond, 5*time.Millisecond, 40*time.Millisecond)
+	if err == nil {
+		t.Fatal("missing inbound activity and matching Pong did not fail liveness check")
+	}
+	if !strings.Contains(err.Error(), "websocket liveness check failed") ||
+		!strings.Contains(err.Error(), "no matching pong") {
+		t.Fatalf("liveness error = %v, want explicit probe failure", err)
+	}
+	select {
+	case payload := <-probeSeen:
+		if payload == "" {
+			t.Fatal("liveness probe payload must be unique and non-empty")
+		}
+	case <-time.After(readPumpTestTimeout):
+		t.Fatal("server never received the liveness probe")
+	}
+}
+
+func TestReadMessageLivenessTerminalDuringProbeWinsImmediately(t *testing.T) {
+	serverReady := make(chan struct{})
+	probeSeen := make(chan struct{}, 1)
+	terminalSent := make(chan time.Time, 1)
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+
+	_, wc := newReadPumpTestConnection(t, func(conn *websocket.Conn) {
+		conn.SetPingHandler(func(string) error {
+			select {
+			case probeSeen <- struct{}{}:
+			default:
+			}
+			return nil
+		})
+		go func() {
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+		close(serverReady)
+
+		select {
+		case <-probeSeen:
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"probe-race"}}`)); err != nil {
+				t.Errorf("write terminal response during probe: %v", err)
+				return
+			}
+			terminalSent <- time.Now()
+		case <-stop:
+			return
+		}
+		<-stop
+	})
+
+	<-serverReady
+	commitReadPumpTestLease(t, wc, "probe-race")
+	resultCh := make(chan readPumpMessageResult, 1)
+	go func() {
+		messageType, payload, err := wc.readMessageWithLiveness(20*time.Millisecond, 5*time.Millisecond, 500*time.Millisecond)
+		resultCh <- readPumpMessageResult{messageType: messageType, payload: payload, err: err}
+	}()
+
+	var sentAt time.Time
+	select {
+	case sentAt = <-terminalSent:
+	case <-time.After(readPumpTestTimeout):
+		t.Fatal("server did not send a terminal frame during the probe")
+	}
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			t.Fatalf("terminal frame lost to probe failure: %v", result.err)
+		}
+		if result.messageType != websocket.TextMessage || !strings.Contains(string(result.payload), `"id":"probe-race"`) {
+			t.Fatalf("response = (%d, %s), want probe-race terminal frame", result.messageType, result.payload)
+		}
+		if elapsed := time.Since(sentAt); elapsed >= 300*time.Millisecond {
+			t.Fatalf("terminal frame delivery waited %s for the 500ms probe timeout", elapsed)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("terminal frame waited for the full liveness probe timeout")
+	}
 }
 
 func TestReadPumpRejectsFragmentedMessageStartedWhileIdle(t *testing.T) {

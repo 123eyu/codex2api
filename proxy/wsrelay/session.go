@@ -15,10 +15,17 @@ const (
 	// 心跳间隔：每 30 秒发送 Ping
 	HeartbeatPingInterval = 30 * time.Second
 
-	// 读超时：120 秒无响应则断开。
-	// 心跳 30s 仍提供 4 个窗口容错；放宽到 120s 避免长推理 / priority 排队的
-	// 活跃 turn（上游一段时间不下发增量帧）被误判为连接断开。
-	ReadTimeout = 120 * time.Second
+	// 活跃流存活复核间隔：业务帧静默达到 120 秒时不直接断开，而是先检查
+	// 最近入站活动，再按需发送带唯一 payload 的 Ping 等待匹配 Pong。
+	ReadLivenessCheckInterval = 120 * time.Second
+
+	// 活跃流近期入站窗口：覆盖两个心跳周期，允许偶发一次 Pong 延迟或丢失。
+	// 数据帧、对端 Ping、我方 Ping 的 Pong 回执都会刷新入站时间。
+	ActiveReadRecentInboundWindow = 2 * HeartbeatPingInterval
+
+	// 活跃流探活超时：仅在既无业务帧、近期也无任何入站活动时触发。
+	// 正常请求和有心跳回执的长推理不会产生这次额外往返。
+	ActiveReadProbeTimeout = 5 * time.Second
 
 	// 写超时：30 秒
 	WriteTimeout = 30 * time.Second
@@ -295,7 +302,7 @@ func (s *Session) heartbeatTick(sendPing func() error) {
 	if err := sendPing(); err != nil {
 		// Ping 写失败只说明写路径故障，读路径可能仍在正常下发；有在途请求时
 		// 不能 Close（会把本会话全部 pending 同秒截断，issue #436），交给读路径
-		// 裁决：pump 读错误或 ReadMessage 超时会走各自的失败处理。连接本身已被
+		// 裁决：pump 读错误或 ReadMessage 存活复核失败会走各自的失败处理。连接本身已被
 		// SendHeartbeat 摘出池子，不会再有新请求进来；心跳链就此停止。
 		if s.PendingCount() > 0 {
 			s.StopHeartbeat()
@@ -326,7 +333,7 @@ func (s *Session) StopHeartbeat() {
 	s.mu.Unlock()
 }
 
-// HandlePong 处理 Pong 响应，重置读超时
+// HandlePong 处理 Pong 响应并刷新会话活动时间。
 func (s *Session) HandlePong() {
 	s.Touch()
 }
