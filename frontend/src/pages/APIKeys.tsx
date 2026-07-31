@@ -30,6 +30,7 @@ import type {
   APIKeyWindowUsage,
   SystemSettings,
 } from "../types";
+import { canStartAPIKeyBulkReset } from "../lib/apiKeyOperationState";
 import { getErrorMessage } from "../utils/error";
 import { formatBeijingTime, formatRelativeTime } from "../utils/time";
 import { Badge } from "@/components/ui/badge";
@@ -698,6 +699,12 @@ export default function APIKeys() {
   };
 
   const [resettingIds, setResettingIds] = useState<Set<number>>(new Set());
+  const canResetAllQuotas = canStartAPIKeyBulkReset({
+    keyCount: keys.length,
+    resettingAll,
+    resettingIds,
+    deletingIds,
+  });
 
   const handleResetQuota = async (keyRow: APIKeyRow) => {
     const confirmed = await confirm({
@@ -741,7 +748,7 @@ export default function APIKeys() {
   };
 
   const handleResetAllQuotas = async () => {
-    if (keys.length === 0) return;
+    if (!canResetAllQuotas) return;
     const confirmed = await confirm({
       title: t("apiKeys.resetAllQuotasTitle"),
       description: t("apiKeys.resetAllQuotasDesc", { count: keys.length }),
@@ -1023,7 +1030,7 @@ export default function APIKeys() {
             <>
               <Button
                 variant="outline"
-                disabled={resettingAll || keys.length === 0}
+                disabled={!canResetAllQuotas}
                 onClick={() => void handleResetAllQuotas()}
                 className="max-sm:flex-1"
               >
