@@ -408,7 +408,7 @@ func relayAccountSupportsModel(account *auth.Account, model string) bool {
 	if !account.IsGrokAPI() || len(account.GrokModels()) > 0 {
 		return false
 	}
-	return modelIDInList(model, DefaultGrokModelIDs())
+	return modelIDInList(model, DefaultGrokModelIDsForAccount(account))
 }
 
 func modelIDInList(model string, models []string) bool {
@@ -5426,7 +5426,7 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 			// 未声明 models 白名单的 Grok 账号：补默认 Grok 模型集，让 grok-4.5 等
 			// 出现在 /v1/models（否则下游客户端拉不到可用的 Grok 模型名）。
 			if len(declared) == 0 && account.IsGrokAPI() {
-				declared = DefaultGrokModelIDs()
+				declared = DefaultGrokModelIDsForAccount(account)
 			}
 			for _, model := range declared {
 				key := strings.ToLower(strings.TrimSpace(model))
