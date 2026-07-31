@@ -780,8 +780,21 @@ func populateAPIKeyMetaFromContext(c *gin.Context, input *database.UsageLogInput
 	}
 }
 
+func populateInternalUsageMetaFromContext(c *gin.Context, input *database.UsageLogInput) {
+	if c == nil || input == nil {
+		return
+	}
+	if value, exists := c.Get(contextInternalReason); exists {
+		input.InternalReason, _ = value.(string)
+	}
+	if value, exists := c.Get(contextParentRequestID); exists {
+		input.ParentRequestID, _ = value.(string)
+	}
+}
+
 func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInput) {
 	populateAPIKeyMetaFromContext(c, input)
+	populateInternalUsageMetaFromContext(c, input)
 	populateClientIPFromRequest(c, input)
 	populateUserAgentMetaFromRequest(c, input)
 	populateWsAcquireFromRequest(c, input)
@@ -2860,6 +2873,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			accountReleasedForOverflow := false
 
 			if !invalidEncryptedContentRetried && isInvalidEncryptedContentError(resp.StatusCode, errBody) {
 				strippedRawBody, rawChanged := stripInvalidEncryptedContentFromResponsesBody(rawBody)
@@ -2884,12 +2898,16 @@ func (h *Handler) Responses(c *gin.Context) {
 			// 上下文超窗 + Key 开启自动压缩：摘要旧轮次后同参重试一次 (issue #415)
 			if overflowCompactEnabled && !overflowCompactRetried &&
 				resp.StatusCode == http.StatusBadRequest && isContextLengthExceededBody(errBody) {
-				if compacted, ok := h.compactOverflowResponsesBody(c.Request.Context(), codexBody); ok {
+				// 摘要请求需要沿用同一 Key 的路由/预算，但不能与父请求同时占住
+				// 当前账号或 scope 并发位，否则单账号池会发生自锁。
+				h.ReleaseAPIKeyScopeConcurrency(c)
+				h.store.Release(account)
+				accountReleasedForOverflow = true
+				if compacted, ok := h.compactOverflowResponsesBodyForRequest(c, codexBody); ok {
 					overflowCompactRetried = true
 					codexBody = compacted
 					expandedInputRaw = responsesInputRaw(codexBody)
 					log.Printf("上游报上下文超窗，已压缩旧轮次并重试一次 (attempt %d)", attempt+1)
-					h.store.Release(account)
 					continue
 				}
 			}
@@ -2898,7 +2916,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			SyncCodexUsageState(h.store, account, resp)
-			h.store.Release(account)
+			if !accountReleasedForOverflow {
+				h.store.Release(account)
+			}
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			retryExclusions.MarkHard(account.ID())
 
@@ -3268,18 +3288,21 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 			}
 		}
+		accountReleasedForOverflow := false
 		// 流内报上下文超窗（HTTP SSE 与 WS 上游同路径）+ Key 开启自动压缩：
 		// 未向下游写过任何字节时，摘要旧轮次后同参重试一次 (issue #415)。
 		if overflowCompactEnabled && !overflowCompactRetried && !wroteAnyBody &&
 			(!isStream || abortedForHTTPError) &&
 			isContextLengthExceededFailedPayload(terminalFailurePayload) {
-			if compacted, ok := h.compactOverflowResponsesBody(c.Request.Context(), codexBody); ok {
+			resp.Body.Close()
+			h.ReleaseAPIKeyScopeConcurrency(c)
+			h.store.Release(account)
+			accountReleasedForOverflow = true
+			if compacted, ok := h.compactOverflowResponsesBodyForRequest(c, codexBody); ok {
 				overflowCompactRetried = true
 				codexBody = compacted
 				expandedInputRaw = responsesInputRaw(codexBody)
 				log.Printf("上游流内报上下文超窗，已压缩旧轮次并重试一次 (attempt %d)", attempt+1)
-				resp.Body.Close()
-				h.store.Release(account)
 				continue
 			}
 		}
@@ -3343,7 +3366,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		applyImageUsageLogInfo(logInput, imageLogInfo)
 		h.logUsageForRequest(c, logInput)
 
-		resp.Body.Close()
+		if !accountReleasedForOverflow {
+			resp.Body.Close()
+		}
 		if outcome.penalize {
 			recyclePooledClient(account, proxyURL)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
@@ -3353,7 +3378,9 @@ func (h *Handler) Responses(c *gin.Context) {
 			h.store.ConfirmResponsesAvailableSince(account, start)
 			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 		}
-		h.store.Release(account)
+		if !accountReleasedForOverflow {
+			h.store.Release(account)
+		}
 		return
 	}
 }
