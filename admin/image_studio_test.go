@@ -217,7 +217,9 @@ func TestUpscaleImageBytesUsesConfiguredRealESRGANService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse query %q: %v", gotQuery, err)
 	}
-	if values.Get("target_width") != "3840" || values.Get("target_height") != "2160" || values.Get("fit") != "cover" {
+	// An exact requested size is still requested exactly, but it is fitted
+	// inside the box rather than cropped to fill it.
+	if values.Get("target_width") != "3840" || values.Get("target_height") != "2160" || values.Get("fit") != "inside" {
 		t.Fatalf("query = %q", gotQuery)
 	}
 	if string(data) != string(pngBytes) || contentType != "image/png" || method != "realesrgan-general-x4v3" {

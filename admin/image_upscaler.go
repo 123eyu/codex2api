@@ -47,11 +47,13 @@ func upscaleImageBytes(ctx context.Context, imageBytes []byte, scale, requestedS
 	query.Set("target_height", strconv.Itoa(targetHeight))
 	query.Set("format", "png")
 	query.Set("trigger_ratio", "1")
-	fit := normalizeImageUpscalerFit(os.Getenv("IMAGE_UPSCALER_FIT"))
-	if exactTarget {
-		fit = "cover"
-	}
-	query.Set("fit", fit)
+	// Fit inside the target box by default so a source whose aspect ratio does
+	// not match the requested size is scaled down rather than cropped, matching
+	// the local backend. When the ratios do match, inside and cover produce the
+	// same result, so an exact requested size is still hit exactly. Operators
+	// who would rather fill the box can opt into cropping with
+	// IMAGE_UPSCALER_FIT=cover.
+	query.Set("fit", normalizeImageUpscalerFit(os.Getenv("IMAGE_UPSCALER_FIT")))
 	parsed.RawQuery = query.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), bytes.NewReader(imageBytes))

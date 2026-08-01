@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,52 @@ func TestExternalImageJobDoesNotDoubleCountItsOwnConcurrencySlot(t *testing.T) {
 	}
 }
 
+// A partially degraded batch still succeeded. Callers polling the external job
+// API key off error_message to detect failure, so the notice must not appear
+// there.
+func TestSucceededJobReportsWarningSeparatelyFromErrorMessage(t *testing.T) {
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	jobID, err := db.InsertImageGenerationJob(ctx, database.ImageGenerationJobInput{Prompt: "partial batch"})
+	if err != nil {
+		t.Fatalf("InsertImageGenerationJob: %v", err)
+	}
+	const notice = "output 2: upscale degraded; original image preserved"
+	if err := db.MarkImageJobSucceededWithWarning(ctx, jobID, notice, 1200); err != nil {
+		t.Fatalf("MarkImageJobSucceededWithWarning: %v", err)
+	}
+
+	job, err := db.GetImageGenerationJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("GetImageGenerationJob: %v", err)
+	}
+	if job.Status != database.ImageJobSucceeded {
+		t.Fatalf("status = %q, want succeeded", job.Status)
+	}
+	if job.ErrorMessage != "" {
+		t.Fatalf("error_message = %q, want empty on a succeeded job", job.ErrorMessage)
+	}
+	if job.Warning != notice {
+		t.Fatalf("warning = %q, want %q", job.Warning, notice)
+	}
+
+	// A genuinely failed job keeps reporting through error_message.
+	failedID, err := db.InsertImageGenerationJob(ctx, database.ImageGenerationJobInput{Prompt: "failed batch"})
+	if err != nil {
+		t.Fatalf("InsertImageGenerationJob: %v", err)
+	}
+	if err := db.MarkImageJobFailed(ctx, failedID, "upstream refused", 900); err != nil {
+		t.Fatalf("MarkImageJobFailed: %v", err)
+	}
+	failed, err := db.GetImageGenerationJob(ctx, failedID)
+	if err != nil {
+		t.Fatalf("GetImageGenerationJob: %v", err)
+	}
+	if failed.ErrorMessage != "upstream refused" || failed.Warning != "" {
+		t.Fatalf("failed job error_message=%q warning=%q", failed.ErrorMessage, failed.Warning)
+	}
+}
+
 func TestImageJobTimeoutScalesWithRequestedOutputs(t *testing.T) {
 	if got := imageJobTimeout(1); got != imageJobBaseTimeout {
 		t.Fatalf("imageJobTimeout(1) = %s, want %s", got, imageJobBaseTimeout)
@@ -149,6 +196,32 @@ func TestImageJobTimeoutScalesWithRequestedOutputs(t *testing.T) {
 	}
 	if got := imageJobTimeout(99); got != maxImageJobOutputCount*imageJobBaseTimeout {
 		t.Fatalf("imageJobTimeout(99) = %s, want the clamped budget", got)
+	}
+}
+
+// Cropping stays available, but only when an operator asks for it: the default
+// must match the local backend, which never crops.
+func TestUpscaleImageBytesCropsOnlyWhenOperatorOptsIn(t *testing.T) {
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		gotQuery = request.URL.RawQuery
+		writer.Header().Set("Content-Type", "image/png")
+		writer.Header().Set("X-Upscale-Applied", "true")
+		_, _ = writer.Write(tinyPNG(t))
+	}))
+	defer server.Close()
+	t.Setenv("IMAGE_UPSCALER_ENDPOINT", server.URL)
+	t.Setenv("IMAGE_UPSCALER_FIT", "cover")
+
+	if _, _, _, err := upscaleImageBytes(context.Background(), tinyPNG(t), "4k", "3840x2160"); err != nil {
+		t.Fatalf("upscaleImageBytes returned error: %v", err)
+	}
+	values, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatalf("parse query %q: %v", gotQuery, err)
+	}
+	if values.Get("fit") != "cover" {
+		t.Fatalf("fit = %q, want the opted-in cover", values.Get("fit"))
 	}
 }
 

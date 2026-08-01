@@ -2422,13 +2422,13 @@ function HistoryJobCard({
             <HistoryMeta label={t('images.assetsCount')} value={t('images.imageCount', { count: assets.length })} />
           </div>
 
-          {job.error_message && (
+          {(job.error_message || job.warning) && (
             <div className={`line-clamp-3 rounded-lg border p-3 text-sm leading-6 ${
               job.status === 'failed'
                 ? 'border-red-500/20 bg-red-500/10 text-red-700 dark:text-red-200'
                 : 'border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-200'
             }`}>
-              {job.error_message}
+              {job.error_message || job.warning}
             </div>
           )}
         </div>
