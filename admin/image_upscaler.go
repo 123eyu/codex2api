@@ -96,11 +96,31 @@ func upscaleImageBytes(ctx context.Context, imageBytes []byte, scale, requestedS
 	if len(body) == 0 {
 		return nil, "", "", fmt.Errorf("image upscaler returned empty image data")
 	}
-	contentType := response.Header.Get("Content-Type")
-	if contentType == "" || contentType == "application/octet-stream" {
-		contentType = "image/png"
+	contentType := normalizeImageUpscalerContentType(response.Header.Get("Content-Type"))
+	if contentType == "" {
+		return nil, "", "", fmt.Errorf("image upscaler returned unsupported content type %q", response.Header.Get("Content-Type"))
 	}
 	return body, contentType, method, nil
+}
+
+// normalizeImageUpscalerContentType keeps the stored asset MIME type within
+// image/*. The value ends up on the asset record and is echoed back inline by
+// the asset route, so a compromised or man-in-the-middled upscaler must not be
+// able to make the gateway serve markup from its own origin. An empty or
+// generic binary type is treated as the PNG the request asked for; anything
+// else outside image/* is rejected.
+func normalizeImageUpscalerContentType(value string) string {
+	mediaType := strings.ToLower(strings.TrimSpace(value))
+	if index := strings.Index(mediaType, ";"); index >= 0 {
+		mediaType = strings.TrimSpace(mediaType[:index])
+	}
+	if mediaType == "" || mediaType == "application/octet-stream" {
+		return "image/png"
+	}
+	if strings.HasPrefix(mediaType, "image/") {
+		return mediaType
+	}
+	return ""
 }
 
 func imageUpscalerBackend() string {

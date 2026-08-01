@@ -16,7 +16,7 @@ import (
 
 // GenerateImageOnceForAdmin executes the existing Images API handler in-process.
 // It keeps model aliasing, account dispatch, usage logging, and image parsing in one code path.
-func (h *Handler) GenerateImageOnceForAdmin(ctx context.Context, rawBody []byte, apiKey *database.APIKeyRow) ([]byte, int, error) {
+func (h *Handler) GenerateImageOnceForAdmin(ctx context.Context, rawBody []byte, apiKey *database.APIKeyRow, sharedAPIKeyConcurrency bool) ([]byte, int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -38,7 +38,11 @@ func (h *Handler) GenerateImageOnceForAdmin(ctx context.Context, rawBody []byte,
 	ginCtx.Request = req
 
 	// 每个批量输出都是一次真实上游请求，因此复用标准 Images handler 的
-	// API Key 限额与并发槽；外层只做整批 RPM/RPD 预检，不长期占用并发槽。
+	// API Key 限额。并发槽由调用方决定：入队时已经为整个任务占过槽的路径
+	// 传 true，否则这里会为同一个 Key 再占一次，把上限打对折。
+	if sharedAPIKeyConcurrency {
+		ginCtx.Set(contextAPIKeyConcurrencyInherited, true)
+	}
 	if status, msg := h.applyAdminScopeBudget(ctx, ginCtx, apiKey); status != 0 {
 		return nil, status, fmt.Errorf("%s", msg)
 	}
@@ -73,7 +77,7 @@ func extractAdminImageErrorMessage(body []byte) string {
 
 // GenerateImageEditForAdmin executes the ImagesEdits handler in-process for
 // image-to-image (edit) jobs from the admin image studio.
-func (h *Handler) GenerateImageEditForAdmin(ctx context.Context, rawBody []byte, apiKey *database.APIKeyRow) ([]byte, int, error) {
+func (h *Handler) GenerateImageEditForAdmin(ctx context.Context, rawBody []byte, apiKey *database.APIKeyRow, sharedAPIKeyConcurrency bool) ([]byte, int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -94,6 +98,9 @@ func (h *Handler) GenerateImageEditForAdmin(ctx context.Context, rawBody []byte,
 	}
 	ginCtx.Request = req
 
+	if sharedAPIKeyConcurrency {
+		ginCtx.Set(contextAPIKeyConcurrencyInherited, true)
+	}
 	if status, msg := h.applyAdminScopeBudget(ctx, ginCtx, apiKey); status != 0 {
 		return nil, status, fmt.Errorf("%s", msg)
 	}

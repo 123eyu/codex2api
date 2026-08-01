@@ -224,6 +224,18 @@ func (h *Handler) enqueuePortalImageJob(c *gin.Context, apiKey *database.APIKeyR
 		proxy.SendAPIKeyLimitError(c, status, msg)
 		return
 	}
+	// Reserve the concurrency slot before accepting the job; see the same
+	// sequence in CreateExternalImageJob.
+	releaseAPIKeyConcurrency, ok := imageProxy.AcquireAPIKeyConcurrency(c)
+	if !ok {
+		return
+	}
+	jobStarted := false
+	defer func() {
+		if !jobStarted && releaseAPIKeyConcurrency != nil {
+			releaseAPIKeyConcurrency()
+		}
+	}()
 
 	paramsJSON, _ := json.Marshal(req)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -254,12 +266,17 @@ func (h *Handler) enqueuePortalImageJob(c *gin.Context, apiKey *database.APIKeyR
 		imageLogAPIKeyLabel(keyID, keyName, keyMasked),
 		len([]rune(req.Prompt)),
 	)
+	jobStarted = true
 	go func() {
+		if releaseAPIKeyConcurrency != nil {
+			defer releaseAPIKeyConcurrency()
+		}
+		opts := imageJobRunOptions{sharedAPIKeyConcurrency: true}
 		if editMode {
-			h.runImageEditJob(jobID, req, apiKey)
+			h.runImageEditJob(jobID, req, apiKey, opts)
 			return
 		}
-		h.runImageGenerationJob(jobID, req, apiKey)
+		h.runImageGenerationJob(jobID, req, apiKey, opts)
 	}()
 	c.JSON(http.StatusAccepted, imageJobResponse{Job: job})
 }
