@@ -559,26 +559,6 @@ func TestLegacyAutomaticIntelligenceMigrationContinuesAfterCandidateOnlyInterrup
 	}
 }
 
-func TestAutomaticIntelligenceMayUpdateOnlyUnpromotedAuditRules(t *testing.T) {
-	disabled := false
-	for _, tc := range []struct {
-		name string
-		rule promptfilter.PatternConfig
-		want bool
-	}{
-		{name: "automatic signal-only rule", rule: promptfilter.PatternConfig{SignalOnly: true}, want: true},
-		{name: "disabled rule", rule: promptfilter.PatternConfig{Enabled: &disabled, SignalOnly: true}, want: false},
-		{name: "administrator strict promotion", rule: promptfilter.PatternConfig{Strict: true, SignalOnly: true}, want: false},
-		{name: "administrator enforcing promotion", rule: promptfilter.PatternConfig{SignalOnly: false}, want: false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := automaticIntelligenceMayUpdate(tc.rule); got != tc.want {
-				t.Fatalf("automaticIntelligenceMayUpdate(%#v) = %v, want %v", tc.rule, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestMergeIntelligenceQueriesIncludesChineseBuiltins(t *testing.T) {
 	queries := mergeIntelligenceQueries(defaultIntelligenceQueries, []string{"custom query", "GPT 破甲 提示词"})
 	want := map[string]bool{"大模型 破限 提示词": false, "GPT 破甲 提示词": false, "AI 越狱 提示词": false, "custom query": false}

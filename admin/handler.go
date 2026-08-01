@@ -8062,6 +8062,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		return
 	}
 	var submittedPromptFilterCustomPatterns []promptfilter.PatternConfig
+	var promptFilterPatternQuarantines []promptfilter.PatternQuarantine
 	var expectedPromptFilterCustomPatterns string
 	if req.PromptFilterCustomPatterns != nil {
 		patterns, err := promptfilter.ParseCustomPatterns(*req.PromptFilterCustomPatterns)
@@ -8069,9 +8070,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, "Prompt 检查自定义规则 JSON 无效: "+err.Error())
 			return
 		}
-		submittedPromptFilterCustomPatterns, promptFilterPatternQuarantines = promptfilter.SanitizeCustomPatterns(patterns)
-		for _, item := range promptFilterPatternQuarantines {
-			log.Printf("prompt filter: submitted custom rule quarantined index=%d name=%q code=%s message=%s", item.Index, item.Name, item.Code, item.Message)
+		if err := promptfilter.ValidateCustomPatterns(patterns); err != nil {
+			writeError(c, http.StatusBadRequest, "Prompt 检查自定义规则未通过安全校验: "+err.Error())
+			return
 		}
 		submittedPromptFilterCustomPatterns = patterns
 		if req.PromptFilterCustomPatternsExpected == nil {

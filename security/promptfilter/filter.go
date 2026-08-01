@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net/url"
 	"regexp"
 	"regexp/syntax"

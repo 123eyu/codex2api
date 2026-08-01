@@ -935,6 +935,7 @@ export interface SystemSettings {
   prompt_filter_sensitive_words: string
   prompt_filter_custom_patterns: string
   prompt_filter_custom_patterns_expected?: string
+  prompt_filter_pattern_quarantines?: PromptFilterPatternQuarantine[]
   prompt_filter_disabled_patterns: string
   prompt_filter_review_enabled: boolean
   prompt_filter_review_api_key?: string
