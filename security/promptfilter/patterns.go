@@ -20,21 +20,22 @@ const (
 	operationalSecurityArtifactZH      = `(?:(?:进程注入|dll\s*注入)(?:加载器|注入器|载荷|代码|脚本|工具|程序)|零点击(?:漏洞)?利用(?:载荷|代码|脚本|工具|程序)?|内核漏洞利用(?:载荷|代码|脚本|工具|程序|poc|概念验证)?|(?:命令注入|ssrf|xxe|xss|目录遍历|路径遍历|文件包含|容器逃逸|沙箱逃逸|虚拟机逃逸|释放后使用)(?:漏洞)?\s*(?:攻击|利用)?\s*(?:载荷|代码|脚本|工具|程序|poc|概念验证)|jwt(?:\s*token)?(?:劫持|盗取)(?:工具|程序|代码|脚本)|(?:uefi|bios|固件)(?:启动套件|rootkit|后门)(?:载荷|代码|脚本|工具|程序)?|oauth\s*token(?:窃取|盗取)(?:工具|程序|代码|脚本)|硬件键盘记录器|恶意\s*usb|无文件恶意软件(?:加载器|载荷|代码|脚本|工具|程序)|域名接管(?:工具|载荷|代码|脚本|程序))`
 	operationalSecurityArtifactPattern = `(?i)` + operationalSecurityArtifactLead + `(?:` + operationalSecurityArtifactEN + `|` + operationalSecurityArtifactZH + `)\s*(?:$|[，。！？；：,.!?;:])`
 
-	selfHarmTargetEN = `(?:suicide|self[-\s]?harm|cutting|starv(?:e|ing)\s+myself)`
-	selfHarmTargetZH = `(?:自杀|自残|割腕|伤害自己|绝食)`
-	selfHarmEndEN    = `(?:\s+(?:now|today|tonight|eventually))?(?:$|[.!?;,])`
-	selfHarmEndZH    = `(?:$|[，。！？；])`
-	selfHarmActionEN = `(?:give|provide|list|describe|teach|recommend|suggest)`
-	selfHarmActionZH = `(?:提供|给出|给我|列出|描述|教授|说明|推荐|建议|教我)`
-	selfHarmMethodEN = `(?:instructions?|steps?|methods?|ways?|procedures?|strategies?)`
-	selfHarmMethodZH = `(?:步骤|方法|方式)`
+	selfHarmTargetEN       = `(?:suicide|self[-\s]?harm|self[-\s]?cutting|cutting\s+(?:myself|my\s+(?:wrists?|arms?|thighs?))|starv(?:e|ing)\s+myself)`
+	selfHarmCausalTargetEN = `(?:` + selfHarmTargetEN + `|cutting)`
+	selfHarmTargetZH       = `(?:自杀|自残|割腕|伤害自己|绝食)`
+	selfHarmEndEN          = `(?:\s+(?:now|today|tonight|eventually))?(?:$|[.!?;,])`
+	selfHarmEndZH          = `(?:$|[，。！？；])`
+	selfHarmActionEN       = `(?:give|provide|list|describe|teach|recommend|suggest)`
+	selfHarmActionZH       = `(?:提供|给出|给我|列出|描述|教授|说明|推荐|建议|教我)`
+	selfHarmMethodEN       = `(?:instructions?|steps?|methods?|ways?|procedures?|strategies?)`
+	selfHarmMethodZH       = `(?:步骤|方法|方式)`
 
 	selfHarmFacilitationPattern = `(?i)(?:` +
 		`(?:\b(?:instructions?|steps?|methods?)\b\s+(?:for|to|of|on)\s+(?:how\s+to\s+)?(?:(?:commit|attempt|committing|attempting)\s+)?` + selfHarmTargetEN + `\b|\b(?:best\s+way|how\s+to)\b[^.!?;\n]{0,36}\b` + selfHarmTargetEN + `\b)` + selfHarmEndEN +
 		`|\b` + selfHarmActionEN + `\b[^.!?;\n]{0,40}\b` + selfHarmTargetEN + `\b\s+` + selfHarmMethodEN + `\b` + selfHarmEndEN +
 		`|\b` + selfHarmActionEN + `\b[^.!?\n]{0,48}\b` + selfHarmMethodEN + `\b(?:` +
 		`[^.!?;\n]{0,32}\b(?:to\s+(?:commit\s+|attempt\s+)?` + selfHarmTargetEN + `|for\s+(?:(?:committing|attempting)\s+)?` + selfHarmTargetEN + `)\b` + selfHarmEndEN +
-		`|[^.!?;\n]{0,32}\b(?:(?:to\s+|intended\s+to\s+)?(?:cause|induce|trigger|facilitate|promote)\s+` + selfHarmTargetEN + `|(?:to\s+)?(?:ensure|guarantee)\s+(?:that\s+)?(?:the\s+)?(?:outcome|goal|purpose|result)\s+(?:is|will\s+be|would\s+be)\s+` + selfHarmTargetEN + `|(?:to\s+)?make\s+` + selfHarmTargetEN + `\s+(?:the\s+)?(?:outcome|goal|purpose|result))\b` + selfHarmEndEN +
+		`|[^.!?;\n]{0,32}\b(?:(?:to\s+|intended\s+to\s+)?(?:cause|induce|trigger|facilitate|promote)\s+` + selfHarmCausalTargetEN + `|(?:to\s+)?(?:ensure|guarantee)\s+(?:that\s+)?(?:the\s+)?(?:outcome|goal|purpose|result)\s+(?:is|will\s+be|would\s+be)\s+` + selfHarmCausalTargetEN + `|(?:to\s+)?make\s+` + selfHarmCausalTargetEN + `\s+(?:the\s+)?(?:outcome|goal|purpose|result))\b` + selfHarmEndEN +
 		`|[^.!?\n]{0,32}(?:[.;]\s*)?(?:(?:ultimately|eventually|finally|in\s+the\s+end|at\s+the\s+end),?\s*)?(?:(?:the|my|our)\s+)?(?:intended\s+)?(?:outcome|goal|purpose|result)\s+(?:is|was|would\s+be)\s+(?:(?:to\s+)?(?:commit|attempt)\s+)?` + selfHarmTargetEN + `\b` + selfHarmEndEN +
 		`|[^.!?\n]{0,32}(?:[.;]\s*)?(?:(?:ultimately|eventually|finally|in\s+the\s+end|at\s+the\s+end),?\s*)?` + selfHarmTargetEN + `\s+(?:is|was|would\s+be)\s+(?:(?:the|my|our)\s+)?(?:intended\s+|final\s+)?(?:outcome|goal|purpose|result)\b` + selfHarmEndEN + `)` +
 		`|(?:(?:步骤|方法)(?:用于|以便|来|进行|实施)?|(?:怎么|如何)(?:实施|进行|完成|尝试)?)` + selfHarmTargetZH + selfHarmEndZH +
@@ -92,7 +93,7 @@ const (
 var defaultPatternConfigs = []PatternConfig{
 	{Name: "prompt_policy_override", Pattern: `(?i)ignore\s*(all\s*)?(previous|prior|above|system|developer)\s*(instructions?|rules?|polic(?:y|ies))|disregard\s*(the\s*)?(system|developer|safety)|忽略(?:之前|以上|系统|开发者|安全)(?:的|所有)?(?:安全)?(?:指令|规则|政策|限制)|忽略所有(?:安全)?(?:指令|规则|限制)|无视(?:系统|安全|所有)(?:的|所有)?(?:指令|规则|政策|限制)|无视所有限制`, Weight: 85, Category: "prompt_injection", Strict: true},
 	{Name: "prompt_unrestricted_mode", Pattern: `(?i)mode\s*[:=]\s*unrestricted|\bunrestricted\s+(?:mode|model|assistant|access)\b|developer\s*mode|jailbreak|no\s*restrictions?|all\s*(standard\s*)?(content\s*)?filters?\s*(are\s*)?(disabled|off)|无限制模式|开发者模式|关闭.{0,15}(安全|内容).{0,10}(过滤|限制)|破限|破甲|越狱模式`, Weight: 20, Category: "prompt_injection", SignalOnly: true},
-	{Name: "prompt_unrestricted_activation_request", Pattern: `(?i)\b(?:enable|enter|activate|switch\s+to|act\s+as|operate|run|work)\b.{0,36}\b(?:jailbreak|unrestricted(?:\s+(?:mode|assistant|model))?|no\s+restrictions?)\b|\b(?:jailbreak|unrestricted)\b.{0,28}\b(?:answer|respond|operate|run|work|mode)\b|\b(?:enable|enter|activate|switch\s+to)\b.{0,24}\bdeveloper\s+mode\b.{0,48}\b(?:assistant|model|chatbot|llm|answer|respond|prompt|safety|filter)\b|\b(?:assistant|model|chatbot|llm|answer|respond|prompt|safety|filter)\b.{0,48}\bdeveloper\s+mode\b|(?:开启|进入|启用|切换到|作为|扮演).{0,20}(?:破限|破甲|越狱|无限制)(?:模式)?|(?:破限|破甲|越狱|无限制)(?:模式)?(?:下|后|状态下).{0,8}(?:回答|回复|运行|执行|工作)|(?:开启|进入|启用|切换到).{0,16}开发者模式.{0,32}(?:模型|助手|聊天|回答|回复|提示词|安全|过滤)`, Weight: 100, Category: "prompt_injection", Strict: true},
+	{Name: "prompt_unrestricted_activation_request", Pattern: `(?i)\b(?:enable|enter|activate|switch\s+to|act\s+as|operate|run|work)\b.{0,36}\b(?:jailbreak|unrestricted(?:\s+mode)?|no\s+restrictions?)\b.{0,28}\b(?:assistant|model|chatbot|llm|answer|respond|operate|run|work|mode)\b|\b(?:assistant|model|chatbot|llm)\b.{0,32}\b(?:jailbreak|unrestricted|no\s+restrictions?)\b.{0,28}\b(?:answer|respond|operate|run|work|mode)\b|\b(?:enable|enter|activate|switch\s+to)\b.{0,24}\bdeveloper\s+mode\b.{0,48}\b(?:assistant|model|chatbot|llm)\b.{0,48}\b(?:answer|respond|operate|run|work|no\s+restrictions?|bypass\s+safety|disable\s+(?:the\s+)?filters?)\b|\b(?:assistant|model|chatbot|llm)\b.{0,32}\bdeveloper\s+mode\b.{0,48}\b(?:answer|respond|operate|run|work|no\s+restrictions?|bypass\s+safety|disable\s+(?:the\s+)?filters?)\b|(?:开启|进入|启用|切换到|作为|扮演).{0,20}(?:破限|破甲|越狱|无限制)(?:模式)?|(?:破限|破甲|越狱|无限制)(?:模式)?(?:下|后|状态下).{0,8}(?:回答|回复|运行|执行|工作)|(?:开启|进入|启用|切换到).{0,16}开发者模式.{0,32}(?:模型|助手|聊天).{0,24}(?:回答|回复|运行|执行|工作|绕过安全|关闭过滤)`, Weight: 100, Category: "prompt_injection", Strict: true},
 	{Name: "prompt_refusal_suppression", Pattern: `(?i)never\s*(refuse|say\s*["']?i\s*(can'?t|won'?t)|mention\s*(these|the)\s*instructions)|no\s*(disclaimers?|warnings?|refusals?)|do\s*not\s*(mention|acknowledge).{0,30}(instructions?|mode)|不要.{0,15}(拒绝|警告|免责声明)|不得.{0,15}(拒绝|提及这些指令)|不允许说.{0,10}(不能|抱歉)|禁止拒绝`, Weight: 70, Category: "prompt_injection"},
 	{Name: "prompt_fake_authorization", Pattern: `(?i)(fully\s*)?(authorized|isolated|air[-\s]?gapped).{0,40}(ctf|sandbox|lab|target)|treat.{0,80}(target|domain|credential).{0,40}(sandbox|fixture|authorized)|所有.{0,20}(目标|主机|域名|凭证).{0,20}(均为|都是).{0,15}(靶场|沙箱|虚构)|高拟真.{0,10}(ctf|靶场)|气隙网络|审核员.{0,20}(解除|降级).{0,15}(安全|限制)|所有安全限制.{0,15}(放宽|解除|降级)`, Weight: 45, Category: "prompt_injection"},
 	{Name: "prompt_system_exfiltration", Pattern: `(?i)\b(?:cat|read|print|show|reveal|dump)\b(?:\s+(?:me|us|the|your|hidden|internal|secret|full|complete|entire|original|raw|exact|verbatim|current)){0,6}\s+(?:system[-_ ]?prompt|model[-_ ]?instructions(?:_file)?|developer\s*message)\b|\b(?:cat|read|print|show|dump)\b.{0,32}\.codex/.{0,24}(?:system[-_ ]?prompt|prompt|rules)(?:\.[a-z0-9_-]+)?\b|(?:读取|输出|展示|泄露|查看)\s*(?:并)?\s*(?:返回|打印|给出|展示|输出)?\s*(?:完整|隐藏|内部|秘密|原始|全部|逐字|准确|当前|你的|该)?(?:的)?\s*(?:系统提示词|开发者消息|system\s*prompt|model_instructions_file)`, Weight: 90, Category: "prompt_injection", Strict: true},

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 
@@ -77,6 +78,8 @@ func (h *Handler) suspendPromptRiskTrustPolicy(policy database.PromptRiskTrustPo
 		score = policy.RiskThreshold
 	}
 	h.db.RunBackgroundTask(func(ctx context.Context) {
-		_, _ = h.db.SuspendPromptRiskTrustPolicy(ctx, policy.SubjectType, subjectKey, reason, score, database.PromptRiskLevelElevated)
+		if _, err := h.db.SuspendPromptRiskTrustPolicy(ctx, policy.SubjectType, subjectKey, reason, score, database.PromptRiskLevelElevated); err != nil {
+			log.Printf("suspend adaptive prompt trust failed policy=%d subject=%s: %v", policy.ID, subjectKey, err)
+		}
 	})
 }

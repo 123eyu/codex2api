@@ -430,7 +430,9 @@ func (h *Handler) callPromptIntelligenceAI(ctx context.Context, request promptIn
 		}
 	}
 	body, _ := json.Marshal(map[string]any{"model": model, "instructions": systemPrompt, "input": input, "stream": false})
-	status, response := h.imageProxy.ExecuteInternalResponseForAPIKey(ctx, body, row, "prompt_intelligence_cy_analysis")
+	poolCtx, cancel := context.WithTimeout(ctx, promptIntelligenceAIAnalysisTimeout)
+	defer cancel()
+	status, response := h.imageProxy.ExecuteInternalResponseForAPIKey(poolCtx, body, row, "prompt_intelligence_cy_analysis")
 	if status < 200 || status >= 300 {
 		return "", promptIntelligenceAICallAttribution{}, fmt.Errorf("号池模型分析失败: HTTP %d", status)
 	}
@@ -806,6 +808,9 @@ func (h *Handler) applyPromptIntelligenceIdentityPatch(ctx context.Context, cand
 	if err != nil {
 		return promptIdentityUpdateResult{}, err
 	}
+	if settings == nil {
+		return promptIdentityUpdateResult{}, errors.New("系统设置尚未初始化")
+	}
 	expectedRaw := strings.TrimSpace(settings.PromptFilterAdvancedConfig)
 	if expectedRaw == "" {
 		expectedRaw = "{}"
@@ -886,6 +891,9 @@ func (h *Handler) rollbackPromptIntelligenceIdentityPatch(ctx context.Context, c
 	settings, err := h.db.GetSystemSettings(ctx)
 	if err != nil {
 		return promptIdentityUpdateResult{}, err
+	}
+	if settings == nil {
+		return promptIdentityUpdateResult{}, errors.New("系统设置尚未初始化")
 	}
 	expectedRaw := strings.TrimSpace(settings.PromptFilterAdvancedConfig)
 	if expectedRaw == "" {

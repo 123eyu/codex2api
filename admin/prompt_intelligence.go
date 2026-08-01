@@ -117,15 +117,18 @@ func (h *Handler) StartPromptIntelligence(ctx context.Context) {
 	h.startPromptRiskTrustSync(ctx)
 	h.startPromptRuleRuntimeSync(ctx)
 	h.startDBBackgroundTaskWithParent(ctx, func(ctx context.Context) {
+		migrationInterval := time.Hour
+		lastMigrationError := ""
 		if err := h.migrateLegacyAutomaticIntelligenceRules(ctx); err != nil {
 			h.insertIntelligenceLog(ctx, "intel_migration", "error", "", nil, []string{err.Error()})
+			lastMigrationError = err.Error()
+			migrationInterval = legacyIntelligenceMigrationInterval
 		}
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
-		migrationTicker := time.NewTicker(legacyIntelligenceMigrationInterval)
+		migrationTicker := time.NewTicker(migrationInterval)
 		defer migrationTicker.Stop()
 		var lastRun time.Time
-		lastMigrationError := ""
 		for {
 			cfg := h.store.GetPromptFilterConfig().Advanced.Intelligence
 			if cfg.Enabled && (lastRun.IsZero() || time.Since(lastRun) >= time.Duration(cfg.IntervalHours)*time.Hour) {
@@ -142,8 +145,16 @@ func (h *Handler) StartPromptIntelligence(ctx context.Context) {
 						log.Printf("legacy prompt intelligence migration sweep failed: %v", err)
 						lastMigrationError = message
 					}
+					if migrationInterval != legacyIntelligenceMigrationInterval {
+						migrationInterval = legacyIntelligenceMigrationInterval
+						migrationTicker.Reset(migrationInterval)
+					}
 				} else {
 					lastMigrationError = ""
+					if migrationInterval != time.Hour {
+						migrationInterval = time.Hour
+						migrationTicker.Reset(migrationInterval)
+					}
 				}
 			}
 		}
@@ -199,7 +210,8 @@ func (h *Handler) syncPromptRuleRuntimeFromDB(ctx context.Context) error {
 		return err
 	}
 	cfg := h.store.GetPromptFilterConfig()
-	if promptfilter.MarshalCustomPatterns(cfg.CustomPatterns) == promptfilter.MarshalCustomPatterns(patterns) {
+	sanitized, _ := promptfilter.SanitizeCustomPatterns(patterns)
+	if promptfilter.MarshalCustomPatterns(cfg.CustomPatterns) == promptfilter.MarshalCustomPatterns(sanitized) {
 		return nil
 	}
 	cfg.CustomPatterns = patterns
@@ -812,6 +824,7 @@ func (h *Handler) publishPromptIntelligenceCandidate(ctx context.Context, id int
 	h.settingsUpdateMu.Lock()
 	defer h.settingsUpdateMu.Unlock()
 	cfg := h.store.GetPromptFilterConfig()
+	cfg.CustomPatterns = append([]promptfilter.PatternConfig(nil), cfg.CustomPatterns...)
 	added, updated := 0, 0
 	existingIndex := -1
 	expectedCurrentRuleJSON := ""

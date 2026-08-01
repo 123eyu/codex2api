@@ -315,7 +315,7 @@ func (h *Handler) buildPromptFilterLogInput(auditContext promptFilterAuditContex
 	if h == nil || !verdict.Enabled {
 		return nil
 	}
-	if source == "local_filter" && len(verdict.Matched) == 0 && verdict.Action == promptfilter.ActionAllow && verdict.ReviewError == "" && verdict.ReviewModel == "" && !promptFilterDecisionRequiresAudit(decision) {
+	if source == "local_filter" && len(verdict.Matched) == 0 && verdict.Action == promptfilter.ActionAllow && verdict.ReviewError == "" && !verdict.Reviewed && !promptFilterDecisionRequiresAudit(decision) {
 		return nil
 	}
 	if source == "local_filter" && !logMatches {

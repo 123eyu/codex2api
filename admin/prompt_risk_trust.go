@@ -70,6 +70,11 @@ func (h *Handler) UpsertPromptRiskTrustPolicy(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请求体无效")
 		return
 	}
+	req.Reason = strings.TrimSpace(req.Reason)
+	if req.Reason == "" {
+		writeError(c, http.StatusBadRequest, "请填写启用自适应可信策略的原因")
+		return
+	}
 	if req.DurationHours <= 0 {
 		req.DurationHours = 24
 	}
@@ -79,6 +84,10 @@ func (h *Handler) UpsertPromptRiskTrustPolicy(c *gin.Context) {
 	}
 	if req.RiskThreshold <= 0 {
 		req.RiskThreshold = 35
+	}
+	if req.RiskThreshold > 100 {
+		writeError(c, http.StatusBadRequest, "恢复审核阈值不能超过 100")
+		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()

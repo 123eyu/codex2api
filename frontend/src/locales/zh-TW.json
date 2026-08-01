@@ -230,7 +230,7 @@
 	"reviewRequest": "模型審核請求",
 	"reviewResponse": "模型回傳判定",
 	"reviewFinalAction": "最終動作",
-	"reviewScope": "Key / 人員 / 關聯 ID",
+	"reviewHistoryScope": "Key / 人員 / 關聯 ID",
 	"reviewRequestUnavailable": "請求預覽不可用",
 	"reviewResultError": "複核失敗",
 	"notScored": "未評分",

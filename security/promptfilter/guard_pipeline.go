@@ -1119,7 +1119,7 @@ func (d LegacyRegexDetector) Detect(_ context.Context, envelope RequestEnvelope,
 			// severity and every strike/ban decision even when strict-terminal is on.
 			signal.TerminalCandidate = false
 			signal.StrikeEligible = false
-			signal.reviewText = aggregate.Text
+			signal.reviewText = safeUTF8Prefix(aggregate.Text, 16*1024)
 		}
 		if envelope.precheckIncomplete && aggregate.Origin == OriginCurrentUser {
 			// Above the hard exact-precheck ceiling, a sampled match cannot prove

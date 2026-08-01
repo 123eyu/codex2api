@@ -17,7 +17,9 @@ import (
 func TestReviewPromptFilterVerdictCapturesModelAuditMetadata(t *testing.T) {
 	reviewServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
-			t.Fatalf("review path = %s, want /v1/chat/completions", r.URL.Path)
+			t.Errorf("review path = %s, want /v1/chat/completions", r.URL.Path)
+			http.Error(w, "unexpected review path", http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"review-model","choices":[{"message":{"content":"{\"confidence\":0.86,\"reason\":\"攻击他人系统\"}"}}]}`))
@@ -87,6 +89,29 @@ func TestCleanModelReviewIsPersistedForReviewHistory(t *testing.T) {
 	}
 	if total != 1 || len(logs) != 1 || !logs[0].Reviewed || logs[0].ReviewModel != "review-model" {
 		t.Fatalf("review history total=%d logs=%+v", total, logs)
+	}
+}
+
+func TestCleanModelReviewWithoutReturnedModelStillBuildsHistoryLog(t *testing.T) {
+	handler := &Handler{}
+	input := handler.buildPromptFilterLogInput(
+		promptFilterAuditContext{},
+		"/v1/responses",
+		"gpt-5.6-sol",
+		"local_filter",
+		"",
+		promptfilter.Verdict{
+			Enabled:  true,
+			Action:   promptfilter.ActionAllow,
+			Mode:     promptfilter.ModeBlock,
+			Reviewed: true,
+		},
+		nil,
+		nil,
+		true,
+	)
+	if input == nil || !input.Reviewed {
+		t.Fatalf("reviewed verdict without returned model was dropped: %+v", input)
 	}
 }
 

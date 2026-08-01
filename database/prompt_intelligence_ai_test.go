@@ -45,6 +45,9 @@ func TestPromptIntelligenceAIEvidenceAndAdvancedConfigCAS(t *testing.T) {
 		SourceKind: PromptRuleCandidateSourceAIIdentityUpdate, SourceRef: "analysis-1",
 		SourceRefHash: strings.Repeat("d", 64), MetadataJSON: `{"version":1}`, ObservedAt: time.Now().UTC(),
 	}
+	if _, err := db.conn.ExecContext(ctx, `DELETE FROM system_settings WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
 	swapped, revision, err := db.CompareAndSwapPromptFilterAdvancedConfigWithEvidence(ctx, candidate.ID, "{}", `{"review_adapter":{"system_prompt":"managed"}}`, revisionInput)
 	if err != nil || !swapped || revision == nil || revision.SourceKind != PromptRuleCandidateSourceAIIdentityUpdate {
 		t.Fatalf("CAS swapped=%v revision=%#v err=%v", swapped, revision, err)

@@ -4310,7 +4310,7 @@ function PromptReviewLogsTable({ logs }: { logs: PromptFilterLog[] }) {
             <TableHead className="w-[330px]">{t('promptFilter.reviewRequest')}</TableHead>
             <TableHead className="w-[300px]">{t('promptFilter.reviewResponse')}</TableHead>
             <TableHead className="w-[110px]">{t('promptFilter.reviewFinalAction')}</TableHead>
-            <TableHead>{t('promptFilter.reviewScope')}</TableHead>
+	            <TableHead>{t('promptFilter.reviewHistoryScope')}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>

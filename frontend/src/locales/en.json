@@ -2377,7 +2377,7 @@
 	"reviewRequest": "Review request",
 	"reviewResponse": "Model response",
 	"reviewFinalAction": "Final action",
-	"reviewScope": "Key / person / correlation ID",
+	"reviewHistoryScope": "Key / person / correlation ID",
 	"reviewRequestUnavailable": "Request preview unavailable",
 	"reviewResultError": "Review failed",
 	"notScored": "Not scored",

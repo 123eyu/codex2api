@@ -549,6 +549,10 @@ func (h *Handler) enforceRequiredNewAPIIdentityAtIngress(c *gin.Context) bool {
 		var err error
 		body, err = readRawRequestBody(c)
 		if err != nil {
+			if requestUsesAnthropicErrorEnvelope(c) {
+				sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+				return true
+			}
 			api.SendErrorWithStatus(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest), http.StatusBadRequest)
 			return true
 		}

@@ -605,7 +605,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		if len(terminalFailurePayload) > 0 {
 			outcome = classifyResponseFailedOutcome(terminalFailurePayload)
 			promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/messages", model, responseFailedErrorBody(terminalFailurePayload), upstreamCyberPolicyAttempt{
-				Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
+				Transport: upstreamPromptPolicyTransport(isStream, useWebsocket), StatusCode: outcome.logStatusCode,
 				AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
 			// 流式 response.failed 也要把额度耗尽/限流账号冷却下来，

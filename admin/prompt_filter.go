@@ -299,12 +299,9 @@ func (h *Handler) GetPromptPolicyIncident(c *gin.Context) {
 		if candidate, candidateErr := h.db.GetPromptRuleCandidate(ctx, incident.CandidateID); candidateErr == nil {
 			response.Candidate = candidate
 		}
-		if evidence, evidenceErr := h.db.ListPromptRuleCandidateEvidence(ctx, incident.CandidateID, 500); evidenceErr == nil {
-			for _, item := range evidence {
-				if item.ID == incident.CandidateEvidenceID {
-					response.Evidence = item
-					break
-				}
+		if incident.CandidateEvidenceID > 0 {
+			if item, evidenceErr := h.db.GetPromptRuleCandidateEvidence(ctx, incident.CandidateEvidenceID); evidenceErr == nil && item.CandidateID == incident.CandidateID {
+				response.Evidence = item
 			}
 		}
 	}
@@ -481,8 +478,15 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 		}
 		resultCh := make(chan indexedResult, len(keys))
 		started := time.Now()
+		limit := reviewCfg.Adapter.MaxConcurrent
+		if limit <= 0 || limit > len(keys) {
+			limit = len(keys)
+		}
+		slots := make(chan struct{}, limit)
 		for index, key := range keys {
 			go func(index int, key string) {
+				slots <- struct{}{}
+				defer func() { <-slots }()
 				keyCfg := reviewCfg
 				keyCfg.APIKey = key
 				keyStarted := time.Now()

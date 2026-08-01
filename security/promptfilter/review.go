@@ -492,11 +492,10 @@ func reviewEndpointForMode(baseURL, requestMode string) (string, error) {
 	if requestMode == ReviewRequestModeModerations && strings.HasSuffix(pathLower, "/chat/completions") {
 		return "", fmt.Errorf("review base_url points to /chat/completions but request_mode is moderations")
 	}
-	if strings.HasSuffix(parsed.Path, suffix) {
-		return parsed.String(), nil
-	}
 	path := strings.TrimRight(parsed.Path, "/")
-	if strings.HasSuffix(path, "/v1") {
+	if strings.HasSuffix(pathLower, suffix) {
+		parsed.Path = path
+	} else if strings.HasSuffix(pathLower, "/v1") {
 		parsed.Path = path + suffix
 	} else {
 		parsed.Path = path + "/v1" + suffix

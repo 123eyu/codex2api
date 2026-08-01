@@ -145,6 +145,9 @@ func (db *DB) CompareAndSwapPromptFilterAdvancedConfigWithEvidence(
 			return beginErr
 		}
 		defer tx.Rollback()
+		if _, insertErr := tx.ExecContext(ctx, `INSERT INTO system_settings (id, prompt_filter_advanced_config) VALUES (1, '{}') ON CONFLICT(id) DO NOTHING`); insertErr != nil {
+			return insertErr
+		}
 		settingsQuery := `SELECT COALESCE(NULLIF(TRIM(prompt_filter_advanced_config), ''), '{}') FROM system_settings WHERE id=1`
 		if !db.isSQLite() {
 			settingsQuery += ` FOR UPDATE`

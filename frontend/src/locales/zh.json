@@ -2377,7 +2377,7 @@
 	"reviewRequest": "模型审核请求",
 	"reviewResponse": "模型返回判定",
 	"reviewFinalAction": "最终动作",
-	"reviewScope": "Key / 人员 / 关联 ID",
+	"reviewHistoryScope": "Key / 人员 / 关联 ID",
 	"reviewRequestUnavailable": "请求预览不可用",
 	"reviewResultError": "复核失败",
 	"notScored": "未评分",

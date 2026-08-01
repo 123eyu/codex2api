@@ -175,6 +175,25 @@ func TestCleanApplicationCandidateCanUseSemanticScanWithoutStrike(t *testing.T) 
 	}
 }
 
+func TestFinalizePromptGuardDecisionPreservesAuxiliaryOriginWhenReviewFlags(t *testing.T) {
+	decision := promptfilter.Decision{
+		Action:          promptfilter.ActionBlock,
+		PrimaryOrigin:   promptfilter.OriginToolOutput,
+		PrimaryDetector: "tool_output_compatibility",
+		StrikeEligible:  false,
+	}
+	verdict := promptfilter.Verdict{
+		Action:        promptfilter.ActionBlock,
+		Reviewed:      true,
+		ReviewFlagged: true,
+	}
+
+	final := finalizePromptGuardDecision(decision, verdict)
+	if final.PrimaryOrigin != promptfilter.OriginToolOutput || final.PrimaryDetector != decision.PrimaryDetector || final.StrikeEligible {
+		t.Fatalf("external review rewrote auxiliary evidence as current-user content: %+v", final)
+	}
+}
+
 func TestPromptGuardDefaultsToCurrentUserAcrossProtocols(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newPromptGuardTestHandler(promptGuardTestConfig())

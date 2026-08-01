@@ -271,6 +271,32 @@ func TestPromptPolicyIncidentRedactsAndBoundsSeparatedFields(t *testing.T) {
 	}
 }
 
+func TestPromptPolicyIncidentUsesStableFingerprintWhenPromptUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "cyber-unavailable.db"))
+	if err != nil {
+		t.Fatalf("database.New(sqlite) error: %v", err)
+	}
+	defer db.Close()
+	handler := NewHandler(auth.NewStore(nil, nil, &database.SystemSettings{PromptFilterEnabled: true}), db, nil, nil)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	incidentID, accepted := handler.logUpstreamCyberPolicy(ctx, "/v1/responses", "gpt-5.6-sol", []byte(`{"error":{"code":"cyber_policy"}}`))
+	if !accepted || incidentID == "" {
+		t.Fatalf("incident enqueue accepted=%t id=%q", accepted, incidentID)
+	}
+	waitPromptFilterAuditIdle(t, db)
+	incident, err := db.GetPromptPolicyIncident(context.Background(), incidentID)
+	if err != nil {
+		t.Fatalf("GetPromptPolicyIncident: %v", err)
+	}
+	want := promptfilter.StableEvidenceFingerprint("cyber-unavailable", incident.RequestCorrelationID+"\x00/v1/responses\x00gpt-5.6-sol")
+	if incident.PromptFingerprint != want {
+		t.Fatalf("unavailable prompt fingerprint = %q, want %q", incident.PromptFingerprint, want)
+	}
+}
+
 // TestLogUpstreamCyberPolicyRecordsStreamingFailure verifies that a streaming
 // response.failed creates an independent incident without a synthetic local log.
 func TestLogUpstreamCyberPolicyRecordsStreamingFailure(t *testing.T) {

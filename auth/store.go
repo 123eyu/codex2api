@@ -2467,6 +2467,8 @@ type Store struct {
 	apiKeyUpstreamChannels             map[int64]string
 	promptFilterNewAPIBindingsMu       sync.RWMutex
 	promptFilterNewAPIBindings         map[int64]database.PromptFilterNewAPIBinding
+	promptRiskTrustMu                  sync.RWMutex
+	promptRiskTrustPolicies            map[string]database.PromptRiskTrustPolicy
 	usageProbeMu                       sync.RWMutex
 	usageProbe                         func(context.Context, *Account) error
 	usageProbeBatch                    atomic.Bool

@@ -21,8 +21,15 @@ import (
 func TestPromptReviewConnectionUsesUnsavedChatAdapterAndStoredKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/chat/completions" || r.Header.Get("Authorization") != "Bearer stored-review-key" {
-			t.Fatalf("path=%s authorization=%q", r.URL.Path, r.Header.Get("Authorization"))
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path=%s, want /v1/chat/completions", r.URL.Path)
+			http.Error(w, "unexpected review path", http.StatusBadRequest)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer stored-review-key" {
+			t.Errorf("authorization=%q", r.Header.Get("Authorization"))
+			http.Error(w, "unexpected authorization", http.StatusUnauthorized)
+			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"model":   "review-model",
@@ -100,7 +107,7 @@ func TestPromptReviewConnectionTestsAllKeysConcurrentlyWithoutReturningSecrets(t
 	})
 	t.Cleanup(store.Stop)
 	handler := &Handler{store: store}
-	body := `{"text":"普通会议纪要","base_url":"` + server.URL + `","model":"review-model","request_mode":"chat_completions","system_prompt":"system","user_prompt_template":"<user_input>{{text}}</user_input>","confidence_threshold":0.7,"timeout_seconds":2,"max_concurrent":8,"max_text_length":4096,"test_all_keys":true}`
+	body := `{"text":"普通会议纪要","base_url":"` + server.URL + `","model":"review-model","request_mode":"chat_completions","system_prompt":"system","user_prompt_template":"<user_input>{{text}}</user_input>","confidence_threshold":0.7,"timeout_seconds":2,"max_concurrent":2,"max_text_length":4096,"test_all_keys":true}`
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/admin/prompt-filter/review/test", strings.NewReader(body))
@@ -113,8 +120,8 @@ func TestPromptReviewConnectionTestsAllKeysConcurrentlyWithoutReturningSecrets(t
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || !response.OK || response.KeyCount != 3 || len(response.Results) != 3 {
 		t.Fatalf("response=%s err=%v", recorder.Body.String(), err)
 	}
-	if maxActive.Load() < 2 {
-		t.Fatalf("keys were not tested concurrently; max_active=%d", maxActive.Load())
+	if maxActive.Load() != 2 {
+		t.Fatalf("key tests did not honor max_concurrent=2; max_active=%d", maxActive.Load())
 	}
 	for _, authorization := range []string{"Bearer key-one", "Bearer key-two", "Bearer key-three"} {
 		if seen[authorization] != 1 {

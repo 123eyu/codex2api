@@ -232,10 +232,13 @@ test('Prompt Filter consolidates advanced controls and tests all configured revi
   ]) {
     assert.equal(source.includes(fragment), true, `simplified protection control is missing: ${fragment}`)
   }
-  const reviewPanel = source.indexOf("t('promptFilter.reviewServiceSummary')")
-  const reviewTemplates = source.indexOf("t('promptFilter.reviewTemplatesTitle')")
-  const expertPanel = source.indexOf("t('promptFilter.expertSettingsSummary')")
-  assert.ok(reviewTemplates > reviewPanel && reviewTemplates < expertPanel, 'review request templates must stay inside the model review section')
+	  const reviewPanel = source.indexOf("t('promptFilter.reviewServiceSummary')")
+	  const reviewTemplates = source.indexOf("t('promptFilter.reviewTemplatesTitle')")
+	  const expertPanel = source.indexOf("t('promptFilter.expertSettingsSummary')")
+	  assert.ok(reviewPanel >= 0, 'missing model review panel')
+	  assert.ok(reviewTemplates >= 0, 'missing review request templates')
+	  assert.ok(expertPanel >= 0, 'missing expert settings panel')
+	  assert.ok(reviewTemplates > reviewPanel && reviewTemplates < expertPanel, 'review request templates must stay inside the model review section')
 })
 
 test('review prompt defaults are owned by the backend rather than duplicated in the UI', () => {

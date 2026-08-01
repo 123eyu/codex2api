@@ -201,9 +201,12 @@ func TestPromptIntelligenceAIAnalysisManualApplyAndRollback(t *testing.T) {
 		t.Fatalf("analysis=%#v", analysis)
 	}
 	messages, _ := requestBody["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("analysis request messages=%#v", messages)
+	}
 	systemMessage, _ := messages[0].(map[string]any)
 	systemContent, _ := systemMessage["content"].(string)
-	if len(messages) != 2 || !strings.Contains(systemContent, promptfilter.DefaultReviewSystemPrompt) || !strings.Contains(systemContent, "CY EVIDENCE LEARNING TASK") {
+	if !strings.Contains(systemContent, promptfilter.DefaultReviewSystemPrompt) || !strings.Contains(systemContent, "CY EVIDENCE LEARNING TASK") {
 		t.Fatalf("analysis did not inherit DS identity: %#v", requestBody)
 	}
 	guardedRecorder := httptest.NewRecorder()

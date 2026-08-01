@@ -208,7 +208,7 @@ func (h *Handler) enqueueUpstreamCyberPolicyEvidence(c *gin.Context, endpoint, m
 		LocalReviewFlagged:      captured.ReviewFlagged,
 		LocalReviewError:        captured.ReviewError,
 		LocalMatchedPatterns:    string(matchesJSON),
-		PromptFingerprint:       promptfilter.PromptEvidenceFingerprint(captured.Text),
+		PromptFingerprint:       fingerprint,
 		PromptPreview:           preview,
 		PromptText:              checkText,
 		PromptAvailable:         available,

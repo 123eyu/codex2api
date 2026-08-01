@@ -32,6 +32,24 @@ func TestProductionInterceptFalsePositiveClustersStayAllowed(t *testing.T) {
 	}
 }
 
+func TestStrictSafetyPatternsDoNotBlockIncidentalCuttingOrJailbreakMentions(t *testing.T) {
+	cfg := productionRefinementConfig()
+	for name, prompt := range map[string]string{
+		"video cutting":           `How to speed up video cutting.`,
+		"cutting automation":      `What is the best way to automate cutting?`,
+		"ios jailbreak detection": `Jailbreak detection should work on iOS 18.`,
+		"assistant panel setting": `Enable developer mode in the assistant panel.`,
+		"model capability docs":   `The model exposes a developer mode toggle in its settings UI.`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			verdict := InspectText(prompt, cfg)
+			if verdict.Action != ActionAllow || verdict.TerminalStrictHit {
+				t.Fatalf("incidental safety term was blocked: prompt=%q verdict=%+v", prompt, verdict)
+			}
+		})
+	}
+}
+
 func TestProductionInterceptRefinementKeepsOperationalRequestsBlocked(t *testing.T) {
 	cfg := productionRefinementConfig()
 	tests := []struct {

@@ -650,7 +650,8 @@ func finalizePromptGuardDecision(decision promptfilter.Decision, verdict promptf
 		}
 	}
 	decision.Action = finalAction
-	if verdict.Reviewed && verdict.ReviewFlagged && finalAction != promptfilter.ActionAllow && len(verdict.Matched) == 0 {
+	if verdict.Reviewed && verdict.ReviewFlagged && finalAction != promptfilter.ActionAllow && len(verdict.Matched) == 0 &&
+		(decision.PrimaryOrigin == "" || decision.PrimaryOrigin == promptfilter.OriginCurrentUser) {
 		decision.PrimaryOrigin = promptfilter.OriginCurrentUser
 		decision.PrimaryDetector = "external_review"
 		decision.StrikeEligible = false
