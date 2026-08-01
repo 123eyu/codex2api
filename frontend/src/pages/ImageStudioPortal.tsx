@@ -1310,7 +1310,9 @@ export default function ImageStudioPortal() {
                           </div>
                           <div className="mt-1 line-clamp-2 text-sm leading-snug text-foreground">{job.prompt}</div>
                           {job.error_message ? (
-                            <div className="mt-1 line-clamp-1 text-xs text-destructive">{job.error_message}</div>
+                            <div className={`mt-1 line-clamp-1 text-xs ${job.status === 'failed' ? 'text-destructive' : 'text-amber-700 dark:text-amber-300'}`}>
+                              {job.error_message}
+                            </div>
                           ) : null}
                         </div>
                         <div className="flex shrink-0 flex-col gap-1.5 sm:flex-row sm:items-start">
