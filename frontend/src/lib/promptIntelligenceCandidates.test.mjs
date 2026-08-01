@@ -49,9 +49,24 @@ test('CY evidence AI analysis keeps rule publishing and identity updates behind 
   ]) {
     assert.equal(apiSource.includes(fragment), true, `missing controlled AI API: ${fragment}`)
   }
-  assert.equal(pageSource.includes("setIdentityUpdateMode('suggest')"), true)
+  assert.equal(pageSource.includes("useState<PromptIdentityUpdateMode>('suggest')"), true)
+  assert.equal(pageSource.includes("persisted?.identity_update.mode === 'guarded_auto' ? 'guarded_auto' : 'suggest'"), true)
   assert.equal(pageSource.includes("value: 'guarded_auto'"), true)
   assert.equal(pageSource.includes('applyPromptIntelligenceIdentityUpdate'), true)
   assert.equal(pageSource.includes('rollbackPromptIntelligenceIdentityUpdate'), true)
   assert.equal(pageSource.includes('publishPromptIntelligenceCandidate(candidate.id)'), true, 'rule publication must remain a distinct action')
+})
+
+test('persisted AI learning results are restored and visibly marked without rerunning analysis', () => {
+  for (const fragment of [
+    'const persisted = candidate.latest_ai_analysis ?? null',
+    'setAIResult(persisted)',
+    'candidate.ai_analyzed',
+    'candidate.ai_analysis_count',
+    "t('promptFilter.intelligence.aiLearned')",
+    "t('promptFilter.intelligence.aiViewResult')",
+    "t('promptFilter.intelligence.aiRunAgain')",
+  ]) {
+    assert.equal(pageSource.includes(fragment), true, `missing persisted AI result UI: ${fragment}`)
+  }
 })

@@ -48,29 +48,33 @@ type promptIntelligenceSource struct {
 }
 
 type promptIntelligenceCandidate struct {
-	ID              int64      `json:"id,omitempty"`
-	Fingerprint     string     `json:"fingerprint,omitempty"`
-	Kind            string     `json:"kind,omitempty"`
-	Name            string     `json:"name"`
-	Pattern         string     `json:"pattern"`
-	Weight          int        `json:"weight"`
-	Category        string     `json:"category"`
-	Strict          bool       `json:"strict"`
-	Rationale       string     `json:"rationale,omitempty"`
-	SourceURL       string     `json:"source_url,omitempty"`
-	ChangeType      string     `json:"change_type,omitempty"`
-	LifecycleStatus string     `json:"lifecycle_status,omitempty"`
-	Source          string     `json:"source,omitempty"`
-	EvidenceCount   int        `json:"evidence_count,omitempty"`
-	SamplePreview   string     `json:"sample_preview,omitempty"`
-	Protocol        string     `json:"protocol,omitempty"`
-	Provider        string     `json:"provider,omitempty"`
-	Model           string     `json:"model,omitempty"`
-	APIKeyID        int64      `json:"api_key_id,omitempty"`
-	APIKeyName      string     `json:"api_key_name,omitempty"`
-	CreatedAt       *time.Time `json:"created_at,omitempty"`
-	UpdatedAt       *time.Time `json:"updated_at,omitempty"`
-	LastSeenAt      *time.Time `json:"last_seen_at,omitempty"`
+	ID               int64                                 `json:"id,omitempty"`
+	Fingerprint      string                                `json:"fingerprint,omitempty"`
+	Kind             string                                `json:"kind,omitempty"`
+	Name             string                                `json:"name"`
+	Pattern          string                                `json:"pattern"`
+	Weight           int                                   `json:"weight"`
+	Category         string                                `json:"category"`
+	Strict           bool                                  `json:"strict"`
+	Rationale        string                                `json:"rationale,omitempty"`
+	SourceURL        string                                `json:"source_url,omitempty"`
+	ChangeType       string                                `json:"change_type,omitempty"`
+	LifecycleStatus  string                                `json:"lifecycle_status,omitempty"`
+	Source           string                                `json:"source,omitempty"`
+	EvidenceCount    int                                   `json:"evidence_count,omitempty"`
+	SamplePreview    string                                `json:"sample_preview,omitempty"`
+	Protocol         string                                `json:"protocol,omitempty"`
+	Provider         string                                `json:"provider,omitempty"`
+	Model            string                                `json:"model,omitempty"`
+	APIKeyID         int64                                 `json:"api_key_id,omitempty"`
+	APIKeyName       string                                `json:"api_key_name,omitempty"`
+	AIAnalyzed       bool                                  `json:"ai_analyzed,omitempty"`
+	AIAnalysisCount  int                                   `json:"ai_analysis_count,omitempty"`
+	AIAnalyzedAt     *time.Time                            `json:"ai_analyzed_at,omitempty"`
+	LatestAIAnalysis *promptIntelligenceAIAnalysisResponse `json:"latest_ai_analysis,omitempty"`
+	CreatedAt        *time.Time                            `json:"created_at,omitempty"`
+	UpdatedAt        *time.Time                            `json:"updated_at,omitempty"`
+	LastSeenAt       *time.Time                            `json:"last_seen_at,omitempty"`
 }
 
 type promptIntelligenceRun struct {
@@ -257,9 +261,29 @@ func (h *Handler) ListPromptIntelligenceCandidates(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
-	result := make([]promptIntelligenceCandidate, 0, len(items))
+	candidateIDs := make([]int64, 0, len(items))
 	for _, item := range items {
-		result = append(result, promptIntelligenceCandidateFromDB(item, h.store.GetPromptFilterConfig()))
+		candidateIDs = append(candidateIDs, item.ID)
+	}
+	analyses, err := h.db.ListLatestPromptRuleCandidateAIAnalyses(c.Request.Context(), candidateIDs)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	result := make([]promptIntelligenceCandidate, 0, len(items))
+	cfg := h.store.GetPromptFilterConfig()
+	for _, item := range items {
+		candidate := promptIntelligenceCandidateFromDB(item, cfg)
+		if summary, exists := analyses[item.ID]; exists && summary.Latest != nil {
+			if restored := promptIntelligenceAIAnalysisFromEvidence(summary.Latest); restored != nil {
+				analyzedAt := summary.Latest.ObservedAt
+				candidate.AIAnalyzed = true
+				candidate.AIAnalysisCount = summary.Count
+				candidate.AIAnalyzedAt = &analyzedAt
+				candidate.LatestAIAnalysis = restored
+			}
+		}
+		result = append(result, candidate)
 	}
 	c.JSON(http.StatusOK, promptIntelligenceCandidatesResponse{Candidates: result, Total: total})
 }

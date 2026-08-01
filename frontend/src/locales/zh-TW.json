@@ -105,6 +105,8 @@
     "reviewTestReason": "模型原因",
     "intelligence": {
       "aiAnalyze": "AI 歸因",
+      "aiLearned": "已由 AI 學習",
+      "aiViewResult": "查看 AI 結果",
       "aiAnalysisTitle": "使用 AI 分析 CY 證據",
       "aiAnalysisDesc": "沿用目前 DS 審核身分契約，產生規則建議或受控身分條款；不會自動發布執行規則。",
       "aiProvider": "分析提供方",
@@ -122,6 +124,7 @@
       "identityGuardedAuto": "符合嚴格條件時自動套用",
       "identitySafetyHint": "AI 不能重寫完整 System Prompt，只能提交最多 8 條結構化條款。基礎身分、<user_input> 資料邊界、JSON 輸出、憑據與工具控制均不可修改；每次套用皆可稽核和回滾。",
       "aiRunAnalysis": "開始 AI 分析",
+      "aiRunAgain": "重新進行 AI 分析",
       "aiAnalyzing": "AI 分析中…",
       "aiAnalysisSuccess": "CY 證據 AI 分析已完成",
       "aiConfidence": "信心",

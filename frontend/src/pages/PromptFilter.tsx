@@ -1550,11 +1550,12 @@ function IntelligenceView() {
 
   const openAIAnalysis = async (candidate: PromptIntelligenceCandidate) => {
     setAITarget(candidate)
-    setAIProvider('review')
-    setAIModel('')
+    const persisted = candidate.latest_ai_analysis ?? null
+    setAIProvider(persisted?.provider ?? 'review')
+    setAIModel(persisted?.model ?? '')
     setAIAPIKeyID('0')
-    setIdentityUpdateMode('suggest')
-    setAIResult(null)
+    setIdentityUpdateMode(persisted?.identity_update.mode === 'guarded_auto' ? 'guarded_auto' : 'suggest')
+    setAIResult(persisted)
     if (!gatewayKeys.length) {
       try {
         const response = await api.getPromptIntelligenceAIProviders()
@@ -1712,6 +1713,12 @@ function IntelligenceView() {
                     <div className="flex flex-wrap items-center gap-2 font-medium">
                       {candidateTitle(candidate)}
                       <Badge variant="outline">{candidate.kind === 'evidence' ? t('promptFilter.intelligence.evidenceOnly') : candidate.change_type === 'update' ? t('promptFilter.intelligence.update') : t('promptFilter.intelligence.new')}</Badge>
+                      {candidate.ai_analyzed ? (
+                        <Badge className="bg-sky-600">
+                          {t('promptFilter.intelligence.aiLearned')}
+                          {candidate.ai_analysis_count && candidate.ai_analysis_count > 1 ? ` ×${candidate.ai_analysis_count}` : ''}
+                        </Badge>
+                      ) : null}
                     </div>
                     {candidate.pattern ? <code className="mt-1 block break-all text-xs text-muted-foreground">{candidate.pattern}</code> : null}
                     {candidate.kind === 'pattern' ? (
@@ -1743,7 +1750,7 @@ function IntelligenceView() {
                         <>
                           <Button size="sm" variant="outline" disabled={candidateAction === candidate.id} onClick={() => void openAIAnalysis(candidate)}>
                             <Sparkles className="size-4" />
-                            {t('promptFilter.intelligence.aiAnalyze')}
+                            {candidate.ai_analyzed ? t('promptFilter.intelligence.aiViewResult') : t('promptFilter.intelligence.aiAnalyze')}
                           </Button>
                           <Button size="sm" disabled={candidateAction === candidate.id} onClick={() => openDraft(candidate)}>
                             <Pencil className="size-4" />
@@ -1890,6 +1897,7 @@ function IntelligenceView() {
             <div className="space-y-4 rounded-xl border p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge>{t(`promptFilter.intelligence.aiDecision.${aiResult.decision.decision}`, { defaultValue: aiResult.decision.decision })}</Badge>
+                <Badge className="bg-sky-600">{t('promptFilter.intelligence.aiLearned')}</Badge>
                 <Badge variant="outline">{t('promptFilter.intelligence.aiConfidence')}: {(aiResult.decision.confidence * 100).toFixed(0)}%</Badge>
                 <Badge variant="outline">{aiResult.provider} · {aiResult.model}</Badge>
               </div>
@@ -1938,7 +1946,7 @@ function IntelligenceView() {
             <Button variant="outline" disabled={aiLoading} onClick={() => { setAITarget(null); setAIResult(null) }}>{t('common.close')}</Button>
             <Button disabled={aiLoading || !aiTarget} onClick={() => void runAIAnalysis()}>
               <Sparkles className="size-4" />
-              {aiLoading ? t('promptFilter.intelligence.aiAnalyzing') : t('promptFilter.intelligence.aiRunAnalysis')}
+              {aiLoading ? t('promptFilter.intelligence.aiAnalyzing') : aiResult ? t('promptFilter.intelligence.aiRunAgain') : t('promptFilter.intelligence.aiRunAnalysis')}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -1582,6 +1582,10 @@ export interface PromptIntelligenceCandidate extends PromptIntelligenceRuleDraft
   model?: string
   api_key_id?: number
   api_key_name?: string
+  ai_analyzed?: boolean
+  ai_analysis_count?: number
+  ai_analyzed_at?: string
+  latest_ai_analysis?: PromptIntelligenceAIAnalysisResponse
   created_at?: string
   updated_at?: string
   last_seen_at?: string
