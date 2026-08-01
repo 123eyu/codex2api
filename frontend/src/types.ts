@@ -934,6 +934,7 @@ export interface SystemSettings {
   prompt_filter_max_text_length: number
   prompt_filter_sensitive_words: string
   prompt_filter_custom_patterns: string
+  prompt_filter_custom_patterns_expected?: string
   prompt_filter_pattern_quarantines?: PromptFilterPatternQuarantine[]
   prompt_filter_disabled_patterns: string
   prompt_filter_review_enabled: boolean
@@ -1060,7 +1061,22 @@ export interface PromptFilterLog {
   error_code: string
   review_model: string
   review_flagged: boolean
-  review_error: string
+	review_error: string
+	reviewed: boolean
+	review_confidence: number | null
+	review_threshold: number | null
+	review_reason: string
+	review_endpoint: string
+	review_request_mode: string
+	review_latency_ms: number | null
+	request_correlation_id?: string
+	newapi_policy_status?: string
+	newapi_platform?: string
+  newapi_user_id?: string
+  newapi_request_id?: string
+  newapi_decision_id?: string
+  session_hash?: string
+  client_ip_hash?: string
 }
 
 export interface PromptFilterLogsResponse {
@@ -1070,6 +1086,231 @@ export interface PromptFilterLogsResponse {
   page_size: number
 }
 
+export type PromptPolicyEvaluationState = 'completed' | 'not_run' | 'unavailable' | 'legacy_unknown'
+export type PromptPolicyLocalOutcome = 'no_hit' | 'audit_hit' | 'warn' | 'block'
+export type PromptPolicyLocalComparison = 'confirmed_miss' | 'upstream_only' | 'evidence_unavailable' | 'local_detected' | 'not_comparable' | 'legacy_unknown'
+
+export interface PromptPolicyIncident {
+	id: number
+	incident_id: string
+	request_correlation_id?: string
+	created_at: ISODateString
+	attempt_index: number
+	transport: string
+	endpoint: string
+	protocol: string
+	provider: string
+	model: string
+	status_code: number
+	account_id: number
+	account_name: string
+	account_platform: string
+	account_group_ids: number[]
+	account_group_names: string[]
+	api_key_id: number
+	api_key_name: string
+	api_key_masked: string
+	api_key_allowed_group_ids: number[]
+	api_key_allowed_group_names: string[]
+	routing_snapshot_state: 'event_snapshot' | 'current_inferred' | 'unavailable'
+	platform: string
+	newapi_policy_status?: string
+	newapi_platform?: string
+	newapi_user_id?: string
+	newapi_request_id?: string
+	session_hash?: string
+	client_ip_hash?: string
+	source_ref?: string
+	upstream_error_code: string
+	upstream_error: string
+	local_evaluation_state: PromptPolicyEvaluationState
+	local_outcome: PromptPolicyLocalOutcome
+	local_action: string
+	local_score: number | null
+	local_raw_score: number | null
+	local_audit_score: number | null
+	local_audit_raw_score: number | null
+	local_threshold: number
+	local_mode: string
+	local_policy_profile: string
+	local_reason_code: string
+	local_reason: string
+	local_primary_origin: string
+	local_strike_eligible: boolean
+	local_review_model: string
+	local_review_flagged: boolean
+	local_review_error: string
+	local_matched_patterns: string
+	prompt_fingerprint: string
+	prompt_preview: string
+	prompt_text: string
+	prompt_available: boolean
+	local_comparison: PromptPolicyLocalComparison
+	candidate_id?: number
+	candidate_evidence_id?: number
+	local_miss: boolean
+}
+
+export interface PromptPolicyIncidentsResponse {
+	incidents: PromptPolicyIncident[]
+	total: number
+	page: number
+	page_size: number
+}
+
+export interface PromptPolicyIncidentDetailResponse {
+	incident: PromptPolicyIncident
+	matches: PromptFilterMatch[]
+	candidate?: {
+		id: number
+		status: string
+		kind: string
+		name: string
+		category: string
+		evidence_count: number
+		sample_preview?: string
+	}
+	evidence?: {
+		id: number
+		source_kind: string
+		source_ref?: string
+		prompt_policy_incident_id?: string
+		observed_at: ISODateString
+	}
+}
+
+export type PromptRiskSubjectType = 'newapi_user' | 'session' | 'api_key' | 'client_ip' | 'upstream_account'
+export type PromptRiskLevel = 'low' | 'observed' | 'elevated' | 'high' | 'critical'
+
+export interface PromptRiskScoreBreakdown {
+  local_signal: number
+  upstream_signal: number
+  recurrence: number
+  identity_confidence: number
+}
+
+export type PromptRiskTrustStatus = 'active' | 'suspended' | 'revoked' | 'expired'
+
+export interface PromptRiskTrustPolicy {
+  id: number
+  subject_type: PromptRiskSubjectType
+  subject_key: string
+  status: PromptRiskTrustStatus | string
+  reason?: string
+  risk_threshold: number
+  valid_until: ISODateString
+  last_evaluated_at?: ISODateString
+  last_risk_score: number
+  last_risk_level?: PromptRiskLevel | string
+  bypass_count: number
+  last_bypass_at?: ISODateString
+  created_at: ISODateString
+  updated_at: ISODateString
+}
+
+export interface PromptRiskTrustEvent {
+  id: number
+  policy_id: number
+  subject_type: PromptRiskSubjectType
+  subject_key: string
+  event_type: string
+  reason?: string
+  risk_score: number
+  risk_level?: PromptRiskLevel | string
+  created_at: ISODateString
+}
+
+export interface PromptRiskProfile {
+  subject_type: PromptRiskSubjectType
+  subject_key: string
+  subject_display: string
+  platform?: string
+  newapi_user_id?: string
+  newapi_user_name?: string
+  newapi_user_email?: string
+  newapi_user_group?: string
+  is_person: boolean
+  identity_confidence: number
+  risk_score: number
+  risk_level: PromptRiskLevel
+  recommended_actions: string[]
+  score_breakdown: PromptRiskScoreBreakdown
+  latest_at: ISODateString
+  event_count: number
+  events_10m: number
+  events_24h: number
+  events_7d: number
+  events_30d: number
+  upstream_cy_count: number
+  confirmed_miss_count: number
+  local_block_count: number
+  local_warn_count: number
+  distinct_fingerprints: number
+  repeated_fingerprints: number
+  api_key_id?: number
+  api_key_name?: string
+  api_key_masked?: string
+  account_id?: number
+  account_name?: string
+  trust_policy?: PromptRiskTrustPolicy
+}
+
+export interface PromptRiskEvent {
+  id: number
+  created_at: ISODateString
+  source_type: string
+  source_id: string
+  incident_id?: string
+  prompt_filter_log_id?: number
+  request_correlation_id?: string
+  subject_type: PromptRiskSubjectType
+  subject_key: string
+  subject_display: string
+  platform?: string
+  newapi_user_id?: string
+  newapi_user_name?: string
+  newapi_user_email?: string
+  newapi_user_group?: string
+  is_person: boolean
+  identity_confidence: number
+  event_kind: string
+  request_risk_score: number
+  evidence_confidence: number
+  reason_code?: string
+  action?: string
+  local_outcome?: string
+  local_comparison?: string
+  endpoint?: string
+  model?: string
+  prompt_fingerprint?: string
+  prompt_preview?: string
+  api_key_id?: number
+  api_key_name?: string
+  api_key_masked?: string
+  account_id?: number
+  account_name?: string
+}
+
+export interface PromptRiskProfilesResponse {
+  profiles: PromptRiskProfile[]
+  total: number
+  page: number
+  page_size: number
+  scoring_version: string
+  guardrail: string
+}
+
+export interface PromptRiskProfileDetailResponse {
+  profile: PromptRiskProfile
+  events: PromptRiskEvent[]
+  trust_events: PromptRiskTrustEvent[]
+  event_total: number
+  event_page: number
+  event_page_size: number
+  scoring_version: string
+  guardrail: string
+}
+
 export interface PromptFilterTestResponse {
   verdict: PromptFilterVerdict
   decision?: PromptGuardDecision
@@ -1077,6 +1318,47 @@ export interface PromptFilterTestResponse {
   provider?: string
   endpoint?: string
   model?: string
+}
+
+export interface PromptReviewTestRequest {
+  text: string
+  api_key?: string
+  base_url: string
+  model: string
+  request_mode: 'moderations' | 'chat_completions' | string
+  system_prompt: string
+  user_prompt_template: string
+  payload_template: string
+  confidence_threshold: number
+  timeout_seconds: number
+  max_concurrent: number
+  max_text_length: number
+  test_all_keys?: boolean
+}
+
+export interface PromptReviewKeyTestResult {
+  key_index: number
+  ok: boolean
+  endpoint?: string
+  model?: string
+  flagged: boolean
+  confidence: number
+  reason?: string
+  latency_ms: number
+  error?: string
+}
+
+export interface PromptReviewTestResponse {
+  ok: boolean
+  endpoint: string
+  model: string
+  flagged: boolean
+  confidence: number
+  confidence_threshold: number
+  reason?: string
+  latency_ms: number
+  key_count?: number
+  results?: PromptReviewKeyTestResult[]
 }
 
 export interface PromptFilterRulePatternTestResponse {
@@ -1276,7 +1558,7 @@ export interface PromptFilterRulesResponse {
   disabled_patterns: string[]
 }
 
-export interface PromptIntelligenceCandidate {
+export interface PromptIntelligenceRuleDraft {
   name: string
   pattern: string
   weight: number
@@ -1284,7 +1566,116 @@ export interface PromptIntelligenceCandidate {
   strict: boolean
   rationale?: string
   source_url?: string
+  change_type?: 'new' | 'update' | string
+}
+
+export interface PromptIntelligenceCandidate extends PromptIntelligenceRuleDraft {
+  id: number
+  fingerprint: string
+  kind: 'pattern' | 'evidence' | string
+  lifecycle_status: 'pending' | 'published' | 'dismissed' | 'superseded' | string
+  source?: string
+  evidence_count: number
+  sample_preview?: string
+  protocol?: string
+  provider?: string
+  model?: string
+  api_key_id?: number
+  api_key_name?: string
+  created_at?: string
+  updated_at?: string
+  last_seen_at?: string
+}
+
+export interface PromptIntelligenceRunCandidate extends PromptIntelligenceRuleDraft {
+  id?: number
+  fingerprint?: string
+  kind?: 'pattern' | 'evidence' | string
+  lifecycle_status?: string
   status?: 'new' | 'update' | string
+  source?: string
+  evidence_count?: number
+  sample_preview?: string
+}
+
+export interface PromptIntelligenceCandidatesResponse {
+  candidates: PromptIntelligenceCandidate[]
+  total: number
+}
+
+export interface PromptIntelligenceEvidence {
+  id: number
+  source_kind: string
+  source_ref?: string
+  sample_preview?: string
+  metadata: Record<string, unknown>
+  protocol?: string
+  provider?: string
+  model?: string
+  api_key_id?: number
+  api_key_name?: string
+  observed_at: string
+}
+
+export interface PromptIntelligenceEvidenceResponse {
+  candidate: PromptIntelligenceCandidate
+  evidence: PromptIntelligenceEvidence[]
+}
+
+export type PromptIntelligenceAIProvider = 'review' | 'account_pool'
+export type PromptIdentityUpdateMode = 'suggest' | 'guarded_auto'
+
+export interface PromptIntelligenceAIAnalysisRequest {
+  provider: PromptIntelligenceAIProvider
+  model?: string
+  api_key_id?: number
+  identity_update_mode: PromptIdentityUpdateMode
+}
+
+export interface PromptIntelligenceGatewayKey {
+  id: number
+  name: string
+  masked: string
+  status: 'active' | 'expired' | 'quota_exhausted' | string
+}
+
+export interface PromptIntelligenceAIProvidersResponse {
+  review: { configured: boolean; model: string; key_count: number }
+  gateway_keys: PromptIntelligenceGatewayKey[]
+}
+
+export interface PromptIntelligenceAIIdentityPatch {
+  clauses: string[]
+  rationale?: string
+}
+
+export interface PromptIntelligenceAIDecision {
+  decision: 'no_change' | 'rule' | 'identity' | 'both'
+  confidence: number
+  reason: string
+  rule?: PromptIntelligenceRuleDraft
+  identity_patch?: PromptIntelligenceAIIdentityPatch
+}
+
+export interface PromptIdentityUpdateResult {
+  mode: 'suggest' | 'guarded_auto' | 'manual' | 'rollback' | string
+  suggested: boolean
+  eligible: boolean
+  applied: boolean
+  analysis_evidence_id: number
+  revision_evidence_id?: number
+  clauses?: string[]
+  block_reason?: string
+}
+
+export interface PromptIntelligenceAIAnalysisResponse {
+  analysis_evidence_id: number
+  provider: PromptIntelligenceAIProvider
+  model: string
+  decision: PromptIntelligenceAIDecision
+  rule_candidate?: PromptIntelligenceCandidate
+  rule_error?: string
+  identity_update: PromptIdentityUpdateResult
 }
 
 export interface PromptIntelligenceHistoryResponse {
@@ -1297,9 +1688,10 @@ export interface PromptIntelligenceRun {
   finished_at: string
   queries: string[]
   sources: Array<{ provider: string; title: string; url: string; description: string; updated_at: string }>
-  candidates: PromptIntelligenceCandidate[]
+  candidates: PromptIntelligenceRunCandidate[]
   model_calls: number
-  added: number
+  staged?: number
+  added?: number
   errors: string[]
 }
 
@@ -1521,7 +1913,8 @@ export interface UsageLog {
   is_retry_attempt: boolean
   attempt_index: number
   upstream_error_kind: string
-  error_message: string
+	error_message: string
+	prompt_policy_incident_id?: string
 }
 
 export type UsageLogsResponse = ApiListResponse<'logs', UsageLog>
@@ -1715,6 +2108,37 @@ export interface APIKeyRow {
 }
 
 export type APIKeysResponse = ApiListResponse<'keys', APIKeyRow>
+
+export interface PromptFilterNewAPIBinding {
+  api_key_id: number
+  platform_code: string
+  platform_name: string
+  enabled: boolean
+  require_signed_identity: boolean
+  secret_configured: boolean
+  secret_masked: string
+  previous_secret_active: boolean
+  previous_secret_expires_at?: ISODateString | null
+  updated_at: ISODateString
+  /** 仅在创建或轮换成功的响应中出现，列表和详情接口不会回显明文。 */
+  secret?: string
+}
+
+export interface PromptFilterNewAPIBindingsResponse {
+  bindings: PromptFilterNewAPIBinding[]
+}
+
+export interface CreatePromptFilterNewAPIBindingRequest {
+  api_key_id: number
+  platform_code: string
+  platform_name: string
+  enabled?: boolean
+  require_signed_identity?: boolean
+}
+
+export type UpdatePromptFilterNewAPIBindingRequest = Partial<
+  Omit<CreatePromptFilterNewAPIBindingRequest, 'api_key_id'>
+>
 
 export interface CreateAPIKeyRequest {
   name: string

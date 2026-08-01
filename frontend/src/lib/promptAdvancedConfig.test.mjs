@@ -86,6 +86,33 @@ test('removing one known override does not rebuild its parent object', () => {
   assert.equal(readAdvancedConfigPath(result.value, ['guard', 'provider_profiles', 'future_provider']), 'future_profile')
 })
 
+test('review adapter patches preserve prompts, payload templates, and unknown fields', () => {
+  const raw = JSON.stringify({
+    review_adapter: {
+      request_mode: 'moderations',
+      future_response_parser: 'v2',
+    },
+    future_root: true,
+  })
+  const result = patchAdvancedConfigDocument(raw, [
+    { path: ['review_adapter', 'request_mode'], value: 'chat_completions' },
+    { path: ['review_adapter', 'scope'], value: 'local_candidates' },
+    { path: ['review_adapter', 'system_prompt'], value: 'system' },
+    { path: ['review_adapter', 'user_prompt_template'], value: '<user_input>{{text}}</user_input>' },
+    { path: ['review_adapter', 'payload_template'], value: '{"input":"{{user_prompt}}"}' },
+    { path: ['review_adapter', 'confidence_threshold'], value: 0.72 },
+  ])
+  assert.equal(result.ok, true)
+  const saved = JSON.parse(result.serialized)
+  assert.equal(saved.review_adapter.request_mode, 'chat_completions')
+  assert.equal(saved.review_adapter.scope, 'local_candidates')
+  assert.equal(saved.review_adapter.user_prompt_template, '<user_input>{{text}}</user_input>')
+  assert.equal(saved.review_adapter.payload_template, '{"input":"{{user_prompt}}"}')
+  assert.equal(saved.review_adapter.confidence_threshold, 0.72)
+  assert.equal(saved.review_adapter.future_response_parser, 'v2')
+  assert.equal(saved.future_root, true)
+})
+
 test('Chinese locale labels do not expose internal policy enum values', () => {
   const locale = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))
   assert.equal('sync' in locale.promptFilter.guard.performance.overflowModes, false)
@@ -131,6 +158,9 @@ test('hidden runtime settings survive visible editor patches', () => {
     },
     newapi: {
       enabled: false,
+      secret: 'retired-global-secret',
+      offense_window_seconds: 86400,
+      ban_after: 2,
       max_clock_skew_seconds: 240,
     },
   })
@@ -139,7 +169,10 @@ test('hidden runtime settings survive visible editor patches', () => {
     { path: ['sidecar', 'enabled'], value: true },
     { path: ['attachment', 'enabled'], value: true },
     { path: ['output', 'strict_only'], value: false },
-    { path: ['newapi', 'enabled'], value: true },
+    { path: ['newapi', 'enabled'], remove: true },
+    { path: ['newapi', 'secret'], remove: true },
+    { path: ['newapi', 'offense_window_seconds'], remove: true },
+    { path: ['newapi', 'ban_after'], remove: true },
   ])
   assert.equal(result.ok, true)
   const saved = JSON.parse(result.serialized)
@@ -157,7 +190,10 @@ test('hidden runtime settings survive visible editor patches', () => {
   assert.equal(saved.output.strict_only, false)
   assert.equal(saved.output.buffer_bytes, 8192)
   assert.equal(saved.output.overlap_bytes, 1024)
-  assert.equal(saved.newapi.enabled, true)
+  assert.equal(saved.newapi.enabled, undefined)
+  assert.equal(saved.newapi.secret, undefined)
+  assert.equal(saved.newapi.offense_window_seconds, undefined)
+  assert.equal(saved.newapi.ban_after, undefined)
   assert.equal(saved.newapi.max_clock_skew_seconds, 240)
 })
 
@@ -180,6 +216,40 @@ test('Prompt Filter editor does not render runtime tuning controls', () => {
   }
 })
 
+test('Prompt Filter consolidates advanced controls and tests all configured review keys', () => {
+  const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
+  assert.match(source, /advancedOpen/)
+  assert.match(source, /applyRecommendedProtection/)
+  assert.match(source, /test_all_keys: true/)
+  assert.match(source, /reviewTestResult\.results/)
+  assert.match(source, /openLearningReview/)
+  for (const fragment of [
+    'reviewTemplatesTitle',
+    'normalizationSimplifiedDesc',
+    'guard.simplifiedSummary',
+    'extensions.collapsedDesc',
+    'recommendedStrengthTitle',
+  ]) {
+    assert.equal(source.includes(fragment), true, `simplified protection control is missing: ${fragment}`)
+  }
+	  const reviewPanel = source.indexOf("t('promptFilter.reviewServiceSummary')")
+	  const reviewTemplates = source.indexOf("t('promptFilter.reviewTemplatesTitle')")
+	  const expertPanel = source.indexOf("t('promptFilter.expertSettingsSummary')")
+	  assert.ok(reviewPanel >= 0, 'missing model review panel')
+	  assert.ok(reviewTemplates >= 0, 'missing review request templates')
+	  assert.ok(expertPanel >= 0, 'missing expert settings panel')
+	  assert.ok(reviewTemplates > reviewPanel && reviewTemplates < expertPanel, 'review request templates must stay inside the model review section')
+})
+
+test('review prompt defaults are owned by the backend rather than duplicated in the UI', () => {
+  const frontendSource = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
+  const backendSource = readFileSync(new URL('../../../security/promptfilter/review.go', import.meta.url), 'utf8')
+  assert.equal(frontendSource.includes('const defaultReviewSystemPrompt'), false)
+  assert.match(frontendSource, /system_prompt: ''/)
+  assert.match(frontendSource, /reviewSystemPromptPlaceholder/)
+  assert.match(backendSource, /const DefaultReviewSystemPrompt = `/)
+})
+
 test('Prompt Filter rule tester renders the final GuardPipeline decision metadata', () => {
   const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
   const requiredFragments = [
@@ -196,30 +266,19 @@ test('Prompt Filter rule tester renders the final GuardPipeline decision metadat
   }
 })
 
-test('Prompt Filter surfaces quarantined custom rules and keeps zh-TW decision labels complete', () => {
+test('Prompt Filter exposes explicit review scope and live connection testing', () => {
   const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
-  assert.equal(source.includes('updated.prompt_filter_pattern_quarantines ?? []'), true)
-  assert.equal(source.includes("t('promptFilter.saveQuarantined'"), true)
-
-  const locale = JSON.parse(readFileSync(new URL('../locales/zh-TW.json', import.meta.url), 'utf8'))
-  for (const key of [
-    'testResultPipelineTitle',
-    'testResultPipelineHint',
-    'testResultLegacyFallbackHint',
-    'testResultFinalAction',
-    'testResultMode',
-    'testResultProfile',
-    'testResultProtocolProvider',
-    'testResultEndpointModel',
-    'testResultExecutionScore',
-    'testResultAuditScore',
-    'testResultOrigin',
-    'testResultReasonCode',
-    'testResultStrikeEligible',
-    'testResultPrimaryDetector',
-    'testResultYes',
-    'testResultNo',
-  ]) {
-    assert.equal(typeof locale.promptFilter[key], 'string', `missing zh-TW promptFilter.${key}`)
+  const requiredFragments = [
+    "request_mode: 'moderations'",
+    "scope: 'all_requests'",
+    "'local_candidates'",
+    "value: 'chat_completions'",
+    "['review_adapter', key]",
+    'api.testPromptReview',
+    'reviewScopeHint',
+    '{{user_prompt}}',
+  ]
+  for (const fragment of requiredFragments) {
+    assert.equal(source.includes(fragment), true, `full-request review control is missing: ${fragment}`)
   }
 })

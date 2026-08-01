@@ -35,6 +35,7 @@ type AdvancedConfig struct {
 	Intelligence    IntelligenceConfig    `json:"intelligence"`
 	NewAPI          NewAPIConfig          `json:"newapi"`
 	Guard           GuardConfig           `json:"guard"`
+	ReviewAdapter   ReviewAdapterConfig   `json:"review_adapter"`
 }
 
 const (
@@ -122,13 +123,12 @@ type GuardLayerModeConfig struct {
 	Mode string `json:"mode"`
 }
 
-// NewAPIConfig controls signed identity propagation and repeat-offender directives.
+// NewAPIConfig controls signed identity verification for the request-local
+// Codex2API Key binding. Enabled is runtime-only: persisted/global configuration
+// must never enable NewAPI identity verification without a concrete binding.
 type NewAPIConfig struct {
-	Enabled              bool   `json:"enabled"`
-	MaxClockSkewSeconds  int    `json:"max_clock_skew_seconds"`
-	OffenseWindowSeconds int    `json:"offense_window_seconds"`
-	BanAfter             int    `json:"ban_after"`
-	Secret               string `json:"-"`
+	Enabled             bool `json:"-"`
+	MaxClockSkewSeconds int  `json:"max_clock_skew_seconds"`
 }
 
 type EnforcementConfig struct {
@@ -217,7 +217,8 @@ type OutputConfig struct {
 }
 
 // IntelligenceConfig controls the optional public-source rule intelligence job.
-// It is disabled by default and never auto-adds rules unless AutoAdd is explicitly enabled.
+// Generated proposals are always staged for human review and never enter the
+// runtime rule engine until an administrator explicitly publishes them.
 type IntelligenceConfig struct {
 	Enabled          bool     `json:"enabled"`
 	IntervalHours    int      `json:"interval_hours"`
@@ -226,7 +227,6 @@ type IntelligenceConfig struct {
 	ModelEnabled     bool     `json:"model_enabled"`
 	Model            string   `json:"model"`
 	MaxModelCalls    int      `json:"max_model_calls"`
-	AutoAdd          bool     `json:"auto_add"`
 }
 
 func DefaultIntelligenceQueries() []string {
@@ -251,7 +251,7 @@ func DefaultAdvancedConfig() AdvancedConfig {
 		Attachment:      AttachmentConfig{TimeoutSeconds: 2, MaxFiles: 4, MaxBytes: 65536, MaxExtractedChars: 8192, CacheTTLSeconds: 300, MaxConcurrent: 8, CircuitBreakerFailures: 3, CircuitBreakerSeconds: 30},
 		Output:          OutputConfig{BufferBytes: 4096, OverlapBytes: 512, StrictOnly: true},
 		Intelligence:    IntelligenceConfig{IntervalHours: 24, Queries: DefaultIntelligenceQueries(), MaxSearchResults: 20, Model: "gpt-5.4", MaxModelCalls: 1},
-		NewAPI:          NewAPIConfig{MaxClockSkewSeconds: 120, OffenseWindowSeconds: 86400, BanAfter: 2},
+		NewAPI:          NewAPIConfig{MaxClockSkewSeconds: 120},
 		Guard:           DefaultGuardConfig(),
 	}
 }
@@ -583,18 +583,51 @@ func setAdvancedConfigObjectString(object map[string]json.RawMessage, wanted str
 }
 
 func removeAdvancedConfigSensitiveFields(root map[string]json.RawMessage) {
-	newAPI, ok := decodeAdvancedConfigObject(root["newapi"])
-	if !ok {
-		return
-	}
-	// The shared secret has a dedicated encrypted/database-backed endpoint and
-	// is intentionally json:"-" in NewAPIConfig. Never mistake it for a future
-	// field and persist or expose it through the general settings document.
-	for key := range newAPI {
-		if strings.EqualFold(strings.TrimSpace(key), "secret") {
-			delete(newAPI, key)
+	keys := make([]string, 0, 1)
+	for key := range root {
+		if strings.EqualFold(strings.TrimSpace(key), "newapi") {
+			keys = append(keys, key)
 		}
 	}
+	// Merge case variants into the canonical lower-case object, with an exact
+	// lower-case key taking precedence when malformed historical documents
+	// contain both forms.
+	sort.SliceStable(keys, func(i, j int) bool {
+		if keys[i] == "newapi" {
+			return false
+		}
+		if keys[j] == "newapi" {
+			return true
+		}
+		return keys[i] < keys[j]
+	})
+	newAPI := map[string]json.RawMessage{}
+	foundObject := false
+	for _, rootKey := range keys {
+		raw := root[rootKey]
+		delete(root, rootKey)
+		object, ok := decodeAdvancedConfigObject(raw)
+		if !ok {
+			continue
+		}
+		foundObject = true
+		for key := range object {
+			normalized := strings.ToLower(strings.TrimSpace(key))
+			if normalized == "secret" || normalized == "enabled" || normalized == "offense_window_seconds" || normalized == "ban_after" {
+				delete(object, key)
+			}
+		}
+		for key, value := range object {
+			newAPI[key] = value
+		}
+	}
+	if !foundObject {
+		return
+	}
+	// Global enablement, secrets, and penalty counters were retired in favor of
+	// mandatory one-to-one identity bindings plus NewAPI-owned enforcement.
+	// Strip the legacy fields so they cannot reactivate or misrepresent runtime
+	// behavior after an upgrade.
 	encoded, err := json.Marshal(newAPI)
 	if err == nil {
 		root["newapi"] = encoded
@@ -881,18 +914,6 @@ func NormalizeAdvancedConfig(cfg AdvancedConfig) AdvancedConfig {
 	}
 	if cfg.NewAPI.MaxClockSkewSeconds > 600 {
 		cfg.NewAPI.MaxClockSkewSeconds = 600
-	}
-	if cfg.NewAPI.OffenseWindowSeconds < 60 {
-		cfg.NewAPI.OffenseWindowSeconds = d.NewAPI.OffenseWindowSeconds
-	}
-	if cfg.NewAPI.OffenseWindowSeconds > 2592000 {
-		cfg.NewAPI.OffenseWindowSeconds = 2592000
-	}
-	if cfg.NewAPI.BanAfter < 2 {
-		cfg.NewAPI.BanAfter = d.NewAPI.BanAfter
-	}
-	if cfg.NewAPI.BanAfter > 10 {
-		cfg.NewAPI.BanAfter = 10
 	}
 	queries := make([]string, 0, len(cfg.Intelligence.Queries))
 	for _, query := range cfg.Intelligence.Queries {
@@ -2079,7 +2100,7 @@ func decodedSafetyPriorityNormalizedWithHints(normalized string, scanner decoded
 		// admitted for inspection, but they are not enforcement evidence and must
 		// never consume the finite out-of-budget candidate pool ahead of a real
 		// decision rule.
-		if candidatePattern.pattern.cfg.SignalOnly {
+		if candidatePattern.pattern.cfg.SignalOnly && !candidatePattern.pattern.cfg.Strict {
 			continue
 		}
 		if len(candidatePattern.hintClauses) > 0 && !containsDecodedSafetyHintClauseWithMatches(normalized, candidatePattern.hintClauses, matchedHints) {
@@ -2496,6 +2517,16 @@ func decodedSafetyLiteralGuaranteedHintClauses(expression *syntax.Regexp) ([][]s
 }
 
 func decodedSafetyMandatoryHintClauses(pattern compiledPattern) [][]string {
+	if pattern.cfg.Name == "self_harm_facilitation" {
+		// Every branch of the dedicated grammar contains one of these target
+		// terms. Keep the list explicit so future relationship refinements do not
+		// make the syntax extractor drop this strict rule from large-request and
+		// decoded-content fast paths.
+		return singleDecodedSafetyHintClauses([]string{
+			"suicide", "self-harm", "self harm", "cutting", "starve myself", "starving myself",
+			"自杀", "自残", "割腕", "伤害自己", "绝食",
+		})
+	}
 	if pattern.cfg.Name == "prompt_unrestricted_mode" {
 		return singleDecodedSafetyHintClauses([]string{
 			"unrestricted mode", "unrestricted model", "unrestricted assistant", "unrestricted access",

@@ -630,15 +630,34 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)
 	api.GET("/prompt-filter/logs/match", h.MatchPromptFilterLog)
 	api.DELETE("/prompt-filter/logs", h.ClearPromptFilterLogs)
+	api.GET("/prompt-policy/incidents", h.ListPromptPolicyIncidents)
+	api.GET("/prompt-policy/incidents/:incident_id", h.GetPromptPolicyIncident)
+	api.GET("/prompt-policy/risk-profiles", h.ListPromptRiskProfiles)
+	api.GET("/prompt-policy/risk-profiles/:subject_type/:subject_key", h.GetPromptRiskProfile)
+	api.PUT("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.UpsertPromptRiskTrustPolicy)
+	api.DELETE("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.RevokePromptRiskTrustPolicy)
 	api.POST("/prompt-filter/test", h.TestPromptFilter)
+	api.POST("/prompt-filter/review/test", h.TestPromptReviewConnection)
 	api.POST("/prompt-filter/rules/test", h.TestPromptFilterRulePattern)
 	api.GET("/prompt-filter/rules", h.GetPromptFilterRules)
-	api.GET("/prompt-filter/newapi-secret", h.GetPromptFilterNewAPISecretStatus)
-	api.POST("/prompt-filter/newapi-secret/generate", h.GeneratePromptFilterNewAPISecret)
-	api.PUT("/prompt-filter/newapi-secret", h.ReplacePromptFilterNewAPISecret)
+	api.GET("/prompt-filter/newapi-bindings", h.ListPromptFilterNewAPIBindings)
+	api.POST("/prompt-filter/newapi-bindings", h.CreatePromptFilterNewAPIBinding)
+	api.GET("/prompt-filter/newapi-bindings/:api_key_id", h.GetPromptFilterNewAPIBinding)
+	api.PATCH("/prompt-filter/newapi-bindings/:api_key_id", h.UpdatePromptFilterNewAPIBinding)
+	api.POST("/prompt-filter/newapi-bindings/:api_key_id/secret/generate", h.GeneratePromptFilterNewAPIBindingSecret)
+	api.PUT("/prompt-filter/newapi-bindings/:api_key_id/secret", h.ReplacePromptFilterNewAPIBindingSecret)
+	api.DELETE("/prompt-filter/newapi-bindings/:api_key_id", h.DeletePromptFilterNewAPIBinding)
 	api.POST("/prompt-filter/intelligence/run", h.RunPromptIntelligence)
 	api.GET("/prompt-filter/intelligence/history", h.ListPromptIntelligenceHistory)
-	api.POST("/prompt-filter/intelligence/rules", h.AddPromptIntelligenceCandidate)
+	api.GET("/prompt-filter/intelligence/candidates", h.ListPromptIntelligenceCandidates)
+	api.GET("/prompt-filter/intelligence/ai-providers", h.GetPromptIntelligenceAIProviders)
+	api.GET("/prompt-filter/intelligence/candidates/:id/evidence", h.GetPromptIntelligenceCandidateEvidence)
+	api.POST("/prompt-filter/intelligence/candidates/:id/analyze", h.AnalyzePromptIntelligenceCandidate)
+	api.POST("/prompt-filter/intelligence/candidates/:id/identity-updates/:evidence_id/apply", h.ApplyPromptIntelligenceIdentityUpdate)
+	api.POST("/prompt-filter/intelligence/candidates/:id/identity-updates/:evidence_id/rollback", h.RollbackPromptIntelligenceIdentityUpdate)
+	api.POST("/prompt-filter/intelligence/candidates/:id/draft", h.CreatePromptIntelligenceCandidateDraft)
+	api.POST("/prompt-filter/intelligence/candidates/:id/publish", h.PublishPromptIntelligenceCandidate)
+	api.POST("/prompt-filter/intelligence/candidates/:id/dismiss", h.DismissPromptIntelligenceCandidate)
 	api.GET("/models", h.ListModels)
 	api.POST("/models/sync", h.SyncModels)
 	api.POST("/codex-cli-version/sync", h.SyncCodexCLIVersion)
@@ -6945,6 +6964,7 @@ func (h *Handler) DeleteAPIKey(c *gin.Context) {
 		h.store.SetAPIKeyAllowedGroups(id, nil)
 		h.store.SetAPIKeyNoAffinityGroups(id, nil)
 		h.store.SetAPIKeyAllowedPlans(id, nil)
+		h.store.RemovePromptFilterNewAPIBinding(id)
 	}
 	h.invalidateAPIKeyRuntimeCaches(ctx, keyToInvalidate)
 	writeMessage(c, http.StatusOK, "已删除")
@@ -7169,6 +7189,7 @@ type updateSettingsReq struct {
 	PromptFilterMaxTextLength           *int     `json:"prompt_filter_max_text_length"`
 	PromptFilterSensitiveWords          *string  `json:"prompt_filter_sensitive_words"`
 	PromptFilterCustomPatterns          *string  `json:"prompt_filter_custom_patterns"`
+	PromptFilterCustomPatternsExpected  *string  `json:"prompt_filter_custom_patterns_expected"`
 	PromptFilterDisabledPatterns        *string  `json:"prompt_filter_disabled_patterns"`
 	PromptFilterReviewEnabled           *bool    `json:"prompt_filter_review_enabled"`
 	PromptFilterReviewAPIKey            *string  `json:"prompt_filter_review_api_key"`
@@ -7211,6 +7232,21 @@ type updateSettingsReq struct {
 	ResponseCacheLocalMaxEntryBytes     *int64   `json:"response_cache_local_max_entry_bytes"`
 	ResponseCacheReconstructMaxBytes    *int64   `json:"response_cache_reconstruct_max_bytes"`
 	ResponseCacheConfigGeneration       rawJSON  `json:"response_cache_config_generation"`
+}
+
+func updateSettingsHasFieldsOtherThanCustomPatterns(req updateSettingsReq) bool {
+	value := reflect.ValueOf(req)
+	typeOf := value.Type()
+	for index := 0; index < value.NumField(); index++ {
+		name := typeOf.Field(index).Name
+		if name == "PromptFilterCustomPatterns" || name == "PromptFilterCustomPatternsExpected" {
+			continue
+		}
+		if !value.Field(index).IsZero() {
+			return true
+		}
+	}
+	return false
 }
 
 type brandingResponse struct {
@@ -7909,11 +7945,114 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	})
 }
 
+func promptFilterCustomPatternSnapshotsEquivalent(leftRaw, rightRaw string) bool {
+	var leftUnknown, rightUnknown []map[string]any
+	if json.Unmarshal([]byte(leftRaw), &leftUnknown) != nil || json.Unmarshal([]byte(rightRaw), &rightUnknown) != nil || len(leftUnknown) != len(rightUnknown) {
+		return false
+	}
+	knownFields := []string{
+		"name", "pattern", "weight", "category", "strict", "signal_only", "enabled",
+		"all_patterns", "any_patterns", "exclude_patterns", "min_matches",
+	}
+	for index := range leftUnknown {
+		for _, field := range knownFields {
+			delete(leftUnknown[index], field)
+			delete(rightUnknown[index], field)
+		}
+		if !reflect.DeepEqual(leftUnknown[index], rightUnknown[index]) {
+			return false
+		}
+	}
+	left, leftErr := promptfilter.ParseCustomPatterns(leftRaw)
+	right, rightErr := promptfilter.ParseCustomPatterns(rightRaw)
+	if leftErr != nil || rightErr != nil || len(left) != len(right) {
+		return false
+	}
+	// Omitted enabled and explicit true are the same active runtime rule.
+	for index := range left {
+		if left[index].Enabled != nil && *left[index].Enabled {
+			left[index].Enabled = nil
+		}
+		if right[index].Enabled != nil && *right[index].Enabled {
+			right[index].Enabled = nil
+		}
+	}
+	return promptfilter.MarshalCustomPatterns(left) == promptfilter.MarshalCustomPatterns(right)
+}
+
+func (h *Handler) updatePromptFilterCustomPatterns(c *gin.Context, patterns []promptfilter.PatternConfig, expectedRaw string) {
+	ctx := c.Request.Context()
+	persisted, err := h.db.GetSystemSettings(ctx)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "读取现有 Prompt 自定义规则失败："+err.Error())
+		return
+	}
+	persistedRaw := "[]"
+	if persisted != nil {
+		persistedRaw = strings.TrimSpace(persisted.PromptFilterCustomPatterns)
+		if persistedRaw == "" {
+			persistedRaw = "[]"
+		}
+	}
+	if _, err := promptfilter.ParseCustomPatterns(persistedRaw); err != nil {
+		writeError(c, http.StatusInternalServerError, "数据库中的 Prompt 自定义规则无效，请先修复持久化配置")
+		return
+	}
+	expectedForCAS := strings.TrimSpace(expectedRaw)
+	if expectedForCAS == "" {
+		expectedForCAS = "[]"
+	}
+	// The settings response exposes canonical runtime JSON, while an older
+	// database may still contain equivalent pretty-printed JSON. Compare
+	// against the exact persisted bytes only when both decode to the same
+	// ordered snapshot; a real semantic difference must remain a conflict.
+	if promptFilterCustomPatternSnapshotsEquivalent(persistedRaw, expectedForCAS) {
+		expectedForCAS = persistedRaw
+	}
+	replacement := promptfilter.MarshalCustomPatterns(patterns)
+	swapped, err := h.db.CompareAndSwapPromptFilterCustomPatterns(ctx, expectedForCAS, replacement)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "保存 Prompt 自定义规则失败："+err.Error())
+		return
+	}
+	if !swapped {
+		// Refresh this replica before returning 409 so the frontend's immediate
+		// reload sees the authoritative snapshot without waiting for the periodic
+		// multi-replica synchronizer.
+		if latest, readErr := h.db.GetSystemSettings(ctx); readErr == nil && latest != nil {
+			if latestPatterns, parseErr := promptfilter.ParseCustomPatterns(latest.PromptFilterCustomPatterns); parseErr == nil {
+				latestCfg := h.store.GetPromptFilterConfig()
+				latestCfg.CustomPatterns = latestPatterns
+				h.store.SetPromptFilterConfig(latestCfg)
+			} else {
+				log.Printf("Prompt 自定义规则冲突后无法解析数据库快照: %v", parseErr)
+			}
+		} else if readErr != nil {
+			log.Printf("Prompt 自定义规则冲突后无法刷新数据库快照: %v", readErr)
+		}
+		writeError(c, http.StatusConflict, "Prompt 自定义规则已被其他页面或实例更新，请刷新后重试")
+		return
+	}
+	latestCfg := h.store.GetPromptFilterConfig()
+	latestCfg.CustomPatterns = patterns
+	h.store.SetPromptFilterConfig(latestCfg)
+	log.Printf("设置已更新: prompt_filter custom_patterns=%d", len(patterns))
+	h.GetSettings(c)
+}
+
 // UpdateSettings 更新系统设置（实时生效）
 func (h *Handler) UpdateSettings(c *gin.Context) {
 	var req updateSettingsReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if req.PromptFilterCustomPatternsExpected != nil && req.PromptFilterCustomPatterns == nil {
+		writeError(c, http.StatusBadRequest, "Prompt 自定义规则版本快照不能单独提交")
+		return
+	}
+	if req.PromptFilterCustomPatterns != nil && updateSettingsHasFieldsOtherThanCustomPatterns(req) {
+		writeError(c, http.StatusBadRequest, "Prompt 自定义规则必须单独保存，请刷新后从规则页面重试")
 		return
 	}
 	h.settingsUpdateMu.Lock()
@@ -7924,16 +8063,32 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 	var submittedPromptFilterCustomPatterns []promptfilter.PatternConfig
 	var promptFilterPatternQuarantines []promptfilter.PatternQuarantine
+	var expectedPromptFilterCustomPatterns string
 	if req.PromptFilterCustomPatterns != nil {
 		patterns, err := promptfilter.ParseCustomPatterns(*req.PromptFilterCustomPatterns)
 		if err != nil {
 			writeError(c, http.StatusBadRequest, "Prompt 检查自定义规则 JSON 无效: "+err.Error())
 			return
 		}
-		submittedPromptFilterCustomPatterns, promptFilterPatternQuarantines = promptfilter.SanitizeCustomPatterns(patterns)
-		for _, item := range promptFilterPatternQuarantines {
-			log.Printf("prompt filter: submitted custom rule quarantined index=%d name=%q code=%s message=%s", item.Index, item.Name, item.Code, item.Message)
+		if err := promptfilter.ValidateCustomPatterns(patterns); err != nil {
+			writeError(c, http.StatusBadRequest, "Prompt 检查自定义规则未通过安全校验: "+err.Error())
+			return
 		}
+		submittedPromptFilterCustomPatterns = patterns
+		if req.PromptFilterCustomPatternsExpected == nil {
+			writeError(c, http.StatusConflict, "Prompt 自定义规则缺少版本快照，请刷新页面后重试")
+			return
+		}
+		expectedPromptFilterCustomPatterns = strings.TrimSpace(*req.PromptFilterCustomPatternsExpected)
+		if expectedPromptFilterCustomPatterns == "" {
+			expectedPromptFilterCustomPatterns = "[]"
+		}
+		if _, err := promptfilter.ParseCustomPatterns(expectedPromptFilterCustomPatterns); err != nil {
+			writeError(c, http.StatusBadRequest, "Prompt 自定义规则版本快照无效: "+err.Error())
+			return
+		}
+		h.updatePromptFilterCustomPatterns(c, submittedPromptFilterCustomPatterns, expectedPromptFilterCustomPatterns)
+		return
 	}
 	if req.AutoPause5hThreshold != nil {
 		if err := validateAutoPauseThreshold("auto_pause_5h_threshold", *req.AutoPause5hThreshold); err != nil {
@@ -8688,7 +8843,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 	promptFilterCfg := h.store.GetPromptFilterConfig()
 	promptFilterAdvancedRaw := h.store.GetPromptFilterAdvancedConfig()
-	promptFilterNewAPISecret := promptFilterCfg.Advanced.NewAPI.Secret
 	// The database is authoritative for the persisted JSON in multi-instance
 	// deployments. Invalid persisted JSON must not replace the Store's last
 	// valid raw/effective pair.
@@ -8696,7 +8850,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		if document, err := promptfilter.ParseAdvancedConfigDocument(existingSettings.PromptFilterAdvancedConfig); err == nil {
 			promptFilterAdvancedRaw = document.Raw
 			promptFilterCfg.Advanced = document.Effective
-			promptFilterCfg.Advanced.NewAPI.Secret = promptFilterNewAPISecret
 		}
 	}
 	promptFilterChanged := false
@@ -8728,7 +8881,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 		promptFilterAdvancedRaw = document.Raw
 		promptFilterCfg.Advanced = document.Effective
-		promptFilterCfg.Advanced.NewAPI.Secret = promptFilterNewAPISecret
 		promptFilterChanged = true
 	}
 	if req.PromptFilterLogMatches != nil {
@@ -8783,6 +8935,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		promptFilterChanged = true
 	}
 	if promptFilterChanged {
+		promptFilterCfg.Review.Adapter = promptFilterCfg.Advanced.ReviewAdapter
 		promptFilterCfg = promptfilter.NormalizeConfig(promptFilterCfg)
 		if promptFilterCfg.Review.Enabled && strings.TrimSpace(promptFilterCfg.Review.APIKey) == "" {
 			writeError(c, http.StatusBadRequest, "Prompt 检查二次审查已启用时必须填写审查 API Key")
@@ -8949,6 +9102,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterMaxTextLength:           promptFilterCfg.MaxTextLength,
 		PromptFilterSensitiveWords:          promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:          promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
+		PreservePromptFilterCustomPatterns:  req.PromptFilterCustomPatterns == nil,
 		PromptFilterDisabledPatterns:        promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
 		PromptFilterReviewEnabled:           promptFilterCfg.Review.Enabled,
 		PromptFilterReviewAPIKey:            promptFilterCfg.Review.APIKey,
@@ -9002,6 +9156,23 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 	} else {
 		if promptFilterChanged {
+			if req.PromptFilterCustomPatterns == nil {
+				// The database preserved this field atomically because the request did
+				// not edit rules. Reload the committed value so a different replica's
+				// just-published rule is not temporarily replaced in this Store by the
+				// older snapshot used to edit unrelated Prompt settings.
+				if persisted, readErr := h.db.GetSystemSettings(c.Request.Context()); readErr == nil && persisted != nil {
+					if patterns, parseErr := promptfilter.ParseCustomPatterns(persisted.PromptFilterCustomPatterns); parseErr == nil {
+						promptFilterCfg.CustomPatterns = patterns
+					} else {
+						log.Printf("无法解析数据库中的 Prompt 自定义规则，保留当前运行时规则: %v", parseErr)
+						promptFilterCfg.CustomPatterns = h.store.GetPromptFilterConfig().CustomPatterns
+					}
+				} else {
+					log.Printf("无法重新读取 Prompt 自定义规则，保留当前运行时规则: %v", readErr)
+					promptFilterCfg.CustomPatterns = h.store.GetPromptFilterConfig().CustomPatterns
+				}
+			}
 			if err := h.store.SetPromptFilterConfigWithAdvancedRaw(promptFilterCfg, promptFilterAdvancedRaw); err != nil {
 				// The document was validated before persistence, so reaching this
 				// branch indicates an internal invariant violation. Keep the last

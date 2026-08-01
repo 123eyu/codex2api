@@ -33,6 +33,7 @@ import type {
   CreateAccountResponse,
   CreateAPIKeyResponse,
   CreateAPIKeyRequest,
+  CreatePromptFilterNewAPIBindingRequest,
   FetchOpenAIResponsesModelsRequest,
   FetchOpenAIResponsesModelsResponse,
   CreateImageJobPayload,
@@ -54,9 +55,15 @@ import type {
   OpsOverviewResponse,
   PromptFilterLog,
   PromptFilterLogsResponse,
+	PromptPolicyIncidentDetailResponse,
+	PromptPolicyIncidentsResponse,
+  PromptFilterNewAPIBinding,
+  PromptFilterNewAPIBindingsResponse,
   PromptFilterRulePatternTestResponse,
   PromptFilterRulesResponse,
   PromptFilterTestResponse,
+  PromptReviewTestRequest,
+  PromptReviewTestResponse,
   PublicAPIKeyUsageResponse,
   RecycleBinAccountsResponse,
   ResetCreditsDetailResponse,
@@ -71,6 +78,7 @@ import type {
   ObservedInstructionsResponse,
   UpdateAccountSchedulerRequest,
   UpdateAPIKeyRequest,
+  UpdatePromptFilterNewAPIBindingRequest,
   UpdateOAuthAccountRequest,
   UpdateOpenAIResponsesAccountRequest,
   UsageLogsResponse,
@@ -113,6 +121,16 @@ export function resetAdminAuthState() {
 
 // RequestInit 扩展:timeoutMs 可选,开启后到时自动 abort 请求。
 type RequestOptions = RequestInit & { timeoutMs?: number }
+
+export class AdminAPIError extends Error {
+  readonly status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'AdminAPIError'
+    this.status = status
+  }
+}
 
 function extractAdminErrorMessage(body: string, status: number): string {
   if (!body.trim()) {
@@ -174,7 +192,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     if (res.status === 401) {
       resetAdminAuthState()
     }
-    throw new Error(extractAdminErrorMessage(body, res.status))
+    throw new AdminAPIError(res.status, extractAdminErrorMessage(body, res.status))
   }
 
   return (await res.json()) as T
@@ -584,9 +602,32 @@ export const api = {
   updateAccountCredit: (id: number, data: { credit_enabled: boolean; credit_skip_usage_window: boolean }) =>
     request<MessageResponse>(`/accounts/${id}/credit`, { method: 'PATCH', body: JSON.stringify(data) }),
   getHealth: () => request<HealthResponse>('/health'),
-  getPromptFilterNewAPISecret: () => request<{ configured: boolean; source: 'none' | 'database' | 'environment'; masked: string; secret?: string }>('/prompt-filter/newapi-secret'),
-  generatePromptFilterNewAPISecret: () => request<{ configured: boolean; source: string; masked: string; secret: string }>('/prompt-filter/newapi-secret/generate', { method: 'POST' }),
-  replacePromptFilterNewAPISecret: (secret: string) => request<{ configured: boolean; source: string; masked: string; secret: string }>('/prompt-filter/newapi-secret', { method: 'PUT', body: JSON.stringify({ secret }) }),
+  getPromptFilterNewAPIBindings: () =>
+    request<PromptFilterNewAPIBindingsResponse>('/prompt-filter/newapi-bindings'),
+  getPromptFilterNewAPIBinding: (apiKeyId: number) =>
+    request<PromptFilterNewAPIBinding>(`/prompt-filter/newapi-bindings/${apiKeyId}`),
+  createPromptFilterNewAPIBinding: (data: CreatePromptFilterNewAPIBindingRequest) =>
+    request<PromptFilterNewAPIBinding>('/prompt-filter/newapi-bindings', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updatePromptFilterNewAPIBinding: (apiKeyId: number, data: UpdatePromptFilterNewAPIBindingRequest) =>
+    request<PromptFilterNewAPIBinding>(`/prompt-filter/newapi-bindings/${apiKeyId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  generatePromptFilterNewAPIBindingSecret: (apiKeyId: number, graceSeconds: number) =>
+    request<PromptFilterNewAPIBinding>(`/prompt-filter/newapi-bindings/${apiKeyId}/secret/generate`, {
+      method: 'POST',
+      body: JSON.stringify({ grace_seconds: graceSeconds }),
+    }),
+  replacePromptFilterNewAPIBindingSecret: (apiKeyId: number, secret: string, graceSeconds: number) =>
+    request<PromptFilterNewAPIBinding>(`/prompt-filter/newapi-bindings/${apiKeyId}/secret`, {
+      method: 'PUT',
+      body: JSON.stringify({ secret, grace_seconds: graceSeconds }),
+    }),
+  deletePromptFilterNewAPIBinding: (apiKeyId: number) =>
+    request<MessageResponse>(`/prompt-filter/newapi-bindings/${apiKeyId}`, { method: 'DELETE' }),
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
   getSystemUpdate: () => request<SystemUpdateInfo>('/system/update', { timeoutMs: 20_000 }),
@@ -809,7 +850,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  getPromptFilterLogs: (params: number | { page?: number; pageSize?: number; limit?: number; source?: string; action?: string; endpoint?: string; model?: string; apiKeyId?: string; q?: string } = 100) => {
+  getPromptFilterLogs: (params: number | { page?: number; pageSize?: number; limit?: number; source?: string; action?: string; endpoint?: string; model?: string; apiKeyId?: string; q?: string; reviewed?: boolean } = 100) => {
     const search = new URLSearchParams()
     if (typeof params === 'number') {
       search.set('limit', String(params))
@@ -823,6 +864,7 @@ export const api = {
       if (params.model) search.set('model', params.model)
       if (params.apiKeyId) search.set('api_key_id', params.apiKeyId)
       if (params.q) search.set('q', params.q)
+      if (typeof params.reviewed === 'boolean') search.set('reviewed', String(params.reviewed))
     }
     return request<PromptFilterLogsResponse>(`/prompt-filter/logs?${search.toString()}`)
   },
@@ -834,10 +876,48 @@ export const api = {
     if (params.endpoint) search.set('endpoint', params.endpoint)
     if (params.apiKeyId) search.set('api_key_id', String(params.apiKeyId))
     if (params.source) search.set('source', params.source)
-    return request<{ found: boolean; log: PromptFilterLog | null }>(`/prompt-filter/logs/match?${search.toString()}`)
-  },
+		return request<{ found: boolean; log: PromptFilterLog | null; legacy_inferred: boolean }>(`/prompt-filter/logs/match?${search.toString()}`)
+	},
+	getPromptPolicyIncidents: (params: { page?: number; pageSize?: number; endpoint?: string; model?: string; apiKeyId?: string; accountId?: string; evaluationState?: string; outcome?: string; localComparison?: string; localMiss?: boolean; q?: string } = {}) => {
+		const search = new URLSearchParams()
+		search.set('page', String(params.page || 1))
+		search.set('page_size', String(params.pageSize || 20))
+		if (params.endpoint) search.set('endpoint', params.endpoint)
+		if (params.model) search.set('model', params.model)
+		if (params.apiKeyId) search.set('api_key_id', params.apiKeyId)
+		if (params.accountId) search.set('account_id', params.accountId)
+		if (params.evaluationState) search.set('evaluation_state', params.evaluationState)
+		if (params.outcome) search.set('outcome', params.outcome)
+		if (params.localComparison) search.set('local_comparison', params.localComparison)
+		if (params.localMiss !== undefined) search.set('local_miss', String(params.localMiss))
+		if (params.q) search.set('q', params.q)
+		return request<PromptPolicyIncidentsResponse>(`/prompt-policy/incidents?${search.toString()}`)
+	},
+	getPromptPolicyIncident: (incidentId: string) =>
+		request<PromptPolicyIncidentDetailResponse>(`/prompt-policy/incidents/${encodeURIComponent(incidentId)}`),
+	getPromptRiskProfiles: (params: { page?: number; pageSize?: number; subjectType?: string; platform?: string; riskLevel?: string; apiKeyId?: string; accountId?: string; minScore?: string; q?: string } = {}) => {
+		const search = new URLSearchParams()
+		search.set('page', String(params.page || 1))
+		search.set('page_size', String(params.pageSize || 20))
+		if (params.subjectType) search.set('subject_type', params.subjectType)
+		if (params.platform) search.set('platform', params.platform)
+		if (params.riskLevel) search.set('risk_level', params.riskLevel)
+		if (params.apiKeyId) search.set('api_key_id', params.apiKeyId)
+		if (params.accountId) search.set('account_id', params.accountId)
+		if (params.minScore) search.set('min_score', params.minScore)
+		if (params.q) search.set('q', params.q)
+		return request<import('./types').PromptRiskProfilesResponse>(`/prompt-policy/risk-profiles?${search.toString()}`)
+	},
+	getPromptRiskProfile: (subjectType: string, subjectKey: string, eventPage = 1, eventPageSize = 20) =>
+		request<import('./types').PromptRiskProfileDetailResponse>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}?event_page=${eventPage}&event_page_size=${eventPageSize}`),
+	upsertPromptRiskTrust: (subjectType: string, subjectKey: string, data: { duration_hours: number; risk_threshold: number; reason: string }) =>
+		request<{ policy: import('./types').PromptRiskTrustPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/trust`, { method: 'PUT', body: JSON.stringify(data) }),
+	revokePromptRiskTrust: (subjectType: string, subjectKey: string) =>
+		request<{ policy: import('./types').PromptRiskTrustPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/trust`, { method: 'DELETE' }),
   testPromptFilter: (data: { text: string; endpoint?: string; model?: string }) =>
     request<PromptFilterTestResponse>('/prompt-filter/test', { method: 'POST', body: JSON.stringify(data) }),
+  testPromptReview: (data: PromptReviewTestRequest) =>
+    request<PromptReviewTestResponse>('/prompt-filter/review/test', { method: 'POST', body: JSON.stringify(data) }),
   testPromptFilterRulePattern: (data: { pattern: string; text: string }) =>
     request<PromptFilterRulePatternTestResponse>('/prompt-filter/rules/test', { method: 'POST', body: JSON.stringify(data) }),
   getPromptFilterRules: () =>
@@ -846,8 +926,31 @@ export const api = {
     request<import('./types').PromptIntelligenceRun>('/prompt-filter/intelligence/run', { method: 'POST' }),
   getPromptIntelligenceHistory: (page = 1, pageSize = 20) =>
     request<import('./types').PromptIntelligenceHistoryResponse>(`/prompt-filter/intelligence/history?page=${page}&page_size=${pageSize}`),
-  addPromptIntelligenceRule: (candidate: import('./types').PromptIntelligenceCandidate) =>
-    request<{ added: number; updated: number }>('/prompt-filter/intelligence/rules', { method: 'POST', body: JSON.stringify(candidate) }),
+  getPromptIntelligenceCandidates: (params: { page?: number; pageSize?: number; status?: string; source?: string; q?: string } = {}) => {
+    const search = new URLSearchParams()
+    search.set('page', String(params.page || 1))
+    search.set('page_size', String(params.pageSize || 100))
+    if (params.status) search.set('status', params.status)
+    if (params.source) search.set('source', params.source)
+    if (params.q) search.set('q', params.q)
+    return request<import('./types').PromptIntelligenceCandidatesResponse>(`/prompt-filter/intelligence/candidates?${search.toString()}`)
+  },
+  getPromptIntelligenceCandidateEvidence: (id: number) =>
+    request<import('./types').PromptIntelligenceEvidenceResponse>(`/prompt-filter/intelligence/candidates/${id}/evidence`),
+  getPromptIntelligenceAIProviders: () =>
+    request<import('./types').PromptIntelligenceAIProvidersResponse>('/prompt-filter/intelligence/ai-providers'),
+  analyzePromptIntelligenceCandidate: (id: number, data: import('./types').PromptIntelligenceAIAnalysisRequest) =>
+    request<import('./types').PromptIntelligenceAIAnalysisResponse>(`/prompt-filter/intelligence/candidates/${id}/analyze`, { method: 'POST', body: JSON.stringify(data) }),
+  applyPromptIntelligenceIdentityUpdate: (candidateId: number, evidenceId: number) =>
+    request<{ identity_update: import('./types').PromptIdentityUpdateResult }>(`/prompt-filter/intelligence/candidates/${candidateId}/identity-updates/${evidenceId}/apply`, { method: 'POST' }),
+  rollbackPromptIntelligenceIdentityUpdate: (candidateId: number, evidenceId: number) =>
+    request<{ identity_update: import('./types').PromptIdentityUpdateResult }>(`/prompt-filter/intelligence/candidates/${candidateId}/identity-updates/${evidenceId}/rollback`, { method: 'POST' }),
+  createPromptIntelligenceCandidateDraft: (id: number, data: import('./types').PromptIntelligenceRuleDraft) =>
+    request<{ candidate: import('./types').PromptIntelligenceCandidate; source_candidate_id: number }>(`/prompt-filter/intelligence/candidates/${id}/draft`, { method: 'POST', body: JSON.stringify(data) }),
+  publishPromptIntelligenceCandidate: (id: number) =>
+    request<{ candidate: import('./types').PromptIntelligenceCandidate; added: number; updated: number }>(`/prompt-filter/intelligence/candidates/${id}/publish`, { method: 'POST' }),
+  dismissPromptIntelligenceCandidate: (id: number) =>
+    request<import('./types').PromptIntelligenceCandidate>(`/prompt-filter/intelligence/candidates/${id}/dismiss`, { method: 'POST' }),
   getModels: () => request<ModelsResponse>('/models'),
   syncModels: () => request<ModelSyncResponse>('/models/sync', { method: 'POST' }),
   syncCodexCLIVersion: () =>

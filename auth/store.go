@@ -2465,6 +2465,10 @@ type Store struct {
 	apiKeyAllowedPlans                 map[int64][]string
 	apiKeyAllowedPlanSets              map[int64]map[string]struct{}
 	apiKeyUpstreamChannels             map[int64]string
+	promptFilterNewAPIBindingsMu       sync.RWMutex
+	promptFilterNewAPIBindings         map[int64]database.PromptFilterNewAPIBinding
+	promptRiskTrustMu                  sync.RWMutex
+	promptRiskTrustPolicies            map[string]database.PromptRiskTrustPolicy
 	usageProbeMu                       sync.RWMutex
 	usageProbe                         func(context.Context, *Account) error
 	usageProbeBatch                    atomic.Bool
@@ -2971,18 +2975,19 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	}
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	s := &Store{
-		globalProxy:             settings.ProxyURL,
-		maxConcurrency:          int64(settings.MaxConcurrency),
-		testConcurrency:         int64(settings.TestConcurrency),
-		db:                      db,
-		tokenCache:              tc,
-		backgroundRefreshWakeCh: make(chan struct{}, 1),
-		boundaryProbeWakeCh:     make(chan struct{}, 1),
-		stopCh:                  make(chan struct{}),
-		backgroundCtx:           backgroundCtx,
-		backgroundCancel:        backgroundCancel,
-		proxyPoolEnabled:        settings.ProxyPoolEnabled,
-		sessionBindings:         make(map[string]sessionAffinity),
+		globalProxy:                settings.ProxyURL,
+		maxConcurrency:             int64(settings.MaxConcurrency),
+		testConcurrency:            int64(settings.TestConcurrency),
+		db:                         db,
+		tokenCache:                 tc,
+		backgroundRefreshWakeCh:    make(chan struct{}, 1),
+		boundaryProbeWakeCh:        make(chan struct{}, 1),
+		stopCh:                     make(chan struct{}),
+		backgroundCtx:              backgroundCtx,
+		backgroundCancel:           backgroundCancel,
+		proxyPoolEnabled:           settings.ProxyPoolEnabled,
+		sessionBindings:            make(map[string]sessionAffinity),
+		promptFilterNewAPIBindings: make(map[int64]database.PromptFilterNewAPIBinding),
 	}
 	if db != nil {
 		s.proxyPoolLoader = db.ListEnabledProxies
@@ -3030,11 +3035,6 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		s.reasoningEffortModels.Store(settings.ReasoningEffortModels)
 	}
 	promptFilterCfg, promptFilterAdvancedRaw := promptFilterConfigFromSettings(settings)
-	if s.db != nil {
-		if secret, err := s.db.GetPromptFilterNewAPISecret(context.Background()); err == nil {
-			promptFilterCfg.Advanced.NewAPI.Secret = secret
-		}
-	}
 	if err := s.SetPromptFilterConfigWithAdvancedRaw(promptFilterCfg, promptFilterAdvancedRaw); err != nil {
 		// promptFilterAdvancedRaw is already validated by
 		// promptFilterConfigFromSettings. Keep a defensive fallback so a corrupt
@@ -3812,6 +3812,9 @@ func (s *Store) Init(ctx context.Context) error {
 	// 1. 从数据库加载账号到内存
 	if err := s.loadFromDB(ctx); err != nil {
 		return err
+	}
+	if err := s.LoadPromptFilterNewAPIBindings(ctx); err != nil {
+		return fmt.Errorf("加载 NewAPI 平台绑定失败: %w", err)
 	}
 
 	if len(s.accounts) == 0 {
@@ -5602,6 +5605,7 @@ func promptFilterConfigFromSettings(settings *database.SystemSettings) (promptfi
 		Model:          settings.PromptFilterReviewModel,
 		TimeoutSeconds: settings.PromptFilterReviewTimeoutSeconds,
 		FailClosed:     settings.PromptFilterReviewFailClosed,
+		Adapter:        cfg.Advanced.ReviewAdapter,
 	}
 	return promptfilter.NormalizeConfig(cfg), advancedRaw
 }

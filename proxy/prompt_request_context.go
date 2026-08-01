@@ -7,9 +7,11 @@ import (
 
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 const promptRequestSecurityContextKey = "prompt_filter_request_security_context"
+const promptPolicyRequestCorrelationContextKey = "prompt_policy_request_correlation_id"
 
 // promptRequestSecurityContext owns request-local prompt security state. It is
 // deliberately separate from the verified NewAPI identity keys because an HTTP
@@ -40,8 +42,11 @@ func promptRequestSecurityState(c *gin.Context) *promptRequestSecurityContext {
 	return state
 }
 
-// resetPromptRequestSecurityFrame starts a fresh per-frame config/digest scope
-// without touching connection-level NewAPI identity verification.
+// resetPromptRequestSecurityFrame starts a fresh per-frame config/digest scope.
+// The verified NewAPI identity remains connection-scoped, while the WebSocket
+// turn boundary first refreshes/revokes its API-key binding. This keeps policy
+// changes hot without letting a removed tenant or expired secret survive on an
+// old connection.
 func resetPromptRequestSecurityFrame(c *gin.Context) {
 	if c != nil {
 		c.Set(promptRequestSecurityContextKey, &promptRequestSecurityContext{})
@@ -60,6 +65,15 @@ func (h *Handler) promptFilterConfigForRequest(c *gin.Context) promptfilter.Conf
 		return state.config
 	}
 	state.config = h.store.GetPromptFilterConfigSnapshot()
+	// Signed NewAPI identity is available only through an explicit API-key
+	// binding. Ignore any retired persisted enablement value.
+	state.config.Advanced.NewAPI.Enabled = false
+	if binding, bound := h.resolvePromptFilterNewAPIBinding(c); bound {
+		// A key binding is only the identity isolation boundary. Prompt filtering
+		// mode and profile remain owned by the unified GuardPipeline configuration;
+		// an identity binding must never weaken or strengthen request enforcement.
+		state.config.Advanced.NewAPI.Enabled = binding.Enabled
+	}
 	state.configOwner = h
 	state.configReady = true
 	return state.config
@@ -69,7 +83,11 @@ func (h *Handler) promptFilterConfigForRequest(c *gin.Context) promptfilter.Conf
 // reference only when signed NewAPI verification can need the pre-mapping body.
 // Callers must treat the buffer as immutable; body rewrites use a new slice.
 func (h *Handler) capturePromptRequestIngress(c *gin.Context, body []byte) {
-	if h == nil || h.store == nil || c == nil {
+	if c == nil {
+		return
+	}
+	ensurePromptPolicyRequestCorrelationID(c)
+	if h == nil || h.store == nil {
 		return
 	}
 	cfg := h.promptFilterConfigForRequest(c)
@@ -77,6 +95,29 @@ func (h *Handler) capturePromptRequestIngress(c *gin.Context, body []byte) {
 		return
 	}
 	setIngressRequestBodyIfAbsent(c, body)
+}
+
+func ensurePromptPolicyRequestCorrelationID(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if raw, exists := c.Get(promptPolicyRequestCorrelationContextKey); exists {
+		if value, ok := raw.(string); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	value := uuid.NewString()
+	c.Set(promptPolicyRequestCorrelationContextKey, value)
+	return value
+}
+
+func resetPromptPolicyRequestCorrelationID(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	value := uuid.NewString()
+	c.Set(promptPolicyRequestCorrelationContextKey, value)
+	return value
 }
 
 func sameRequestBodyBuffer(left, right []byte) bool {
