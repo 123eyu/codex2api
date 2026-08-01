@@ -162,7 +162,7 @@ const FORMAT_OPTIONS = [
   { label: 'JPEG', value: 'jpeg' },
 ]
 
-const UPSCALE_VALUES = ['', '2k', '4k'] as const
+const UPSCALE_VALUES = ['', 'none', '2k', '4k'] as const
 
 const STYLE_PRESETS = [
   {
@@ -1149,7 +1149,8 @@ export default function ImageStudio() {
     { label: t('images.backgroundOptions.transparent'), value: 'transparent' },
   ], [t])
   const upscaleOptions = useMemo(() => [
-    { label: t('images.upscaleOptions.none'), value: '' },
+    { label: t('images.upscaleOptions.auto'), value: '' },
+    { label: t('images.upscaleOptions.none'), value: 'none' },
     { label: t('images.upscaleOptions.2k'), value: '2k' },
     { label: t('images.upscaleOptions.4k'), value: '4k' },
   ], [t])

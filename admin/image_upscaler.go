@@ -17,25 +17,25 @@ import (
 const maxImageUpscalerResponseBytes = 64 << 20
 
 func upscaleImageBytes(ctx context.Context, imageBytes []byte, scale, requestedSize string) ([]byte, string, string, error) {
-	endpoint := strings.TrimSpace(os.Getenv("IMAGE_UPSCALER_ENDPOINT"))
-	if endpoint == "" {
-		data, contentType, err := imageproc.DoUpscale(imageBytes, scale)
-		return data, contentType, "catmull-rom", err
-	}
-
+	// Both backends resolve the same target box first. The requested size is
+	// the authoritative target: asking for 2048x2048 must not produce the 2K
+	// tier's 2560 long side just because that is how the tier is named.
 	width, height := imageDimensions(imageBytes)
 	targetLongSide := imageproc.UpscaleLongSide(scale)
 	if width <= 0 || height <= 0 || targetLongSide <= 0 {
 		return nil, "", "", fmt.Errorf("image upscaler: invalid source or target dimensions")
 	}
-	longSide := width
-	if height > longSide {
-		longSide = height
+	targetWidth, targetHeight, exactTarget := imageUpscaleTargetDimensions(width, height, targetLongSide, requestedSize)
+
+	endpoint := strings.TrimSpace(os.Getenv("IMAGE_UPSCALER_ENDPOINT"))
+	if endpoint == "" {
+		data, contentType, err := imageproc.DoUpscaleTo(imageBytes, targetWidth, targetHeight, exactTarget)
+		return data, contentType, "catmull-rom", err
 	}
-	if longSide >= targetLongSide {
+
+	if width >= targetWidth && height >= targetHeight {
 		return nil, "", "realesrgan", nil
 	}
-	targetWidth, targetHeight, exactTarget := imageUpscaleTargetDimensions(width, height, targetLongSide, requestedSize)
 
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {

@@ -1,12 +1,16 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +86,9 @@ func TestNormalizeImageJobUpscale(t *testing.T) {
 		{name: "model alias", model: "gpt-image-2-4k", want: "4k"},
 		{name: "native size", model: "gpt-image-2", size: "1536x1024", want: ""},
 		{name: "invalid explicit", model: "gpt-image-2", upscale: "8k", wantErr: true},
+		{name: "2k square dimensions", model: "gpt-image-2", size: "2048x2048", want: "2k"},
+		{name: "explicit none opts out of size inference", model: "gpt-image-2", size: "2048x2048", upscale: "none", want: ""},
+		{name: "explicit off opts out of model alias", model: "gpt-image-2-4k", upscale: "OFF", want: ""},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -364,7 +371,23 @@ func TestSaveImageJobAssetsPreservesOriginalWhenUpscalerUnavailable(t *testing.T
 	}
 }
 
-func TestSaveImageJobAssetsRejectsInvalidUpscaledOutput(t *testing.T) {
+func TestUpscaleImageBytesHonoursRequestedSizeOnLocalBackend(t *testing.T) {
+	t.Setenv("IMAGE_UPSCALER_ENDPOINT", "")
+
+	data, contentType, method, err := upscaleImageBytes(context.Background(), squarePNG(t, 1024), "2k", "2048x2048")
+	if err != nil {
+		t.Fatalf("upscaleImageBytes returned error: %v", err)
+	}
+	if contentType != "image/png" || method != "catmull-rom" {
+		t.Fatalf("contentType = %q, method = %q", contentType, method)
+	}
+	width, height := imageDimensions(data)
+	if width != 2048 || height != 2048 {
+		t.Fatalf("local upscale produced %dx%d, want the requested 2048x2048", width, height)
+	}
+}
+
+func TestSaveImageJobAssetsPreservesOriginalWhenUpscalerReturnsInvalidImage(t *testing.T) {
 	db := newTestAdminDB(t)
 	dir := t.TempDir()
 	t.Setenv("IMAGE_ASSET_DIR", dir)
@@ -379,25 +402,35 @@ func TestSaveImageJobAssetsRejectsInvalidUpscaledOutput(t *testing.T) {
 	defer server.Close()
 	t.Setenv("IMAGE_UPSCALER_ENDPOINT", server.URL)
 
-	jobID, err := db.InsertImageGenerationJob(context.Background(), database.ImageGenerationJobInput{Prompt: "invalid upscale"})
+	jobID, err := db.InsertImageGenerationJob(context.Background(), database.ImageGenerationJobInput{Prompt: "invalid upscale batch"})
 	if err != nil {
 		t.Fatalf("InsertImageGenerationJob: %v", err)
 	}
+	// Two outputs so a failure on one cannot be confused with an empty batch.
+	encoded := base64.StdEncoding.EncodeToString(tinyPNG(t))
 	raw, err := json.Marshal(map[string]any{
-		"data": []map[string]string{{"b64_json": base64.StdEncoding.EncodeToString(tinyPNG(t))}},
+		"data": []map[string]string{{"b64_json": encoded}, {"b64_json": encoded}},
 	})
 	if err != nil {
 		t.Fatalf("marshal response: %v", err)
 	}
 
 	assets, warnings, err := (&Handler{db: db}).saveImageJobAssets(context.Background(), jobID, imageGenerationJobPayload{
-		Model: "gpt-image-2", Upscale: "2k", OutputFormat: "png",
+		Model: "gpt-image-2", Upscale: "2k", OutputFormat: "png", N: 2,
 	}, raw)
-	if !errors.Is(err, errInvalidUpscaledImage) {
-		t.Fatalf("error = %v, want invalid upscaled image", err)
+	if err != nil {
+		t.Fatalf("saveImageJobAssets returned error: %v", err)
 	}
-	if len(assets) != 0 || len(warnings) != 0 {
-		t.Fatalf("assets=%#v warnings=%#v", assets, warnings)
+	if len(assets) != 2 {
+		t.Fatalf("assets = %d, want both already-billed outputs preserved", len(assets))
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("warnings = %#v, want one degraded warning per output", warnings)
+	}
+	for _, warning := range warnings {
+		if !strings.Contains(warning, "original image preserved") {
+			t.Fatalf("warning = %q, want the original-preserved notice", warning)
+		}
 	}
 }
 
@@ -985,6 +1018,21 @@ func TestExternalImageJobRouteFetchesPublicInputImageAsDataURL(t *testing.T) {
 	if len(params.InputImages) != 1 || params.InputImages[0] != want {
 		t.Fatalf("input_images = %#v, want fetched data URL", params.InputImages)
 	}
+}
+
+func squarePNG(t *testing.T, side int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, side, side))
+	for y := 0; y < side; y++ {
+		for x := 0; x < side; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(x % 255), G: uint8(y % 255), B: 90, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func tinyPNG(t *testing.T) []byte {

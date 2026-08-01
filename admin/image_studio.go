@@ -896,12 +896,19 @@ func (h *Handler) runImageGenerationJob(jobID int64, req imageGenerationJobPaylo
 	)
 
 	assets, assetWarnings, err := h.saveImageJobAssets(ctx, jobID, req, responseJSON)
-	if err != nil {
-		log.Printf("[image-studio] job=%d failed duration=%s stage=save_assets error=%s", jobID, imageLogDuration(durationMs), security.SanitizeLog(err.Error()))
-		_ = h.db.MarkImageJobFailed(ctx, jobID, err.Error(), durationMs)
-		return
-	}
 	partialErrors = append(partialErrors, assetWarnings...)
+	if err != nil {
+		if len(assets) == 0 {
+			log.Printf("[image-studio] job=%d failed duration=%s stage=save_assets error=%s", jobID, imageLogDuration(durationMs), security.SanitizeLog(err.Error()))
+			_ = h.db.MarkImageJobFailed(ctx, jobID, err.Error(), durationMs)
+			return
+		}
+		// Outputs saved before the failure are already stored and billed.
+		// Report the failure as a warning so they stay reachable instead of
+		// becoming orphaned files behind a failed job.
+		partialErrors = append(partialErrors, err.Error())
+		log.Printf("[image-studio] job=%d partial_save_assets duration=%s saved=%d error=%s", jobID, imageLogDuration(durationMs), len(assets), security.SanitizeLog(err.Error()))
+	}
 	if len(assets) == 0 {
 		log.Printf("[image-studio] job=%d failed duration=%s stage=save_assets error=%s", jobID, imageLogDuration(durationMs), "上游未返回图片")
 		_ = h.db.MarkImageJobFailed(ctx, jobID, "上游未返回图片", durationMs)
@@ -1045,12 +1052,16 @@ func (h *Handler) runImageEditJob(jobID int64, req imageGenerationJobPayload, ap
 	)
 
 	assets, assetWarnings, err := h.saveImageJobAssets(ctx, jobID, req, responseJSON)
-	if err != nil {
-		log.Printf("[image-studio] job=%d failed mode=edit duration=%s stage=save_assets error=%s", jobID, imageLogDuration(durationMs), security.SanitizeLog(err.Error()))
-		_ = h.db.MarkImageJobFailed(ctx, jobID, err.Error(), durationMs)
-		return
-	}
 	partialErrors = append(partialErrors, assetWarnings...)
+	if err != nil {
+		if len(assets) == 0 {
+			log.Printf("[image-studio] job=%d failed mode=edit duration=%s stage=save_assets error=%s", jobID, imageLogDuration(durationMs), security.SanitizeLog(err.Error()))
+			_ = h.db.MarkImageJobFailed(ctx, jobID, err.Error(), durationMs)
+			return
+		}
+		partialErrors = append(partialErrors, err.Error())
+		log.Printf("[image-studio] job=%d partial_save_assets mode=edit duration=%s saved=%d error=%s", jobID, imageLogDuration(durationMs), len(assets), security.SanitizeLog(err.Error()))
+	}
 	if len(assets) == 0 {
 		log.Printf("[image-studio] job=%d failed mode=edit duration=%s stage=save_assets error=%s", jobID, imageLogDuration(durationMs), "上游未返回图片")
 		_ = h.db.MarkImageJobFailed(ctx, jobID, "上游未返回图片", durationMs)
@@ -1230,9 +1241,10 @@ func (h *Handler) saveImageJobAssets(ctx context.Context, jobID int64, req image
 		if req.Upscale != "" {
 			upscaledBytes, upscaledMime, upscaleErr := h.upscaleImageJobAsset(ctx, jobID, idx+1, imageBytes, req.Upscale, req.Size)
 			if upscaleErr != nil {
-				if errors.Is(upscaleErr, errInvalidUpscaledImage) {
-					return saved, warnings, upscaleErr
-				}
+				// Undecodable upscaler output is degraded the same way a
+				// transport failure is. The upstream image behind it has
+				// already been generated and billed, so keep it and warn
+				// rather than failing every output in the batch.
 				warning := fmt.Sprintf("output %d: upscale degraded; original image preserved: %s", idx+1, security.SanitizeLog(upscaleErr.Error()))
 				warnings = append(warnings, warning)
 				log.Printf("[image-studio] job=%d asset_index=%d upscale_degraded scale=%s backend=%s error=%s",
@@ -1459,10 +1471,16 @@ func normalizeImageStudioModel(model string) string {
 
 func normalizeImageJobUpscale(model, size, upscale string) (string, error) {
 	rawUpscale := strings.ToLower(strings.TrimSpace(upscale))
+	// An absent value means "decide from the model and size"; "none" is the
+	// explicit opt-out that suppresses that inference, so a caller can take the
+	// upstream image as-is even when it asked for a size upstream cannot render.
+	if rawUpscale == "none" || rawUpscale == "off" {
+		return "", nil
+	}
 	if rawUpscale != "" {
 		normalized := imageproc.NormalizeUpscale(rawUpscale)
 		if normalized == "" {
-			return "", fmt.Errorf("upscale must be either 2k or 4k")
+			return "", fmt.Errorf("upscale must be 2k, 4k or none")
 		}
 		return normalized, nil
 	}
