@@ -48,7 +48,8 @@ func ImageAssetURLWithTTL(assetID int64, thumbKB int, ttl time.Duration) string 
 func publicImageAssetURL(path string) string {
 	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv(imageAssetPublicBaseURLEnv)), "/")
 	parsed, err := url.Parse(baseURL)
-	if baseURL == "" || err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+	if baseURL == "" || err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return path
 	}
 	return baseURL + path

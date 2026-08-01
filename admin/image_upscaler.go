@@ -78,9 +78,13 @@ func upscaleImageBytes(ctx context.Context, imageBytes []byte, scale, requestedS
 		}
 		return nil, "", "", fmt.Errorf("image upscaler returned %d: %s", response.StatusCode, message)
 	}
-	applied, err := strconv.ParseBool(response.Header.Get("X-Upscale-Applied"))
-	if err != nil {
-		return nil, "", "", fmt.Errorf("image upscaler returned an invalid applied marker")
+	applied := true
+	if marker := strings.TrimSpace(response.Header.Get("X-Upscale-Applied")); marker != "" {
+		parsed, parseErr := strconv.ParseBool(marker)
+		if parseErr != nil {
+			return nil, "", "", fmt.Errorf("image upscaler returned an invalid applied marker %q", marker)
+		}
+		applied = parsed
 	}
 	method := strings.TrimSpace(response.Header.Get("X-Upscale-Method"))
 	if method == "" {
@@ -97,6 +101,13 @@ func upscaleImageBytes(ctx context.Context, imageBytes []byte, scale, requestedS
 		contentType = "image/png"
 	}
 	return body, contentType, method, nil
+}
+
+func imageUpscalerBackend() string {
+	if strings.TrimSpace(os.Getenv("IMAGE_UPSCALER_ENDPOINT")) != "" {
+		return "external"
+	}
+	return "local"
 }
 
 func imageUpscaleTargetDimensions(width, height, targetLongSide int, requestedSize string) (int, int, bool) {

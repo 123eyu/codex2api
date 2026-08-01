@@ -35,10 +35,20 @@ func TestImageAssetURLUsesConfiguredPublicBaseURL(t *testing.T) {
 }
 
 func TestImageAssetURLIgnoresInvalidPublicBaseURL(t *testing.T) {
-	t.Setenv(imageAssetPublicBaseURLEnv, "javascript:alert(1)")
-	raw := ImageAssetURLWithTTL(42, 0, time.Hour)
-	if !strings.HasPrefix(raw, "/p/img/42?") {
-		t.Fatalf("unexpected fallback URL: %s", raw)
+	for _, baseURL := range []string{
+		"javascript:alert(1)",
+		"https://cdn.example.com?tenant=images",
+		"https://cdn.example.com?",
+		"https://cdn.example.com#fragment",
+		"https://user:password@cdn.example.com",
+	} {
+		t.Run(baseURL, func(t *testing.T) {
+			t.Setenv(imageAssetPublicBaseURLEnv, baseURL)
+			raw := ImageAssetURLWithTTL(42, 0, time.Hour)
+			if !strings.HasPrefix(raw, "/p/img/42?") {
+				t.Fatalf("unexpected fallback URL: %s", raw)
+			}
+		})
 	}
 }
 

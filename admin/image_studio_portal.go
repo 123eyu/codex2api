@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -182,12 +183,12 @@ func normalizePortalImageJobPayload(req *imageGenerationJobPayload, editMode boo
 	req.Style = normalizeOptionalImageParam(req.Style)
 	normalizedUpscale, err := normalizeImageJobUpscale(req.Model, req.Size, req.Upscale)
 	if err != nil {
-		return err
+		return errors.New("放大规格必须为 2k 或 4k")
 	}
 	req.Upscale = normalizedUpscale
 	count, err := normalizeImageJobOutputCount(req.N)
 	if err != nil {
-		return errors.New("生成数量必须在 1 到 4 之间")
+		return fmt.Errorf("生成数量必须在 1 到 %d 之间", maxImageJobOutputCount)
 	}
 	req.N = count
 	req.TemplateID = 0 // portal never selects admin templates by id write
@@ -219,20 +220,10 @@ func (h *Handler) enqueuePortalImageJob(c *gin.Context, apiKey *database.APIKeyR
 	if imageProxy == nil {
 		imageProxy = proxy.NewHandler(h.store, h.db, nil, nil)
 	}
-	if status, msg := imageProxy.EnforceAPIKeyLimits(c, req.Model); status != 0 {
+	if status, msg := imageProxy.EnforceAPIKeyLimitsForRequests(c, req.Model, req.N); status != 0 {
 		proxy.SendAPIKeyLimitError(c, status, msg)
 		return
 	}
-	releaseAPIKeyConcurrency, ok := imageProxy.AcquireAPIKeyConcurrency(c)
-	if !ok {
-		return
-	}
-	jobStarted := false
-	defer func() {
-		if !jobStarted && releaseAPIKeyConcurrency != nil {
-			releaseAPIKeyConcurrency()
-		}
-	}()
 
 	paramsJSON, _ := json.Marshal(req)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -263,11 +254,7 @@ func (h *Handler) enqueuePortalImageJob(c *gin.Context, apiKey *database.APIKeyR
 		imageLogAPIKeyLabel(keyID, keyName, keyMasked),
 		len([]rune(req.Prompt)),
 	)
-	jobStarted = true
 	go func() {
-		if releaseAPIKeyConcurrency != nil {
-			defer releaseAPIKeyConcurrency()
-		}
 		if editMode {
 			h.runImageEditJob(jobID, req, apiKey)
 			return

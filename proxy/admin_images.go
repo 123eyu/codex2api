@@ -30,15 +30,15 @@ func (h *Handler) GenerateImageOnceForAdmin(ctx context.Context, rawBody []byte,
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != nil && strings.TrimSpace(apiKey.Key) != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey.Key)
+		ginCtx.Set(contextAPIKeyRow, apiKey)
 		ginCtx.Set(contextAPIKeyID, apiKey.ID)
 		ginCtx.Set(contextAPIKeyName, strings.TrimSpace(apiKey.Name))
 		ginCtx.Set(contextAPIKeyMasked, security.MaskAPIKey(apiKey.Key))
 	}
 	ginCtx.Request = req
 
-	// 这条 in-process 路径刻意不放 contextAPIKeyRow（否则并发槽会被重复占用），
-	// 因此 Key 级限额由调用方在外层请求上校验。scope 预算（issue #439）是调度层面的
-	// 过滤，只有挂在这个 gin context 上才生效，所以在这里单独算一次。
+	// 每个批量输出都是一次真实上游请求，因此复用标准 Images handler 的
+	// API Key 限额与并发槽；外层只做整批 RPM/RPD 预检，不长期占用并发槽。
 	if status, msg := h.applyAdminScopeBudget(ctx, ginCtx, apiKey); status != 0 {
 		return nil, status, fmt.Errorf("%s", msg)
 	}
@@ -87,6 +87,7 @@ func (h *Handler) GenerateImageEditForAdmin(ctx context.Context, rawBody []byte,
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != nil && strings.TrimSpace(apiKey.Key) != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey.Key)
+		ginCtx.Set(contextAPIKeyRow, apiKey)
 		ginCtx.Set(contextAPIKeyID, apiKey.ID)
 		ginCtx.Set(contextAPIKeyName, strings.TrimSpace(apiKey.Name))
 		ginCtx.Set(contextAPIKeyMasked, security.MaskAPIKey(apiKey.Key))
