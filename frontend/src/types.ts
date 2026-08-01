@@ -1181,6 +1181,37 @@ export interface PromptRiskScoreBreakdown {
   identity_confidence: number
 }
 
+export type PromptRiskTrustStatus = 'active' | 'suspended' | 'revoked' | 'expired'
+
+export interface PromptRiskTrustPolicy {
+  id: number
+  subject_type: PromptRiskSubjectType
+  subject_key: string
+  status: PromptRiskTrustStatus | string
+  reason?: string
+  risk_threshold: number
+  valid_until: ISODateString
+  last_evaluated_at?: ISODateString
+  last_risk_score: number
+  last_risk_level?: PromptRiskLevel | string
+  bypass_count: number
+  last_bypass_at?: ISODateString
+  created_at: ISODateString
+  updated_at: ISODateString
+}
+
+export interface PromptRiskTrustEvent {
+  id: number
+  policy_id: number
+  subject_type: PromptRiskSubjectType
+  subject_key: string
+  event_type: string
+  reason?: string
+  risk_score: number
+  risk_level?: PromptRiskLevel | string
+  created_at: ISODateString
+}
+
 export interface PromptRiskProfile {
   subject_type: PromptRiskSubjectType
   subject_key: string
@@ -1213,6 +1244,7 @@ export interface PromptRiskProfile {
   api_key_masked?: string
   account_id?: number
   account_name?: string
+  trust_policy?: PromptRiskTrustPolicy
 }
 
 export interface PromptRiskEvent {
@@ -1263,6 +1295,7 @@ export interface PromptRiskProfilesResponse {
 export interface PromptRiskProfileDetailResponse {
   profile: PromptRiskProfile
   events: PromptRiskEvent[]
+  trust_events: PromptRiskTrustEvent[]
   event_total: number
   event_page: number
   event_page_size: number
@@ -1292,6 +1325,19 @@ export interface PromptReviewTestRequest {
   timeout_seconds: number
   max_concurrent: number
   max_text_length: number
+  test_all_keys?: boolean
+}
+
+export interface PromptReviewKeyTestResult {
+  key_index: number
+  ok: boolean
+  endpoint?: string
+  model?: string
+  flagged: boolean
+  confidence: number
+  reason?: string
+  latency_ms: number
+  error?: string
 }
 
 export interface PromptReviewTestResponse {
@@ -1303,6 +1349,8 @@ export interface PromptReviewTestResponse {
   confidence_threshold: number
   reason?: string
   latency_ms: number
+  key_count?: number
+  results?: PromptReviewKeyTestResult[]
 }
 
 export interface PromptFilterRulePatternTestResponse {
