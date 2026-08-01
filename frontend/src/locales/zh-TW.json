@@ -1,5 +1,8 @@
 {
   "promptFilter": {
+    "saveSuccess": "Prompt 檢查設定已儲存",
+    "saveQuarantined": "設定已儲存，{{count}} 條不安全自訂規則已自動停用",
+    "saveFailed": "儲存失敗",
     "saveRefreshFailed": "設定已儲存，但規則或日誌重新整理失敗；可稍後單獨重新整理頁面",
     "advancedConfigInvalidTitle": "進階防護設定無法解析",
     "advancedConfigInvalidDescription": "原始設定已完整保留，目前不會以預設值覆蓋。請修正設定 JSON，或重新整理頁面取得伺服器內容後再儲存。",

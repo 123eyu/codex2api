@@ -1743,6 +1743,7 @@
     "loadingDesc": "Syncing rule settings and hit logs.",
     "errorTitle": "Failed to load prompt filter",
     "saveSuccess": "Prompt filter settings saved",
+    "saveQuarantined": "Settings saved; {{count}} unsafe custom rule(s) were disabled",
     "saveRefreshFailed": "Settings were saved, but rules or logs could not be refreshed. Refresh the page later to retry.",
     "saveFailed": "Failed to save",
     "advancedConfigInvalidTitle": "Advanced protection configuration cannot be parsed",

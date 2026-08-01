@@ -502,7 +502,12 @@ export default function PromptFilter() {
     setForm(normalizePromptFilterForm(updated))
     setData((current) => ({ ...current, settings: updated }))
     setSaving(false)
-    showToast(t('promptFilter.saveSuccess'))
+    const quarantines = updated.prompt_filter_pattern_quarantines ?? []
+    if (quarantines.length > 0) {
+      showToast(t('promptFilter.saveQuarantined', { count: quarantines.length }), 'warning')
+    } else {
+      showToast(t('promptFilter.saveSuccess'))
+    }
 
     const [rulesResult, logsResult] = await Promise.allSettled([
       api.getPromptFilterRules(),

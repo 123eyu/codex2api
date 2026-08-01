@@ -343,6 +343,10 @@ func SanitizeCustomPatterns(patterns []PatternConfig) ([]PatternConfig, []Patter
 	sanitized := make([]PatternConfig, len(patterns))
 	quarantined := make([]PatternQuarantine, 0)
 	for index, pattern := range patterns {
+		if pattern.Enabled != nil && !*pattern.Enabled {
+			sanitized[index] = pattern
+			continue
+		}
 		if issue := AuditPatternConfig(pattern); issue != nil {
 			disabled := false
 			pattern.Enabled = &disabled
@@ -417,26 +421,7 @@ func compileAdmissionPattern(pattern PatternConfig) (admissionCompiledPattern, *
 }
 
 func (pattern admissionCompiledPattern) matches(text string) bool {
-	for _, re := range pattern.exclude {
-		if re.MatchString(text) {
-			return false
-		}
-	}
-	if pattern.primary != nil && !pattern.primary.MatchString(text) {
-		return false
-	}
-	for _, re := range pattern.all {
-		if !re.MatchString(text) {
-			return false
-		}
-	}
-	matchedAny := 0
-	for _, re := range pattern.any {
-		if re.MatchString(text) {
-			matchedAny++
-		}
-	}
-	return matchedAny >= pattern.minimum
+	return compositePatternMatchIndex(text, pattern.primary, pattern.all, pattern.any, pattern.exclude, pattern.minimum) != nil
 }
 
 func patternAdmissionIssue(code string, message string) *PatternAdmissionError {

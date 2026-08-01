@@ -29,6 +29,13 @@ var defaultIntelligenceQueries = []string{
 
 var githubPromptSearchBaseURL = "https://api.github.com/search/repositories"
 
+type promptIntelligenceApplicationMode uint8
+
+const (
+	promptIntelligenceManual promptIntelligenceApplicationMode = iota
+	promptIntelligenceAutomatic
+)
+
 type promptIntelligenceSource struct {
 	Provider    string `json:"provider"`
 	Title       string `json:"title"`
@@ -127,7 +134,7 @@ func (h *Handler) AddPromptIntelligenceCandidate(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	added, updated, err := h.addPromptIntelligenceCandidates(c.Request.Context(), []promptIntelligenceCandidate{candidate}, false)
+	added, updated, err := h.addPromptIntelligenceCandidates(c.Request.Context(), []promptIntelligenceCandidate{candidate}, promptIntelligenceManual)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err.Error())
 		return
@@ -182,7 +189,7 @@ func (h *Handler) runPromptIntelligence(ctx context.Context, cfg promptfilter.In
 		}
 	}
 	if cfg.AutoAdd && len(run.Candidates) > 0 {
-		added, updated, err := h.addPromptIntelligenceCandidates(ctx, run.Candidates, true)
+		added, updated, err := h.addPromptIntelligenceCandidates(ctx, run.Candidates, promptIntelligenceAutomatic)
 		if err != nil {
 			run.Errors = append(run.Errors, err.Error())
 		} else {
@@ -415,7 +422,9 @@ func automaticIntelligenceMayUpdate(current promptfilter.PatternConfig) bool {
 	return current.SignalOnly && !current.Strict
 }
 
-func (h *Handler) addPromptIntelligenceCandidates(ctx context.Context, candidates []promptIntelligenceCandidate, requireRiskSignal bool) (int, int, error) {
+func (h *Handler) addPromptIntelligenceCandidates(ctx context.Context, candidates []promptIntelligenceCandidate, mode promptIntelligenceApplicationMode) (int, int, error) {
+	automatic := mode == promptIntelligenceAutomatic
+	requireRiskSignal := automatic
 	h.settingsUpdateMu.Lock()
 	defer h.settingsUpdateMu.Unlock()
 	settings, err := h.db.GetSystemSettings(ctx)
@@ -436,13 +445,13 @@ func (h *Handler) addPromptIntelligenceCandidates(ctx context.Context, candidate
 		if requireRiskSignal && !intelligencePatternHasRiskSignal(candidate.Pattern) {
 			continue
 		}
-		item := intelligenceCandidatePatternConfig(candidate, requireRiskSignal)
+		item := intelligenceCandidatePatternConfig(candidate, automatic)
 		name := strings.ToLower(strings.TrimSpace(candidate.Name))
 		if index, exists := existing[name]; exists {
 			current := cfg.CustomPatterns[index]
 			// A scheduled intelligence job must never silently demote or replace a
 			// rule that an administrator already promoted to enforcement.
-			if requireRiskSignal && !automaticIntelligenceMayUpdate(current) {
+			if automatic && !automaticIntelligenceMayUpdate(current) {
 				continue
 			}
 			if current.Pattern == item.Pattern && current.Weight == item.Weight && current.Category == item.Category && current.Strict == item.Strict && current.SignalOnly == item.SignalOnly {

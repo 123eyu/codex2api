@@ -195,3 +195,31 @@ test('Prompt Filter rule tester renders the final GuardPipeline decision metadat
     assert.equal(source.includes(fragment), true, `GuardPipeline test metadata is not rendered: ${fragment}`)
   }
 })
+
+test('Prompt Filter surfaces quarantined custom rules and keeps zh-TW decision labels complete', () => {
+  const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
+  assert.equal(source.includes('updated.prompt_filter_pattern_quarantines ?? []'), true)
+  assert.equal(source.includes("t('promptFilter.saveQuarantined'"), true)
+
+  const locale = JSON.parse(readFileSync(new URL('../locales/zh-TW.json', import.meta.url), 'utf8'))
+  for (const key of [
+    'testResultPipelineTitle',
+    'testResultPipelineHint',
+    'testResultLegacyFallbackHint',
+    'testResultFinalAction',
+    'testResultMode',
+    'testResultProfile',
+    'testResultProtocolProvider',
+    'testResultEndpointModel',
+    'testResultExecutionScore',
+    'testResultAuditScore',
+    'testResultOrigin',
+    'testResultReasonCode',
+    'testResultStrikeEligible',
+    'testResultPrimaryDetector',
+    'testResultYes',
+    'testResultNo',
+  ]) {
+    assert.equal(typeof locale.promptFilter[key], 'string', `missing zh-TW promptFilter.${key}`)
+  }
+})

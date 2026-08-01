@@ -3,6 +3,7 @@ package promptfilter
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"regexp/syntax"
 	"sort"
@@ -325,9 +326,6 @@ patternLoop:
 		pattern.Name = strings.TrimSpace(pattern.Name)
 		pattern.Pattern = strings.TrimSpace(pattern.Pattern)
 		pattern.Category = strings.TrimSpace(pattern.Category)
-		if pattern.Name == "" || (pattern.Pattern == "" && len(pattern.AllPatterns) == 0 && len(pattern.AnyPatterns) == 0) || pattern.Weight <= 0 {
-			continue
-		}
 		if disabled[strings.ToLower(pattern.Name)] {
 			continue
 		}
@@ -340,8 +338,12 @@ patternLoop:
 		// without disabling every built-in detector for the request.
 		if custom {
 			if issue := AuditPatternConfig(pattern); issue != nil {
+				log.Printf("prompt filter: custom rule skipped name=%q code=%s message=%s", pattern.Name, issue.Code, issue.Message)
 				continue
 			}
+		}
+		if pattern.Name == "" || (pattern.Pattern == "" && len(pattern.AllPatterns) == 0 && len(pattern.AnyPatterns) == 0) || pattern.Weight <= 0 {
+			continue
 		}
 		var re *regexp.Regexp
 		var err error
@@ -349,6 +351,7 @@ patternLoop:
 			re, err = regexp.Compile(pattern.Pattern)
 			if err != nil {
 				if custom {
+					log.Printf("prompt filter: custom rule skipped name=%q code=%s message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
 					continue
 				}
 				return nil, fmt.Errorf("compile pattern %q: %w", pattern.Name, err)
@@ -371,6 +374,7 @@ patternLoop:
 		all, err := compileList(pattern.AllPatterns)
 		if err != nil {
 			if custom {
+				log.Printf("prompt filter: custom rule skipped name=%q code=%s field=all_patterns message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
 				continue patternLoop
 			}
 			return nil, fmt.Errorf("compile all pattern %q: %w", pattern.Name, err)
@@ -378,6 +382,7 @@ patternLoop:
 		any, err := compileList(pattern.AnyPatterns)
 		if err != nil {
 			if custom {
+				log.Printf("prompt filter: custom rule skipped name=%q code=%s field=any_patterns message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
 				continue patternLoop
 			}
 			return nil, fmt.Errorf("compile any pattern %q: %w", pattern.Name, err)
@@ -385,6 +390,7 @@ patternLoop:
 		exclude, err := compileList(pattern.ExcludePatterns)
 		if err != nil {
 			if custom {
+				log.Printf("prompt filter: custom rule skipped name=%q code=%s field=exclude_patterns message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
 				continue patternLoop
 			}
 			return nil, fmt.Errorf("compile exclude pattern %q: %w", pattern.Name, err)
@@ -1471,22 +1477,26 @@ func matchSentence(text string, start, end int) string {
 }
 
 func compiledPatternMatchIndex(text string, pattern compiledPattern) []int {
-	for _, re := range pattern.exclude {
+	if isBuiltinMinorSafetyPattern(pattern) {
+		return minorExploitationMatchIndex(text, pattern.re)
+	}
+	return compositePatternMatchIndex(text, pattern.re, pattern.all, pattern.any, pattern.exclude, pattern.cfg.MinMatches)
+}
+
+func compositePatternMatchIndex(text string, primary *regexp.Regexp, all, any, exclude []*regexp.Regexp, minimum int) []int {
+	for _, re := range exclude {
 		if re.MatchString(text) {
 			return nil
 		}
 	}
-	if isBuiltinMinorSafetyPattern(pattern) {
-		return minorExploitationMatchIndex(text, pattern.re)
-	}
 	first := []int(nil)
-	if pattern.re != nil {
-		first = pattern.re.FindStringIndex(text)
+	if primary != nil {
+		first = primary.FindStringIndex(text)
 		if first == nil {
 			return nil
 		}
 	}
-	for _, re := range pattern.all {
+	for _, re := range all {
 		loc := re.FindStringIndex(text)
 		if loc == nil {
 			return nil
@@ -1496,7 +1506,7 @@ func compiledPatternMatchIndex(text string, pattern compiledPattern) []int {
 		}
 	}
 	matchedAny := 0
-	for _, re := range pattern.any {
+	for _, re := range any {
 		loc := re.FindStringIndex(text)
 		if loc != nil {
 			matchedAny++
@@ -1505,8 +1515,7 @@ func compiledPatternMatchIndex(text string, pattern compiledPattern) []int {
 			}
 		}
 	}
-	minimum := pattern.cfg.MinMatches
-	if minimum <= 0 && len(pattern.any) > 0 {
+	if minimum <= 0 && len(any) > 0 {
 		minimum = 1
 	}
 	if matchedAny < minimum {

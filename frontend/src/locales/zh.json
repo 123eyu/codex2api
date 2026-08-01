@@ -1743,6 +1743,7 @@
     "loadingDesc": "规则配置和触发日志正在同步。",
     "errorTitle": "Prompt 检查页加载失败",
     "saveSuccess": "Prompt 检查设置已保存",
+    "saveQuarantined": "设置已保存，{{count}} 条不安全自定义规则已自动停用",
     "saveRefreshFailed": "设置已保存，但规则或日志刷新失败；可稍后单独刷新页面",
     "saveFailed": "保存失败",
     "advancedConfigInvalidTitle": "高级防护配置无法解析",

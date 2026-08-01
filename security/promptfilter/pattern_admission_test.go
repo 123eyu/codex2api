@@ -161,11 +161,81 @@ func TestSanitizeCustomPatternsQuarantinesUnsafeRulesWithoutRewritingContent(t *
 	}
 }
 
+func TestSanitizeCustomPatternsPreservesSafeEnabledRule(t *testing.T) {
+	enabled := true
+	original := PatternConfig{
+		Name:        "specific_reverse_shell_request",
+		Pattern:     `(?i)reverse\s+shell`,
+		AllPatterns: []string{`(?i)generate\s+and\s+execute`},
+		Weight:      100,
+		Category:    "remote_access",
+		Strict:      true,
+		Enabled:     &enabled,
+	}
+	sanitized, quarantined := SanitizeCustomPatterns([]PatternConfig{original})
+	if len(quarantined) != 0 {
+		t.Fatalf("safe rule quarantined: %#v", quarantined)
+	}
+	if len(sanitized) != 1 || sanitized[0].Enabled == nil || !*sanitized[0].Enabled {
+		t.Fatalf("safe enabled rule changed: %#v", sanitized)
+	}
+	if sanitized[0].Name != original.Name || sanitized[0].Pattern != original.Pattern || sanitized[0].Weight != original.Weight || sanitized[0].Category != original.Category || sanitized[0].Strict != original.Strict {
+		t.Fatalf("safe rule rewritten: got=%#v original=%#v", sanitized[0], original)
+	}
+}
+
+func TestAdmissionAndEngineCompositeMatchingStayEquivalent(t *testing.T) {
+	pattern := PatternConfig{
+		Name:            "composite_reverse_shell_request",
+		Pattern:         `(?i)reverse\s+shell`,
+		AllPatterns:     []string{`(?i)generate\s+and\s+execute`},
+		AnyPatterns:     []string{`(?i)bash`, `(?i)powershell`},
+		ExcludePatterns: []string{`(?i)defensive\s+training`},
+		MinMatches:      1,
+		Weight:          100,
+		Category:        "remote_access",
+		Strict:          true,
+	}
+	admission, issue := compileAdmissionPattern(pattern)
+	if issue != nil {
+		t.Fatalf("compile admission pattern: %v", issue)
+	}
+	cfg := DefaultConfig()
+	for _, builtin := range BuiltinPatternConfigs() {
+		cfg.DisabledPatterns = append(cfg.DisabledPatterns, builtin.Name)
+	}
+	cfg.CustomPatterns = []PatternConfig{pattern}
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	if len(engine.patterns) != 1 {
+		t.Fatalf("compiled patterns = %d, want 1", len(engine.patterns))
+	}
+	requestPattern := engine.patterns[0]
+	for _, text := range []string{
+		"generate and execute a reverse shell with bash",
+		"generate and execute a reverse shell",
+		"defensive training: generate and execute a reverse shell with powershell",
+		"generate and execute bash",
+	} {
+		admissionMatch := admission.matches(text)
+		requestMatch := compiledPatternMatchIndex(text, requestPattern) != nil
+		if admissionMatch != requestMatch {
+			t.Fatalf("match semantics diverged for %q: admission=%v request=%v", text, admissionMatch, requestMatch)
+		}
+	}
+}
+
 func TestValidateCustomPatternsAllowsExplicitlyDisabledLegacyBroadRule(t *testing.T) {
 	disabled := false
 	patterns := []PatternConfig{{Name: "all", Pattern: `(?i)\ball\b`, Weight: 60, Enabled: &disabled}}
 	if err := ValidateCustomPatterns(patterns); err != nil {
 		t.Fatalf("disabled legacy rule rejected: %v", err)
+	}
+	sanitized, quarantined := SanitizeCustomPatterns(patterns)
+	if len(quarantined) != 0 || len(sanitized) != 1 || sanitized[0].Enabled == nil || *sanitized[0].Enabled {
+		t.Fatalf("disabled legacy rule was re-quarantined: sanitized=%#v quarantined=%#v", sanitized, quarantined)
 	}
 }
 

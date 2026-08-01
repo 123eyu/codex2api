@@ -5612,7 +5612,9 @@ func (s *Store) SetPromptFilterConfig(cfg promptfilter.Config) {
 	// from an older build that accepted invalid or over-broad regexes. Sanitize
 	// only when publishing a Store snapshot so request-time NormalizeConfig does
 	// not repeatedly compile/audit every rule.
-	normalized.CustomPatterns, _ = promptfilter.SanitizeCustomPatterns(normalized.CustomPatterns)
+	var quarantined []promptfilter.PatternQuarantine
+	normalized.CustomPatterns, quarantined = promptfilter.SanitizeCustomPatterns(normalized.CustomPatterns)
+	logPromptFilterPatternQuarantines(quarantined)
 	advancedRaw := promptfilter.MarshalAdvancedConfig(normalized.Advanced)
 	if current, ok := s.promptFilterConfig.Load().(promptFilterConfigState); ok {
 		if merged, err := promptfilter.MarshalAdvancedConfigDocument(current.AdvancedRaw, normalized.Advanced); err == nil {
@@ -5627,13 +5629,21 @@ func (s *Store) SetPromptFilterConfig(cfg promptfilter.Config) {
 // The caller must persist successfully before invoking this method.
 func (s *Store) SetPromptFilterConfigWithAdvancedRaw(cfg promptfilter.Config, raw string) error {
 	normalized := promptfilter.NormalizeConfig(cfg)
-	normalized.CustomPatterns, _ = promptfilter.SanitizeCustomPatterns(normalized.CustomPatterns)
+	var quarantined []promptfilter.PatternQuarantine
+	normalized.CustomPatterns, quarantined = promptfilter.SanitizeCustomPatterns(normalized.CustomPatterns)
+	logPromptFilterPatternQuarantines(quarantined)
 	advancedRaw, err := promptfilter.MarshalAdvancedConfigDocument(raw, normalized.Advanced)
 	if err != nil {
 		return err
 	}
 	s.promptFilterConfig.Store(promptFilterConfigState{Config: normalized, AdvancedRaw: advancedRaw})
 	return nil
+}
+
+func logPromptFilterPatternQuarantines(items []promptfilter.PatternQuarantine) {
+	for _, item := range items {
+		log.Printf("prompt filter: custom rule quarantined index=%d name=%q code=%s message=%s", item.Index, item.Name, item.Code, item.Message)
+	}
 }
 
 func (s *Store) GetPromptFilterConfig() promptfilter.Config {

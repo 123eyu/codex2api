@@ -7014,77 +7014,78 @@ type settingsResponse struct {
 	GrokOAuthClientID                   string `json:"grok_oauth_client_id"`
 	// GrokOAuthClientIDEnvOverride 为 true 时，环境变量 GROK_OAUTH_CLIENT_ID 正压着上面这个设置，
 	// 前端据此提示「当前以环境变量为准」。GrokOAuthClientIDEffective 是实际生效值。
-	GrokOAuthClientIDEnvOverride       bool    `json:"grok_oauth_client_id_env_override"`
-	GrokOAuthClientIDEffective         string  `json:"grok_oauth_client_id_effective"`
-	MaxRetries                         int     `json:"max_retries"`
-	MaxRateLimitRetries                int     `json:"max_rate_limit_retries"`
-	RetryIntervalMS                    int     `json:"retry_interval_ms"`
-	TransportRetryPolicy               string  `json:"transport_retry_policy"`
-	AllowRemoteMigration               bool    `json:"allow_remote_migration"`
-	DatabaseDriver                     string  `json:"database_driver"`
-	DatabaseLabel                      string  `json:"database_label"`
-	CacheDriver                        string  `json:"cache_driver"`
-	CacheLabel                         string  `json:"cache_label"`
-	ExpiredCleaned                     int     `json:"expired_cleaned,omitempty"`
-	ModelMapping                       string  `json:"model_mapping"`
-	CodexModelMapping                  string  `json:"codex_model_mapping"`
-	PayloadRules                       string  `json:"payload_rules"`
-	ReasoningEffortModels              string  `json:"reasoning_effort_models"`
-	ResinURL                           string  `json:"resin_url"`
-	ResinPlatformName                  string  `json:"resin_platform_name"`
-	PromptFilterEnabled                bool    `json:"prompt_filter_enabled"`
-	PromptFilterMode                   string  `json:"prompt_filter_mode"`
-	PromptFilterThreshold              int     `json:"prompt_filter_threshold"`
-	PromptFilterStrictThreshold        int     `json:"prompt_filter_strict_threshold"`
-	PromptFilterStrictTerminalEnabled  bool    `json:"prompt_filter_strict_terminal_enabled"`
-	PromptFilterAdvancedConfig         string  `json:"prompt_filter_advanced_config"`
-	PromptFilterLogMatches             bool    `json:"prompt_filter_log_matches"`
-	PromptFilterMaxTextLength          int     `json:"prompt_filter_max_text_length"`
-	PromptFilterSensitiveWords         string  `json:"prompt_filter_sensitive_words"`
-	PromptFilterCustomPatterns         string  `json:"prompt_filter_custom_patterns"`
-	PromptFilterDisabledPatterns       string  `json:"prompt_filter_disabled_patterns"`
-	PromptFilterReviewEnabled          bool    `json:"prompt_filter_review_enabled"`
-	PromptFilterReviewAPIKeyConfigured bool    `json:"prompt_filter_review_api_key_configured"`
-	PromptFilterReviewAPIKeyCount      int     `json:"prompt_filter_review_api_key_count"`
-	PromptFilterReviewBaseURL          string  `json:"prompt_filter_review_base_url"`
-	PromptFilterReviewModel            string  `json:"prompt_filter_review_model"`
-	PromptFilterReviewTimeoutSeconds   int     `json:"prompt_filter_review_timeout_seconds"`
-	PromptFilterReviewFailClosed       bool    `json:"prompt_filter_review_fail_closed"`
-	ClientCompatMode                   string  `json:"client_compat_mode"`
-	CodexMinCLIVersion                 string  `json:"codex_min_cli_version"`
-	CodexUserAgentConfig               string  `json:"codex_user_agent_config"`
-	UsageLogMode                       string  `json:"usage_log_mode"`
-	UsageLogBatchSize                  int     `json:"usage_log_batch_size"`
-	UsageLogFlushIntervalSeconds       int     `json:"usage_log_flush_interval_seconds"`
-	StreamFlushPolicy                  string  `json:"stream_flush_policy"`
-	StreamFlushIntervalMS              int     `json:"stream_flush_interval_ms"`
-	FirstTokenMode                     string  `json:"first_token_mode"`
-	FirstTokenTimeoutSeconds           int     `json:"first_token_timeout_seconds"`
-	BillingTierPolicy                  string  `json:"billing_tier_policy"`
-	ShowFullUsageNumbers               bool    `json:"show_full_usage_numbers"`
-	PublicKeyUsagePageEnabled          bool    `json:"public_key_usage_page_enabled"`
-	PublicImageStudioPageEnabled       bool    `json:"public_image_studio_page_enabled"`
-	PublicAccountPortalPageEnabled     bool    `json:"public_account_portal_page_enabled"`
-	ImageStorageBackend                string  `json:"image_storage_backend"`
-	ImageS3Endpoint                    string  `json:"image_s3_endpoint"`
-	ImageS3Region                      string  `json:"image_s3_region"`
-	ImageS3Bucket                      string  `json:"image_s3_bucket"`
-	ImageS3AccessKey                   string  `json:"image_s3_access_key"`
-	ImageS3SecretKey                   string  `json:"image_s3_secret_key"`
-	ImageS3Prefix                      string  `json:"image_s3_prefix"`
-	ImageS3ForcePathStyle              bool    `json:"image_s3_force_path_style"`
-	AutoPause5hThreshold               float64 `json:"auto_pause_5h_threshold"`
-	AutoPause7dThreshold               float64 `json:"auto_pause_7d_threshold"`
-	AutoPause5hGuardBandPercent        float64 `json:"auto_pause_5h_guard_band_percent"`
-	AutoPause5hGuardConcurrency        int     `json:"auto_pause_5h_guard_concurrency"`
-	SmartPacingEnabled                 bool    `json:"smart_pacing_enabled"`
-	SmartPacingMinConcurrency          int     `json:"smart_pacing_min_concurrency"`
-	SmartPacingWindows                 string  `json:"smart_pacing_windows"`
-	IgnoreUsageLimitStatus             bool    `json:"ignore_usage_limit_status"`
-	ResponseCacheLocalMaxBytes         int64   `json:"response_cache_local_max_bytes"`
-	ResponseCacheLocalMaxEntryBytes    int64   `json:"response_cache_local_max_entry_bytes"`
-	ResponseCacheReconstructMaxBytes   int64   `json:"response_cache_reconstruct_max_bytes"`
-	ResponseCacheConfigGeneration      int64   `json:"response_cache_config_generation"`
+	GrokOAuthClientIDEnvOverride       bool                             `json:"grok_oauth_client_id_env_override"`
+	GrokOAuthClientIDEffective         string                           `json:"grok_oauth_client_id_effective"`
+	MaxRetries                         int                              `json:"max_retries"`
+	MaxRateLimitRetries                int                              `json:"max_rate_limit_retries"`
+	RetryIntervalMS                    int                              `json:"retry_interval_ms"`
+	TransportRetryPolicy               string                           `json:"transport_retry_policy"`
+	AllowRemoteMigration               bool                             `json:"allow_remote_migration"`
+	DatabaseDriver                     string                           `json:"database_driver"`
+	DatabaseLabel                      string                           `json:"database_label"`
+	CacheDriver                        string                           `json:"cache_driver"`
+	CacheLabel                         string                           `json:"cache_label"`
+	ExpiredCleaned                     int                              `json:"expired_cleaned,omitempty"`
+	ModelMapping                       string                           `json:"model_mapping"`
+	CodexModelMapping                  string                           `json:"codex_model_mapping"`
+	PayloadRules                       string                           `json:"payload_rules"`
+	ReasoningEffortModels              string                           `json:"reasoning_effort_models"`
+	ResinURL                           string                           `json:"resin_url"`
+	ResinPlatformName                  string                           `json:"resin_platform_name"`
+	PromptFilterEnabled                bool                             `json:"prompt_filter_enabled"`
+	PromptFilterMode                   string                           `json:"prompt_filter_mode"`
+	PromptFilterThreshold              int                              `json:"prompt_filter_threshold"`
+	PromptFilterStrictThreshold        int                              `json:"prompt_filter_strict_threshold"`
+	PromptFilterStrictTerminalEnabled  bool                             `json:"prompt_filter_strict_terminal_enabled"`
+	PromptFilterAdvancedConfig         string                           `json:"prompt_filter_advanced_config"`
+	PromptFilterLogMatches             bool                             `json:"prompt_filter_log_matches"`
+	PromptFilterMaxTextLength          int                              `json:"prompt_filter_max_text_length"`
+	PromptFilterSensitiveWords         string                           `json:"prompt_filter_sensitive_words"`
+	PromptFilterCustomPatterns         string                           `json:"prompt_filter_custom_patterns"`
+	PromptFilterPatternQuarantines     []promptfilter.PatternQuarantine `json:"prompt_filter_pattern_quarantines,omitempty"`
+	PromptFilterDisabledPatterns       string                           `json:"prompt_filter_disabled_patterns"`
+	PromptFilterReviewEnabled          bool                             `json:"prompt_filter_review_enabled"`
+	PromptFilterReviewAPIKeyConfigured bool                             `json:"prompt_filter_review_api_key_configured"`
+	PromptFilterReviewAPIKeyCount      int                              `json:"prompt_filter_review_api_key_count"`
+	PromptFilterReviewBaseURL          string                           `json:"prompt_filter_review_base_url"`
+	PromptFilterReviewModel            string                           `json:"prompt_filter_review_model"`
+	PromptFilterReviewTimeoutSeconds   int                              `json:"prompt_filter_review_timeout_seconds"`
+	PromptFilterReviewFailClosed       bool                             `json:"prompt_filter_review_fail_closed"`
+	ClientCompatMode                   string                           `json:"client_compat_mode"`
+	CodexMinCLIVersion                 string                           `json:"codex_min_cli_version"`
+	CodexUserAgentConfig               string                           `json:"codex_user_agent_config"`
+	UsageLogMode                       string                           `json:"usage_log_mode"`
+	UsageLogBatchSize                  int                              `json:"usage_log_batch_size"`
+	UsageLogFlushIntervalSeconds       int                              `json:"usage_log_flush_interval_seconds"`
+	StreamFlushPolicy                  string                           `json:"stream_flush_policy"`
+	StreamFlushIntervalMS              int                              `json:"stream_flush_interval_ms"`
+	FirstTokenMode                     string                           `json:"first_token_mode"`
+	FirstTokenTimeoutSeconds           int                              `json:"first_token_timeout_seconds"`
+	BillingTierPolicy                  string                           `json:"billing_tier_policy"`
+	ShowFullUsageNumbers               bool                             `json:"show_full_usage_numbers"`
+	PublicKeyUsagePageEnabled          bool                             `json:"public_key_usage_page_enabled"`
+	PublicImageStudioPageEnabled       bool                             `json:"public_image_studio_page_enabled"`
+	PublicAccountPortalPageEnabled     bool                             `json:"public_account_portal_page_enabled"`
+	ImageStorageBackend                string                           `json:"image_storage_backend"`
+	ImageS3Endpoint                    string                           `json:"image_s3_endpoint"`
+	ImageS3Region                      string                           `json:"image_s3_region"`
+	ImageS3Bucket                      string                           `json:"image_s3_bucket"`
+	ImageS3AccessKey                   string                           `json:"image_s3_access_key"`
+	ImageS3SecretKey                   string                           `json:"image_s3_secret_key"`
+	ImageS3Prefix                      string                           `json:"image_s3_prefix"`
+	ImageS3ForcePathStyle              bool                             `json:"image_s3_force_path_style"`
+	AutoPause5hThreshold               float64                          `json:"auto_pause_5h_threshold"`
+	AutoPause7dThreshold               float64                          `json:"auto_pause_7d_threshold"`
+	AutoPause5hGuardBandPercent        float64                          `json:"auto_pause_5h_guard_band_percent"`
+	AutoPause5hGuardConcurrency        int                              `json:"auto_pause_5h_guard_concurrency"`
+	SmartPacingEnabled                 bool                             `json:"smart_pacing_enabled"`
+	SmartPacingMinConcurrency          int                              `json:"smart_pacing_min_concurrency"`
+	SmartPacingWindows                 string                           `json:"smart_pacing_windows"`
+	IgnoreUsageLimitStatus             bool                             `json:"ignore_usage_limit_status"`
+	ResponseCacheLocalMaxBytes         int64                            `json:"response_cache_local_max_bytes"`
+	ResponseCacheLocalMaxEntryBytes    int64                            `json:"response_cache_local_max_entry_bytes"`
+	ResponseCacheReconstructMaxBytes   int64                            `json:"response_cache_reconstruct_max_bytes"`
+	ResponseCacheConfigGeneration      int64                            `json:"response_cache_config_generation"`
 }
 
 type rawJSON = json.RawMessage
@@ -7922,17 +7923,17 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		return
 	}
 	var submittedPromptFilterCustomPatterns []promptfilter.PatternConfig
+	var promptFilterPatternQuarantines []promptfilter.PatternQuarantine
 	if req.PromptFilterCustomPatterns != nil {
 		patterns, err := promptfilter.ParseCustomPatterns(*req.PromptFilterCustomPatterns)
 		if err != nil {
 			writeError(c, http.StatusBadRequest, "Prompt 检查自定义规则 JSON 无效: "+err.Error())
 			return
 		}
-		if err := promptfilter.ValidateCustomPatterns(patterns); err != nil {
-			writeError(c, http.StatusBadRequest, "Prompt 检查自定义规则未通过安全校验: "+err.Error())
-			return
+		submittedPromptFilterCustomPatterns, promptFilterPatternQuarantines = promptfilter.SanitizeCustomPatterns(patterns)
+		for _, item := range promptFilterPatternQuarantines {
+			log.Printf("prompt filter: submitted custom rule quarantined index=%d name=%q code=%s message=%s", item.Index, item.Name, item.Code, item.Message)
 		}
-		submittedPromptFilterCustomPatterns = patterns
 	}
 	if req.AutoPause5hThreshold != nil {
 		if err := validateAutoPauseThreshold("auto_pause_5h_threshold", *req.AutoPause5hThreshold); err != nil {
@@ -9146,6 +9147,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterMaxTextLength:           promptFilterCfg.MaxTextLength,
 		PromptFilterSensitiveWords:          promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:          promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
+		PromptFilterPatternQuarantines:      promptFilterPatternQuarantines,
 		PromptFilterDisabledPatterns:        promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
 		PromptFilterReviewEnabled:           promptFilterCfg.Review.Enabled,
 		PromptFilterReviewAPIKeyConfigured:  promptFilterCfg.Review.APIKey != "",

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/codex2api/security/promptfilter"
 )
 
 func TestSearchGitHubPromptIntelligence(t *testing.T) {
@@ -75,6 +77,26 @@ func TestAutomaticIntelligenceCandidateIsAuditOnly(t *testing.T) {
 	manual := intelligenceCandidatePatternConfig(candidate, false)
 	if !manual.Strict || manual.SignalOnly || manual.Weight != candidate.Weight {
 		t.Fatalf("manual candidate semantics changed: %#v", manual)
+	}
+}
+
+func TestAutomaticIntelligenceMayUpdateOnlyUnpromotedAuditRules(t *testing.T) {
+	disabled := false
+	for _, tc := range []struct {
+		name string
+		rule promptfilter.PatternConfig
+		want bool
+	}{
+		{name: "automatic signal-only rule", rule: promptfilter.PatternConfig{SignalOnly: true}, want: true},
+		{name: "disabled rule", rule: promptfilter.PatternConfig{Enabled: &disabled, SignalOnly: true}, want: false},
+		{name: "administrator strict promotion", rule: promptfilter.PatternConfig{Strict: true, SignalOnly: true}, want: false},
+		{name: "administrator enforcing promotion", rule: promptfilter.PatternConfig{SignalOnly: false}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := automaticIntelligenceMayUpdate(tc.rule); got != tc.want {
+				t.Fatalf("automaticIntelligenceMayUpdate(%#v) = %v, want %v", tc.rule, got, tc.want)
+			}
+		})
 	}
 }
 
