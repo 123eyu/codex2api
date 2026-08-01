@@ -1105,6 +1105,7 @@ func runImageJobBatch(count int, execute func() ([]byte, int, error)) ([]byte, i
 	var combinedData []any
 	var partialErrors []string
 	lastStatus := 0
+	successStatus := 0
 	for index := 0; index < count; index++ {
 		responseJSON, status, callErr := execute()
 		lastStatus = status
@@ -1125,6 +1126,9 @@ func runImageJobBatch(count int, execute func() ([]byte, int, error)) ([]byte, i
 		if combined == nil {
 			combined = response
 		}
+		if successStatus == 0 {
+			successStatus = status
+		}
 		combinedData = append(combinedData, data...)
 	}
 	if len(combinedData) == 0 {
@@ -1140,7 +1144,7 @@ func runImageJobBatch(count int, execute func() ([]byte, int, error)) ([]byte, i
 	if err != nil {
 		return nil, lastStatus, partialErrors, err
 	}
-	return result, lastStatus, partialErrors, nil
+	return result, successStatus, partialErrors, nil
 }
 
 func shouldFallbackImageJobToJPEG(req imageGenerationJobPayload, upstreamStatus int, err error) bool {

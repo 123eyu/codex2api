@@ -180,7 +180,7 @@ func TestRunImageJobBatchAggregatesSuccessfulOutputs(t *testing.T) {
 	if err != nil || len(response) == 0 {
 		t.Fatalf("final failure batch response=%d error=%v", len(response), err)
 	}
-	if status != http.StatusGatewayTimeout || len(partialErrors) != 1 || !strings.Contains(partialErrors[0], "output 3") {
+	if status != http.StatusOK || len(partialErrors) != 1 || !strings.Contains(partialErrors[0], "output 3") {
 		t.Fatalf("final failure status=%d partialErrors=%#v", status, partialErrors)
 	}
 }
