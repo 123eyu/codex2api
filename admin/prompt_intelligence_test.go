@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/codex2api/security/promptfilter"
 )
 
 func TestSearchGitHubPromptIntelligence(t *testing.T) {
@@ -41,11 +43,60 @@ func TestValidateIntelligenceCandidate(t *testing.T) {
 	if err := validateIntelligenceCandidate(valid); err == nil {
 		t.Fatal("match-all regexp accepted")
 	}
-	if !intelligencePatternHasRiskSignal(`(?i)reverse\s+shell`) {
+	valid.Name = "all"
+	valid.Pattern = `(?i)\ball\b`
+	if err := validateIntelligenceCandidate(valid); err == nil {
+		t.Fatal("generic all regexp accepted")
+	}
+	if !intelligencePatternHasRiskSignal(`(?i)generate\s+and\s+execute\s+(?:a\s+)?reverse\s+shell`) {
 		t.Fatal("known high-risk signal was not recognized")
+	}
+	if intelligencePatternHasRiskSignal(`(?i)reverse\s+shell`) {
+		t.Fatal("partial risk phrase was accepted for automatic rule admission")
+	}
+	if intelligencePatternHasRiskSignal(`[sS][tT][rR]`) {
+		t.Fatal("ordinary code fragment passed the risk corpus by substring")
 	}
 	if intelligencePatternHasRiskSignal(`(?i)quarterly\s+report`) {
 		t.Fatal("benign-only candidate passed the risk corpus")
+	}
+}
+
+func TestAutomaticIntelligenceCandidateIsAuditOnly(t *testing.T) {
+	candidate := promptIntelligenceCandidate{
+		Name:     "generated_high_risk_rule",
+		Pattern:  `(?i)generate\s+and\s+execute\s+(?:a\s+)?reverse\s+shell`,
+		Weight:   100,
+		Category: "remote_access",
+		Strict:   true,
+	}
+	automatic := intelligenceCandidatePatternConfig(candidate, true)
+	if automatic.Strict || !automatic.SignalOnly || automatic.Weight != maxAutomaticIntelligenceWeight {
+		t.Fatalf("automatic candidate can enforce: %#v", automatic)
+	}
+	manual := intelligenceCandidatePatternConfig(candidate, false)
+	if !manual.Strict || manual.SignalOnly || manual.Weight != candidate.Weight {
+		t.Fatalf("manual candidate semantics changed: %#v", manual)
+	}
+}
+
+func TestAutomaticIntelligenceMayUpdateOnlyUnpromotedAuditRules(t *testing.T) {
+	disabled := false
+	for _, tc := range []struct {
+		name string
+		rule promptfilter.PatternConfig
+		want bool
+	}{
+		{name: "automatic signal-only rule", rule: promptfilter.PatternConfig{SignalOnly: true}, want: true},
+		{name: "disabled rule", rule: promptfilter.PatternConfig{Enabled: &disabled, SignalOnly: true}, want: false},
+		{name: "administrator strict promotion", rule: promptfilter.PatternConfig{Strict: true, SignalOnly: true}, want: false},
+		{name: "administrator enforcing promotion", rule: promptfilter.PatternConfig{SignalOnly: false}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := automaticIntelligenceMayUpdate(tc.rule); got != tc.want {
+				t.Fatalf("automaticIntelligenceMayUpdate(%#v) = %v, want %v", tc.rule, got, tc.want)
+			}
+		})
 	}
 }
 

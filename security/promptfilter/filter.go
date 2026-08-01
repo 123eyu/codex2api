@@ -3,6 +3,7 @@ package promptfilter
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"regexp/syntax"
 	"sort"
@@ -146,7 +147,7 @@ func DefaultConfig() Config {
 
 // RecommendedConfig returns the safe production preset used for fresh
 // installations and UI fallbacks. The master switch remains off so users keep
-// explicit control over rollout; once enabled, requests are blocked only by
+// explicit control over protection; once enabled, requests are blocked only by
 // high-confidence current-user rules with normalization enabled.
 func RecommendedConfig() Config {
 	cfg := DefaultConfig()
@@ -316,19 +317,32 @@ func NewEngine(cfg Config) (*Engine, error) {
 	disabled := disabledPatternSet(cfg.DisabledPatterns)
 	merged := append([]PatternConfig{}, defaultPatternConfigs...)
 	merged = append(merged, cfg.CustomPatterns...)
+	builtinCount := len(defaultPatternConfigs)
 
 	patterns := make([]compiledPattern, 0, len(merged))
-	for _, pattern := range merged {
+patternLoop:
+	for index, pattern := range merged {
+		custom := index >= builtinCount
 		pattern.Name = strings.TrimSpace(pattern.Name)
 		pattern.Pattern = strings.TrimSpace(pattern.Pattern)
 		pattern.Category = strings.TrimSpace(pattern.Category)
-		if pattern.Name == "" || (pattern.Pattern == "" && len(pattern.AllPatterns) == 0 && len(pattern.AnyPatterns) == 0) || pattern.Weight <= 0 {
-			continue
-		}
 		if disabled[strings.ToLower(pattern.Name)] {
 			continue
 		}
 		if pattern.Enabled != nil && !*pattern.Enabled {
+			continue
+		}
+		// Built-ins are trusted release artifacts: a compile failure is fatal so
+		// tests and startup validation expose the broken release. Custom rules
+		// are untrusted persisted input; quarantine one bad or over-broad rule
+		// without disabling every built-in detector for the request.
+		if custom {
+			if issue := AuditPatternConfig(pattern); issue != nil {
+				log.Printf("prompt filter: custom rule skipped name=%q code=%s message=%s", pattern.Name, issue.Code, issue.Message)
+				continue
+			}
+		}
+		if pattern.Name == "" || (pattern.Pattern == "" && len(pattern.AllPatterns) == 0 && len(pattern.AnyPatterns) == 0) || pattern.Weight <= 0 {
 			continue
 		}
 		var re *regexp.Regexp
@@ -336,6 +350,10 @@ func NewEngine(cfg Config) (*Engine, error) {
 		if pattern.Pattern != "" {
 			re, err = regexp.Compile(pattern.Pattern)
 			if err != nil {
+				if custom {
+					log.Printf("prompt filter: custom rule skipped name=%q code=%s message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
+					continue
+				}
 				return nil, fmt.Errorf("compile pattern %q: %w", pattern.Name, err)
 			}
 		}
@@ -355,14 +373,26 @@ func NewEngine(cfg Config) (*Engine, error) {
 		}
 		all, err := compileList(pattern.AllPatterns)
 		if err != nil {
+			if custom {
+				log.Printf("prompt filter: custom rule skipped name=%q code=%s field=all_patterns message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
+				continue patternLoop
+			}
 			return nil, fmt.Errorf("compile all pattern %q: %w", pattern.Name, err)
 		}
 		any, err := compileList(pattern.AnyPatterns)
 		if err != nil {
+			if custom {
+				log.Printf("prompt filter: custom rule skipped name=%q code=%s field=any_patterns message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
+				continue patternLoop
+			}
 			return nil, fmt.Errorf("compile any pattern %q: %w", pattern.Name, err)
 		}
 		exclude, err := compileList(pattern.ExcludePatterns)
 		if err != nil {
+			if custom {
+				log.Printf("prompt filter: custom rule skipped name=%q code=%s field=exclude_patterns message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
+				continue patternLoop
+			}
 			return nil, fmt.Errorf("compile exclude pattern %q: %w", pattern.Name, err)
 		}
 		compiled := compiledPattern{
@@ -1447,22 +1477,26 @@ func matchSentence(text string, start, end int) string {
 }
 
 func compiledPatternMatchIndex(text string, pattern compiledPattern) []int {
-	for _, re := range pattern.exclude {
+	if isBuiltinMinorSafetyPattern(pattern) {
+		return minorExploitationMatchIndex(text, pattern.re)
+	}
+	return compositePatternMatchIndex(text, pattern.re, pattern.all, pattern.any, pattern.exclude, pattern.cfg.MinMatches)
+}
+
+func compositePatternMatchIndex(text string, primary *regexp.Regexp, all, any, exclude []*regexp.Regexp, minimum int) []int {
+	for _, re := range exclude {
 		if re.MatchString(text) {
 			return nil
 		}
 	}
-	if isBuiltinMinorSafetyPattern(pattern) {
-		return minorExploitationMatchIndex(text, pattern.re)
-	}
 	first := []int(nil)
-	if pattern.re != nil {
-		first = pattern.re.FindStringIndex(text)
+	if primary != nil {
+		first = primary.FindStringIndex(text)
 		if first == nil {
 			return nil
 		}
 	}
-	for _, re := range pattern.all {
+	for _, re := range all {
 		loc := re.FindStringIndex(text)
 		if loc == nil {
 			return nil
@@ -1472,7 +1506,7 @@ func compiledPatternMatchIndex(text string, pattern compiledPattern) []int {
 		}
 	}
 	matchedAny := 0
-	for _, re := range pattern.any {
+	for _, re := range any {
 		loc := re.FindStringIndex(text)
 		if loc != nil {
 			matchedAny++
@@ -1481,8 +1515,7 @@ func compiledPatternMatchIndex(text string, pattern compiledPattern) []int {
 			}
 		}
 	}
-	minimum := pattern.cfg.MinMatches
-	if minimum <= 0 && len(pattern.any) > 0 {
+	if minimum <= 0 && len(any) > 0 {
 		minimum = 1
 	}
 	if matchedAny < minimum {

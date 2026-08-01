@@ -836,6 +836,13 @@ export interface RuntimeStatusResponse {
   checks: RuntimeCheck[]
 }
 
+export interface PromptFilterPatternQuarantine {
+  index: number
+  name: string
+  code: string
+  message: string
+}
+
 export interface SystemSettings {
   site_name: string
   site_logo: string
@@ -927,6 +934,7 @@ export interface SystemSettings {
   prompt_filter_max_text_length: number
   prompt_filter_sensitive_words: string
   prompt_filter_custom_patterns: string
+  prompt_filter_pattern_quarantines?: PromptFilterPatternQuarantine[]
   prompt_filter_disabled_patterns: string
   prompt_filter_review_enabled: boolean
   prompt_filter_review_api_key?: string
@@ -1003,6 +1011,7 @@ export interface PromptFilterMatch {
   weight: number
   category?: string
   strict?: boolean
+  signal_only?: boolean
 }
 
 export interface PromptFilterVerdict {
@@ -1063,6 +1072,11 @@ export interface PromptFilterLogsResponse {
 
 export interface PromptFilterTestResponse {
   verdict: PromptFilterVerdict
+  decision?: PromptGuardDecision
+  protocol?: string
+  provider?: string
+  endpoint?: string
+  model?: string
 }
 
 export interface PromptFilterRulePatternTestResponse {
@@ -1076,16 +1090,45 @@ export type PromptGuardProfile = 'balanced' | 'strict' | 'research'
 
 export type PromptGuardProvider = 'openai' | 'anthropic' | 'xai' | 'unknown'
 
-export type PromptGuardRolloutFallbackMode = 'warn' | 'shadow'
-
-export interface PromptGuardRolloutConfig {
+export interface PromptGuardDecision {
   enabled: boolean
-  percent: number
-  fallback_mode: PromptGuardRolloutFallbackMode
-  newapi_user_allowlist: string[]
-  api_key_allowlist: string[]
-  protocols: string[]
-  providers: string[]
+  mode: string
+  profile: string
+  application_prompt_kind?: string
+  action: string
+  would_action: string
+  score: number
+  raw_score: number
+  audit_score?: number
+  audit_raw_score?: number
+  reason_code?: string
+  reason?: string
+  terminal?: boolean
+  strike_eligible?: boolean
+  truncated?: boolean
+  current_user_truncated?: boolean
+  auxiliary_truncated?: boolean
+  primary_origin?: string
+  primary_detector?: string
+  signals?: PromptGuardSignal[]
+  errors?: string[]
+}
+
+export interface PromptGuardSignal {
+  detector: string
+  family: string
+  category?: string
+  correlation_key?: string
+  origin: string
+  layer_mode: string
+  score: number
+  raw_score: number
+  confidence: number
+  suggested_action: string
+  terminal_candidate?: boolean
+  strike_eligible?: boolean
+  reason?: string
+  matches?: PromptFilterMatch[]
 }
 
 export interface PromptGuardPerformanceConfig {
@@ -1121,7 +1164,6 @@ export interface PromptGuardConfig {
   allow_trusted_overrides: boolean
   provider_profiles: Partial<Record<PromptGuardProvider, PromptGuardProfile>>
   layers: Record<PromptGuardLayer, { mode: PromptGuardMode }>
-  rollout: PromptGuardRolloutConfig
   performance: PromptGuardPerformanceConfig
 }
 
