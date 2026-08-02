@@ -77,6 +77,7 @@ type LogFilters = {
   model: string
   apiKeyId: string
   q: string
+  reviewResult: string
 }
 
 type RiskProfileFilters = {
@@ -392,6 +393,7 @@ const emptyFilters: LogFilters = {
   model: '',
   apiKeyId: '',
   q: '',
+  reviewResult: '',
 }
 
 const defaultCustomRuleDraft: CustomRuleDraft = {
@@ -3130,10 +3132,106 @@ function OverviewView({
   )
 }
 
+function PromptLogFilterControls({
+  draftFilters,
+  setDraftFilters,
+  onApply,
+  onReset,
+  loading,
+  showAction = false,
+  showSource = false,
+  showReviewResult = false,
+}: {
+  draftFilters: LogFilters
+  setDraftFilters: Dispatch<SetStateAction<LogFilters>>
+  onApply: () => void
+  onReset: () => void
+  loading: boolean
+  showAction?: boolean
+  showSource?: boolean
+  showReviewResult?: boolean
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <>
+      <div className="mb-3 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
+        {showReviewResult ? (
+          <Field label={t('promptFilter.reviewResultFilter')}>
+            <Select
+              value={draftFilters.reviewResult}
+              onValueChange={(value) => setDraftFilters((current) => ({ ...current, reviewResult: value }))}
+              options={[
+                { label: t('common.all'), value: '' },
+                { label: t('promptFilter.labels.reviewFlagged'), value: 'flagged' },
+                { label: t('promptFilter.labels.reviewCleared'), value: 'cleared' },
+                { label: t('promptFilter.reviewResultError'), value: 'error' },
+              ]}
+            />
+          </Field>
+        ) : null}
+        {showAction ? (
+          <Field label={t('promptFilter.reviewFinalAction')}>
+            <Select
+              value={draftFilters.action}
+              onValueChange={(value) => setDraftFilters((current) => ({ ...current, action: value }))}
+              options={[
+                { label: t('common.all'), value: '' },
+                { label: t('promptFilter.modeBlock'), value: 'block' },
+                { label: t('promptFilter.modeWarn'), value: 'warn' },
+                { label: t('promptFilter.actionAllow'), value: 'allow' },
+              ]}
+            />
+          </Field>
+        ) : null}
+        {showSource ? (
+          <Field label={t('promptFilter.source')}>
+            <Select
+              value={draftFilters.source}
+              onValueChange={(value) => setDraftFilters((current) => ({ ...current, source: value }))}
+              options={[
+                { label: t('common.all'), value: '' },
+                { label: t('promptFilter.sources.local_filter'), value: 'local_filter' },
+                { label: t('promptFilter.sources.upstream_cyber_policy'), value: 'upstream_cyber_policy' },
+              ]}
+            />
+          </Field>
+        ) : null}
+        <Field label={t('promptFilter.endpoint')}>
+          <Input value={draftFilters.endpoint} onChange={(event) => setDraftFilters((current) => ({ ...current, endpoint: event.target.value }))} placeholder="/v1/responses" />
+        </Field>
+        <Field label={t('promptFilter.model')}>
+          <Input value={draftFilters.model} onChange={(event) => setDraftFilters((current) => ({ ...current, model: event.target.value }))} placeholder="gpt-5.5" />
+        </Field>
+        <Field label={t('promptFilter.apiKeyId')}>
+          <Input value={draftFilters.apiKeyId} onChange={(event) => setDraftFilters((current) => ({ ...current, apiKeyId: event.target.value }))} placeholder="ID" />
+        </Field>
+        <Field label={t('promptFilter.keyword')}>
+          <Input value={draftFilters.q} onChange={(event) => setDraftFilters((current) => ({ ...current, q: event.target.value }))} placeholder={t('promptFilter.keywordPlaceholder')} />
+        </Field>
+      </div>
+      <div className="mb-4 flex flex-wrap gap-2">
+        <Button onClick={onApply} disabled={loading}>
+          <Search className="size-4" />
+          {t('promptFilter.applyFilters')}
+        </Button>
+        <Button variant="outline" onClick={onReset} disabled={loading}>
+          <X className="size-4" />
+          {t('promptFilter.resetFilters')}
+        </Button>
+      </div>
+    </>
+  )
+}
+
 function LogsView({ clearLogs, clearing }: { clearLogs: () => Promise<void>; clearing: boolean }) {
   const { t } = useTranslation()
-  const [draftFilters, setDraftFilters] = useState<LogFilters>(emptyFilters)
-  const [filters, setFilters] = useState<LogFilters>(emptyFilters)
+  const [incidentDraftFilters, setIncidentDraftFilters] = useState<LogFilters>(emptyFilters)
+  const [incidentFilters, setIncidentFilters] = useState<LogFilters>(emptyFilters)
+  const [reviewDraftFilters, setReviewDraftFilters] = useState<LogFilters>(emptyFilters)
+  const [reviewFilters, setReviewFilters] = useState<LogFilters>(emptyFilters)
+  const [localDraftFilters, setLocalDraftFilters] = useState<LogFilters>(emptyFilters)
+  const [localFilters, setLocalFilters] = useState<LogFilters>(emptyFilters)
   const [logPage, setLogPage] = useState(1)
   const [logPageSize, setLogPageSize] = usePersistedPageSize('prompt_filter_logs', 20, DEFAULT_PAGE_SIZE_OPTIONS)
   const [reviewPage, setReviewPage] = useState(1)
@@ -3142,140 +3240,204 @@ function LogsView({ clearLogs, clearing }: { clearLogs: () => Promise<void>; cle
   const [incidentPageSize, setIncidentPageSize] = usePersistedPageSize('prompt_policy_incidents', 20, DEFAULT_PAGE_SIZE_OPTIONS)
   const [logs, setLogs] = useState<PromptFilterLog[]>([])
   const [total, setTotal] = useState(0)
-	const [reviewLogs, setReviewLogs] = useState<PromptFilterLog[]>([])
-	const [reviewTotal, setReviewTotal] = useState(0)
-	const [incidents, setIncidents] = useState<PromptPolicyIncident[]>([])
-	const [incidentTotal, setIncidentTotal] = useState(0)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [reviewLogs, setReviewLogs] = useState<PromptFilterLog[]>([])
+  const [reviewTotal, setReviewTotal] = useState(0)
+  const [incidents, setIncidents] = useState<PromptPolicyIncident[]>([])
+  const [incidentTotal, setIncidentTotal] = useState(0)
+  const [localLoading, setLocalLoading] = useState(false)
+  const [reviewLoading, setReviewLoading] = useState(false)
+  const [incidentLoading, setIncidentLoading] = useState(false)
+  const [localError, setLocalError] = useState<string | null>(null)
+  const [reviewError, setReviewError] = useState<string | null>(null)
+  const [incidentError, setIncidentError] = useState<string | null>(null)
 
-  const loadLogs = useCallback(async () => {
-    setLoading(true)
-    setError(null)
+  const loadLocalLogs = useCallback(async () => {
+    setLocalLoading(true)
+    setLocalError(null)
     try {
-		const [result, reviewResult, incidentResult] = await Promise.all([
-			api.getPromptFilterLogs({
-				page: logPage,
-				pageSize: logPageSize,
-				action: filters.action,
-				source: filters.source,
-				endpoint: filters.endpoint,
-				model: filters.model,
-				apiKeyId: filters.apiKeyId,
-				q: filters.q,
-				reviewed: false,
-			}),
-			api.getPromptFilterLogs({
-				page: reviewPage,
-				pageSize: reviewPageSize,
-				action: filters.action,
-				source: filters.source,
-				endpoint: filters.endpoint,
-				model: filters.model,
-				apiKeyId: filters.apiKeyId,
-				q: filters.q,
-				reviewed: true,
-			}),
-			api.getPromptPolicyIncidents({ page: incidentPage, pageSize: incidentPageSize, endpoint: filters.endpoint, model: filters.model, apiKeyId: filters.apiKeyId, q: filters.q }),
-		])
+      const result = await api.getPromptFilterLogs({
+        page: logPage,
+        pageSize: logPageSize,
+        action: localFilters.action,
+        source: localFilters.source,
+        endpoint: localFilters.endpoint,
+        model: localFilters.model,
+        apiKeyId: localFilters.apiKeyId,
+        q: localFilters.q,
+        reviewed: false,
+      })
       setLogs(result.logs ?? [])
       setTotal(result.total ?? 0)
-		setReviewLogs(reviewResult.logs ?? [])
-		setReviewTotal(reviewResult.total ?? 0)
-		setIncidents(incidentResult.incidents ?? [])
-		setIncidentTotal(incidentResult.total ?? 0)
     } catch (err) {
-      setError(getErrorMessage(err))
+      setLocalError(getErrorMessage(err))
     } finally {
-      setLoading(false)
+      setLocalLoading(false)
     }
-  }, [filters, incidentPage, incidentPageSize, logPage, logPageSize, reviewPage, reviewPageSize])
+  }, [localFilters, logPage, logPageSize])
+
+  const loadReviewLogs = useCallback(async () => {
+    setReviewLoading(true)
+    setReviewError(null)
+    try {
+      const result = await api.getPromptFilterLogs({
+        page: reviewPage,
+        pageSize: reviewPageSize,
+        action: reviewFilters.action,
+        endpoint: reviewFilters.endpoint,
+        model: reviewFilters.model,
+        apiKeyId: reviewFilters.apiKeyId,
+        q: reviewFilters.q,
+        reviewed: true,
+        reviewResult: reviewFilters.reviewResult,
+      })
+      setReviewLogs(result.logs ?? [])
+      setReviewTotal(result.total ?? 0)
+    } catch (err) {
+      setReviewError(getErrorMessage(err))
+    } finally {
+      setReviewLoading(false)
+    }
+  }, [reviewFilters, reviewPage, reviewPageSize])
+
+  const loadIncidents = useCallback(async () => {
+    setIncidentLoading(true)
+    setIncidentError(null)
+    try {
+      const result = await api.getPromptPolicyIncidents({
+        page: incidentPage,
+        pageSize: incidentPageSize,
+        endpoint: incidentFilters.endpoint,
+        model: incidentFilters.model,
+        apiKeyId: incidentFilters.apiKeyId,
+        q: incidentFilters.q,
+      })
+      setIncidents(result.incidents ?? [])
+      setIncidentTotal(result.total ?? 0)
+    } catch (err) {
+      setIncidentError(getErrorMessage(err))
+    } finally {
+      setIncidentLoading(false)
+    }
+  }, [incidentFilters, incidentPage, incidentPageSize])
 
   useEffect(() => {
-    void loadLogs()
-  }, [loadLogs])
+    void loadLocalLogs()
+  }, [loadLocalLogs])
 
-  const applyFilters = () => {
-    setLogPage(1)
-    setReviewPage(1)
-    setIncidentPage(1)
-    setFilters(draftFilters)
-  }
+  useEffect(() => {
+    void loadReviewLogs()
+  }, [loadReviewLogs])
 
-  const resetFilters = () => {
-    setDraftFilters(emptyFilters)
-    setFilters(emptyFilters)
-    setLogPage(1)
-    setReviewPage(1)
-    setIncidentPage(1)
-  }
+  useEffect(() => {
+    void loadIncidents()
+  }, [loadIncidents])
 
-	const logTotalPages = Math.max(1, Math.ceil(total / logPageSize))
-	const reviewTotalPages = Math.max(1, Math.ceil(reviewTotal / reviewPageSize))
-	const incidentTotalPages = Math.max(1, Math.ceil(incidentTotal / incidentPageSize))
+  const refreshAll = useCallback(async () => {
+    await Promise.all([loadIncidents(), loadReviewLogs(), loadLocalLogs()])
+  }, [loadIncidents, loadLocalLogs, loadReviewLogs])
+
+  const anyLoading = localLoading || reviewLoading || incidentLoading
+  const logTotalPages = Math.max(1, Math.ceil(total / logPageSize))
+  const reviewTotalPages = Math.max(1, Math.ceil(reviewTotal / reviewPageSize))
+  const incidentTotalPages = Math.max(1, Math.ceil(incidentTotal / incidentPageSize))
 
   return (
     <Card>
       <CardContent>
         <div className="mb-4 flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
-          <SectionTitle title={t('promptFilter.logsTitle')} />
+          <div>
+            <SectionTitle title={t('promptFilter.logsTitle')} />
+            <p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.auditRecordsCount', { incidents: incidentTotal, reviews: reviewTotal, logs: total })}</p>
+          </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={() => void loadLogs()} disabled={loading}>
+            <Button variant="outline" onClick={() => void refreshAll()} disabled={anyLoading}>
               <RefreshCw className="size-3.5" />
-              {t('common.refresh')}
+              {t('promptFilter.refreshAllLogs')}
             </Button>
-            <Button variant="outline" onClick={() => void clearLogs().then(loadLogs)} disabled={clearing || (logs.length === 0 && reviewLogs.length === 0 && incidents.length === 0)}>
+            <Button variant="outline" onClick={() => void clearLogs().then(refreshAll)} disabled={clearing || (logs.length === 0 && reviewLogs.length === 0 && incidents.length === 0)}>
               <Trash2 className="size-3.5" />
               {clearing ? t('promptFilter.clearing') : t('promptFilter.clearLogs')}
             </Button>
           </div>
         </div>
 
-        <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
-          <Field label={t('promptFilter.colAction')}>
-            <Select value={draftFilters.action} onValueChange={(value) => setDraftFilters((current) => ({ ...current, action: value }))} options={[{ label: t('common.all'), value: '' }, { label: t('promptFilter.modeBlock'), value: 'block' }, { label: t('promptFilter.modeWarn'), value: 'warn' }, { label: t('promptFilter.actionAllow'), value: 'allow' }]} />
-          </Field>
-          <Field label={t('promptFilter.source')}>
-            <Select value={draftFilters.source} onValueChange={(value) => setDraftFilters((current) => ({ ...current, source: value }))} options={[{ label: t('common.all'), value: '' }, { label: t('promptFilter.sources.local_filter'), value: 'local_filter' }, { label: t('promptFilter.sources.upstream_cyber_policy'), value: 'upstream_cyber_policy' }]} />
-          </Field>
-          <Field label={t('promptFilter.endpoint')}>
-            <Input value={draftFilters.endpoint} onChange={(event) => setDraftFilters((current) => ({ ...current, endpoint: event.target.value }))} placeholder="/v1/responses" />
-          </Field>
-          <Field label={t('promptFilter.model')}>
-            <Input value={draftFilters.model} onChange={(event) => setDraftFilters((current) => ({ ...current, model: event.target.value }))} placeholder="gpt-5.5" />
-          </Field>
-          <Field label={t('promptFilter.apiKeyId')}>
-            <Input value={draftFilters.apiKeyId} onChange={(event) => setDraftFilters((current) => ({ ...current, apiKeyId: event.target.value }))} placeholder="ID" />
-          </Field>
-          <Field label={t('promptFilter.keyword')}>
-            <Input value={draftFilters.q} onChange={(event) => setDraftFilters((current) => ({ ...current, q: event.target.value }))} placeholder={t('promptFilter.keywordPlaceholder')} />
-          </Field>
-        </div>
+        <div className="space-y-5">
+          <section className="rounded-xl border p-4">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">{t('promptFilter.cyberIncidentsTitle')} · {incidentTotal}</div>
+                <p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.sectionRefreshHint')}</p>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => void loadIncidents()} disabled={incidentLoading}>
+                <RefreshCw className="size-3.5" />
+                {t('common.refresh')}
+              </Button>
+            </div>
+            <PromptLogFilterControls
+              draftFilters={incidentDraftFilters}
+              setDraftFilters={setIncidentDraftFilters}
+              onApply={() => { setIncidentPage(1); setIncidentFilters(incidentDraftFilters) }}
+              onReset={() => { setIncidentDraftFilters(emptyFilters); setIncidentFilters(emptyFilters); setIncidentPage(1) }}
+              loading={incidentLoading}
+            />
+            <StateShell loading={incidentLoading} error={incidentError} isEmpty={!incidentLoading && incidents.length === 0} onRetry={() => void loadIncidents()} emptyTitle={t('promptFilter.noCyberIncidents')}>
+              <PromptPolicyIncidentsTable incidents={incidents} />
+              <Pagination page={incidentPage} totalPages={incidentTotalPages} totalItems={incidentTotal} pageSize={incidentPageSize} onPageChange={setIncidentPage} onPageSizeChange={(next) => { setIncidentPage(1); setIncidentPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} />
+            </StateShell>
+          </section>
 
-        <div className="mb-4 flex flex-wrap gap-2">
-          <Button onClick={applyFilters}>
-            <Search className="size-4" />
-            {t('promptFilter.applyFilters')}
-          </Button>
-          <Button variant="outline" onClick={resetFilters}>
-            <X className="size-4" />
-            {t('promptFilter.resetFilters')}
-          </Button>
-			<span className="self-center text-xs text-muted-foreground">{loading ? t('common.loading') : t('promptFilter.auditRecordsCount', { incidents: incidentTotal, reviews: reviewTotal, logs: total })}</span>
-        </div>
+          <section className="rounded-xl border p-4">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">{t('promptFilter.reviewHistoryTitle')} · {reviewTotal}</div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewHistoryDesc')}</p>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => void loadReviewLogs()} disabled={reviewLoading}>
+                <RefreshCw className="size-3.5" />
+                {t('common.refresh')}
+              </Button>
+            </div>
+            <PromptLogFilterControls
+              draftFilters={reviewDraftFilters}
+              setDraftFilters={setReviewDraftFilters}
+              onApply={() => { setReviewPage(1); setReviewFilters(reviewDraftFilters) }}
+              onReset={() => { setReviewDraftFilters(emptyFilters); setReviewFilters(emptyFilters); setReviewPage(1) }}
+              loading={reviewLoading}
+              showAction
+              showReviewResult
+            />
+            <StateShell loading={reviewLoading} error={reviewError} isEmpty={!reviewLoading && reviewLogs.length === 0} onRetry={() => void loadReviewLogs()} emptyTitle={t('promptFilter.reviewHistoryEmpty')}>
+              <PromptReviewLogsTable logs={reviewLogs} />
+              <Pagination page={reviewPage} totalPages={reviewTotalPages} totalItems={reviewTotal} pageSize={reviewPageSize} onPageChange={setReviewPage} onPageSizeChange={(next) => { setReviewPage(1); setReviewPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} />
+            </StateShell>
+          </section>
 
-		<StateShell loading={loading} error={error} isEmpty={!loading && logs.length === 0 && reviewLogs.length === 0 && incidents.length === 0} onRetry={() => void loadLogs()} emptyTitle={t('promptFilter.noLogs')}>
-			<div className="mb-2 mt-1 text-sm font-semibold">{t('promptFilter.cyberIncidentsTitle')} · {incidentTotal}</div>
-			<PromptPolicyIncidentsTable incidents={incidents} />
-			<Pagination page={incidentPage} totalPages={incidentTotalPages} totalItems={incidentTotal} pageSize={incidentPageSize} onPageChange={setIncidentPage} onPageSizeChange={(next) => { setIncidentPage(1); setIncidentPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} />
-			<div className="mb-2 mt-5 text-sm font-semibold">{t('promptFilter.reviewHistoryTitle')} · {reviewTotal}</div>
-			<p className="mb-3 text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewHistoryDesc')}</p>
-			<PromptReviewLogsTable logs={reviewLogs} />
-			<Pagination page={reviewPage} totalPages={reviewTotalPages} totalItems={reviewTotal} pageSize={reviewPageSize} onPageChange={setReviewPage} onPageSizeChange={(next) => { setReviewPage(1); setReviewPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} />
-			<div className="mb-2 mt-5 text-sm font-semibold">{t('promptFilter.localAuditLogsTitle')} · {total}</div>
-          <PromptFilterLogsTable logs={logs} />
-			<Pagination page={logPage} totalPages={logTotalPages} totalItems={total} pageSize={logPageSize} onPageChange={setLogPage} onPageSizeChange={(next) => { setLogPage(1); setLogPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} />
-        </StateShell>
+          <section className="rounded-xl border p-4">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">{t('promptFilter.localAuditLogsTitle')} · {total}</div>
+                <p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.sectionRefreshHint')}</p>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => void loadLocalLogs()} disabled={localLoading}>
+                <RefreshCw className="size-3.5" />
+                {t('common.refresh')}
+              </Button>
+            </div>
+            <PromptLogFilterControls
+              draftFilters={localDraftFilters}
+              setDraftFilters={setLocalDraftFilters}
+              onApply={() => { setLogPage(1); setLocalFilters(localDraftFilters) }}
+              onReset={() => { setLocalDraftFilters(emptyFilters); setLocalFilters(emptyFilters); setLogPage(1) }}
+              loading={localLoading}
+              showAction
+              showSource
+            />
+            <StateShell loading={localLoading} error={localError} isEmpty={!localLoading && logs.length === 0} onRetry={() => void loadLocalLogs()} emptyTitle={t('promptFilter.noLogs')}>
+              <PromptFilterLogsTable logs={logs} />
+              <Pagination page={logPage} totalPages={logTotalPages} totalItems={total} pageSize={logPageSize} onPageChange={setLogPage} onPageSizeChange={(next) => { setLogPage(1); setLogPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} />
+            </StateShell>
+          </section>
+        </div>
       </CardContent>
     </Card>
   )

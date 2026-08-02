@@ -7,13 +7,20 @@ const api = readFileSync(new URL('../api.ts', import.meta.url), 'utf8')
 const types = readFileSync(new URL('../types.ts', import.meta.url), 'utf8')
 const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))
 
-test('model review history has independent pagination and excludes it from local audit rows', () => {
+test('model review history has independent filtering and pagination from local audit rows', () => {
   assert.match(source, /usePersistedPageSize\('prompt_review_logs'/)
   assert.match(source, /page: reviewPage,[\s\S]*reviewed: true/)
   assert.match(source, /page: logPage,[\s\S]*reviewed: false/)
+  assert.match(source, /const loadReviewLogs = useCallback/)
+  assert.match(source, /const loadLocalLogs = useCallback/)
+  assert.match(source, /reviewResult: reviewFilters\.reviewResult/)
+  assert.match(source, /showReviewResult/)
   assert.match(source, /<PromptReviewLogsTable logs=\{reviewLogs\}/)
   assert.match(source, /page=\{reviewPage\}[\s\S]*totalItems=\{reviewTotal\}/)
   assert.match(api, /typeof params\.reviewed === 'boolean'/)
+  assert.match(api, /search\.set\('review_result', params\.reviewResult\)/)
+  assert.doesNotMatch(source, /const loadLogs = useCallback/)
+  assert.equal(zh.promptFilter.sectionRefreshHint, '筛选、翻页和刷新仅更新当前区域。')
 })
 
 test('model review history exposes parsed request and response metadata without secrets', () => {
