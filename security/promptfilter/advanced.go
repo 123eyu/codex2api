@@ -279,10 +279,10 @@ func RecommendedAdvancedConfig() AdvancedConfig {
 	cfg.Risk.IPWeightPercent = 20
 	cfg.Risk.SessionWeightPercent = 20
 	cfg.Sidecar.FailClosed = false
-	// Session persistence still uses synchronous cache lease/get/set. Keep it
-	// disabled in the production preset until the cache interface provides the
-	// CAS semantics required for ordered, non-blocking writes.
-	cfg.Session.Enabled = false
+	// Signed session correlation is enabled for the recommended preset. Only an
+	// explicit continuation inherits the preceding accepted user intent for
+	// enforcement; heuristic short-fragment correlation remains opt-in.
+	cfg.Session.Enabled = true
 	cfg.Guard.DefaultProfile = GuardProfileBalanced
 	cfg.Guard.Performance.AsyncShadowAuxiliaryEnabled = true
 	cfg.Guard.Performance.MaxSegments = RecommendedGuardMaxSegments

@@ -662,7 +662,7 @@ func finalizePromptGuardDecision(decision promptfilter.Decision, verdict promptf
 	if decision.PrimaryOrigin == promptfilter.OriginApplicationCandidate {
 		decision.StrikeEligible = false
 	}
-	if verdict.Reviewed && !verdict.ReviewFlagged {
+	if verdict.Reviewed && !verdict.ReviewFlagged && finalAction == promptfilter.ActionAllow {
 		decision.Terminal = false
 		decision.StrikeEligible = false
 	}

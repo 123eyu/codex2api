@@ -420,6 +420,11 @@ func ApplyReviewOutcome(verdict Verdict, outcome ReviewOutcome, reviewErr error,
 		if cfg.FailClosed {
 			verdict.Action = ActionBlock
 			verdict.Reason = "prompt review failed: " + reviewErr.Error()
+		} else if localAction != ActionAllow {
+			// Fail-open controls only the unavailable external reviewer. It must
+			// not erase an independently reached local warn/block decision.
+			verdict.Action = localAction
+			verdict.Reason = "prompt review failed; retained local filter decision: " + reviewErr.Error()
 		} else {
 			verdict.Action = ActionAllow
 			verdict.Reason = "prompt review failed; allowed by policy: " + reviewErr.Error()
@@ -427,6 +432,14 @@ func ApplyReviewOutcome(verdict Verdict, outcome ReviewOutcome, reviewErr error,
 		return verdict
 	}
 	if !outcome.Flagged {
+		// A terminal deterministic rule is an independent safety boundary. The
+		// model remains useful for clean and ambiguous requests, but a false clear
+		// cannot downgrade evidence already classified as terminal locally.
+		if localAction == ActionBlock && (verdict.TerminalStrictHit || verdict.TerminalCategoryHit) {
+			verdict.Action = ActionBlock
+			verdict.Reason = "local terminal policy retained after prompt review passed"
+			return verdict
+		}
 		verdict.Action = ActionAllow
 		if localAction == ActionWarn || localAction == ActionBlock {
 			verdict.Reason = "prompt review cleared local filter match"
