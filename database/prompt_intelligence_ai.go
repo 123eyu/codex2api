@@ -14,6 +14,86 @@ const (
 	PromptRuleCandidateSourceAIIdentityRollback = "ai_identity_rollback"
 )
 
+type PromptRuleCandidateAIAnalysisSummary struct {
+	Count  int
+	Latest *PromptRuleCandidateEvidence
+}
+
+// ListLatestPromptRuleCandidateAIAnalyses returns the latest durable AI
+// attribution for each requested candidate together with its analysis count.
+// The result is derived from evidence rows, so it survives restarts and is
+// shared by every admin replica.
+func (db *DB) ListLatestPromptRuleCandidateAIAnalyses(ctx context.Context, candidateIDs []int64) (map[int64]PromptRuleCandidateAIAnalysisSummary, error) {
+	result := make(map[int64]PromptRuleCandidateAIAnalysisSummary)
+	if db == nil || len(candidateIDs) == 0 {
+		return result, nil
+	}
+	unique := make([]int64, 0, len(candidateIDs))
+	seen := make(map[int64]struct{}, len(candidateIDs))
+	for _, candidateID := range candidateIDs {
+		if candidateID <= 0 {
+			continue
+		}
+		if _, exists := seen[candidateID]; exists {
+			continue
+		}
+		seen[candidateID] = struct{}{}
+		unique = append(unique, candidateID)
+	}
+	if len(unique) == 0 {
+		return result, nil
+	}
+	sourcePlaceholder := "$1"
+	if db.isSQLite() {
+		sourcePlaceholder = "?"
+	}
+	placeholders := dbPlaceholders(db.isSQLite(), 2, len(unique))
+	args := make([]any, 0, len(unique)+1)
+	args = append(args, PromptRuleCandidateSourceAIAnalysis)
+	for _, candidateID := range unique {
+		args = append(args, candidateID)
+	}
+	rows, err := db.conn.QueryContext(ctx, `
+		SELECT evidence.id, evidence.candidate_id, evidence.source_kind, evidence.source_ref,
+		       evidence.source_ref_hash, evidence.sample_preview, evidence.metadata_json,
+		       evidence.request_protocol, evidence.request_provider, evidence.model,
+		       evidence.api_key_id, evidence.api_key_name,
+		       COALESCE(evidence.prompt_policy_incident_id, ''), evidence.observed_at,
+		       evidence.created_at, latest.analysis_count
+		FROM prompt_rule_candidate_evidence evidence
+		JOIN (
+			SELECT candidate_id, COUNT(*) AS analysis_count, MAX(id) AS latest_id
+			FROM prompt_rule_candidate_evidence
+			WHERE source_kind=`+sourcePlaceholder+` AND candidate_id IN (`+strings.Join(placeholders, ",")+`)
+			GROUP BY candidate_id
+		) latest ON latest.latest_id=evidence.id
+		ORDER BY evidence.candidate_id
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		item := &PromptRuleCandidateEvidence{}
+		var observedRaw, createdRaw any
+		var count int
+		if err := rows.Scan(&item.ID, &item.CandidateID, &item.SourceKind, &item.SourceRef,
+			&item.SourceRefHash, &item.SamplePreview, &item.MetadataJSON, &item.Protocol,
+			&item.Provider, &item.Model, &item.APIKeyID, &item.APIKeyName,
+			&item.PromptPolicyIncidentID, &observedRaw, &createdRaw, &count); err != nil {
+			return nil, err
+		}
+		if item.ObservedAt, err = parseDBTimeValue(observedRaw); err != nil {
+			return nil, err
+		}
+		if item.CreatedAt, err = parseDBTimeValue(createdRaw); err != nil {
+			return nil, err
+		}
+		result[item.CandidateID] = PromptRuleCandidateAIAnalysisSummary{Count: count, Latest: item}
+	}
+	return result, rows.Err()
+}
+
 // AddPromptRuleCandidateEvidence attaches one deduplicated audit event to an
 // existing candidate without changing its kind, source, or proposed rule.
 func (db *DB) AddPromptRuleCandidateEvidence(ctx context.Context, candidateID int64, raw PromptRuleCandidateEvidenceInput) (*PromptRuleCandidateEvidence, bool, error) {

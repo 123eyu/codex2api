@@ -14,6 +14,7 @@ import (
 )
 
 const promptRiskTrustSyncInterval = 30 * time.Second
+const promptRiskTrustAdaptiveReconcileInterval = 5 * time.Minute
 
 type promptRiskTrustPolicyRequest struct {
 	DurationHours int    `json:"duration_hours"`
@@ -29,8 +30,25 @@ func (h *Handler) startPromptRiskTrustSync(ctx context.Context) {
 		ticker := time.NewTicker(promptRiskTrustSyncInterval)
 		defer ticker.Stop()
 		lastError := ""
+		lastAdaptiveReconcile := time.Time{}
 		for {
-			policies, err := h.db.ReconcilePromptRiskTrustPolicies(ctx)
+			promptFilterConfig := h.store.GetPromptFilterConfig()
+			advanced := promptFilterConfig.Advanced.AdaptiveReview
+			now := time.Now().UTC()
+			var policies []*database.PromptRiskTrustPolicy
+			var err error
+			if promptFilterConfig.Review.Enabled && advanced.Enabled && (lastAdaptiveReconcile.IsZero() || now.Sub(lastAdaptiveReconcile) >= promptRiskTrustAdaptiveReconcileInterval) {
+				policies, err = h.db.ReconcileAdaptivePromptRiskTrustPolicies(ctx, database.PromptRiskTrustAdaptiveOptions{
+					MinCleanReviews: advanced.MinCleanReviews, MinObservationHours: advanced.MinObservationHours,
+					TrustDurationHours: advanced.TrustDurationHours, ReactivationCleanReviews: advanced.ReactivationCleanReviews,
+					ReactivationCooldownHours: advanced.ReactivationCooldownHours, RiskThreshold: 35,
+				})
+				if err == nil {
+					lastAdaptiveReconcile = now
+				}
+			} else {
+				policies, err = h.db.ReconcilePromptRiskTrustPolicies(ctx)
+			}
 			if err != nil {
 				if message := err.Error(); message != lastError {
 					log.Printf("prompt risk adaptive trust sync failed: %v", err)

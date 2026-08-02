@@ -110,7 +110,7 @@ func TestRecommendedAdvancedConfigUsesExplicitCurrentPromptLayers(t *testing.T) 
 	if !cfg.Guard.Performance.AsyncShadowAuxiliaryEnabled || !cfg.Guard.Performance.ExactSegmentCacheEnabled || cfg.Guard.Performance.ShadowOverflowMode != GuardShadowOverflowDrop {
 		t.Fatalf("recommended performance config = %+v", cfg.Guard.Performance)
 	}
-	if cfg.Session.Enabled || !cfg.Session.RequireSignedIdentity || cfg.Session.CombineShortFragments {
+	if !cfg.Session.Enabled || !cfg.Session.RequireSignedIdentity || cfg.Session.CombineShortFragments {
 		t.Fatalf("recommended session config = %+v", cfg.Session)
 	}
 	if len(cfg.Enforcement.TerminalCategories) != 0 {

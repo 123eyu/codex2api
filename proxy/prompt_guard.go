@@ -339,7 +339,7 @@ func (h *Handler) evaluatePromptGuardEnvelope(c *gin.Context, cfg promptfilter.C
 		advancedCfg := cfg
 		verdict = h.applyPromptSemanticProtection(c, text, verdict, advancedCfg)
 		if shouldReviewPromptGuardDecision(decision, verdict, cfg) {
-			if policy, subjectKey, trusted := h.promptRiskTrustPolicyForRequest(c); trusted && promptRiskTrustCanBypassReview(decision, verdict, reviewText) {
+			if policy, subjectKey, trusted := h.promptRiskTrustPolicyForRequest(c); trusted && promptRiskTrustCanBypassReview(decision, verdict, reviewText) && !promptRiskTrustReviewRequired(c, cfg, policy, subjectKey) {
 				verdict.Reason = "adaptive trusted profile bypassed synchronous model review"
 				decision.ReasonCode = "adaptive_trust_review_bypass"
 				h.recordPromptRiskTrustBypass(c, policy, subjectKey)
@@ -349,7 +349,11 @@ func (h *Handler) evaluatePromptGuardEnvelope(c *gin.Context, cfg promptfilter.C
 				if compatibilityBlock {
 					verdict = retainPromptGuardAuxiliaryCompatibilityBlock(verdict)
 				}
-				if trusted && (localTrustRisk || verdict.ReviewFlagged || verdict.Action == promptfilter.ActionBlock) {
+				if trusted && !localTrustRisk && verdict.ReviewModel != "" && verdict.ReviewError == "" && !verdict.ReviewFlagged && verdict.Action == promptfilter.ActionAllow {
+					h.recordPromptRiskTrustModelReview(c, policy, subjectKey)
+				}
+				reviewTrustRisk := promptRiskTrustReviewShouldSuspend(verdict)
+				if trusted && (localTrustRisk || reviewTrustRisk) {
 					h.suspendPromptRiskTrustPolicy(policy, subjectKey, "模型复核或本地高危规则命中")
 				}
 			}
@@ -502,14 +506,18 @@ func (h *Handler) evaluateLegacyPromptGuard(c *gin.Context, ctx context.Context,
 	verdict := promptfilter.InspectText(text, cfg)
 	verdict = h.applyPromptSemanticProtection(c, text, verdict, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
-		if policy, subjectKey, trusted := h.promptRiskTrustPolicyForRequest(c); trusted && verdict.Action == promptfilter.ActionAllow && verdict.Score == 0 && verdict.RawScore == 0 && len(verdict.Matched) == 0 && strings.TrimSpace(text) != "" {
+		if policy, subjectKey, trusted := h.promptRiskTrustPolicyForRequest(c); trusted && verdict.Action == promptfilter.ActionAllow && verdict.Score == 0 && verdict.RawScore == 0 && len(verdict.Matched) == 0 && strings.TrimSpace(text) != "" && !promptRiskTrustReviewRequired(c, cfg, policy, subjectKey) {
 			verdict.Reason = "adaptive trusted profile bypassed synchronous model review"
 			h.recordPromptRiskTrustBypass(c, policy, subjectKey)
 		} else {
 			localTrustRisk := trusted && (verdict.Action != promptfilter.ActionAllow || verdict.Score > 0 || verdict.RawScore > 0 || len(verdict.Matched) > 0)
 			verdict = h.reviewPromptFilterVerdict(ctx, text, verdict, cfg)
 			verdict = promptfilter.ApplyReviewMode(verdict, cfg.Mode)
-			if trusted && (localTrustRisk || verdict.ReviewFlagged || verdict.Action == promptfilter.ActionBlock) {
+			if trusted && !localTrustRisk && verdict.ReviewModel != "" && verdict.ReviewError == "" && !verdict.ReviewFlagged && verdict.Action == promptfilter.ActionAllow {
+				h.recordPromptRiskTrustModelReview(c, policy, subjectKey)
+			}
+			reviewTrustRisk := promptRiskTrustReviewShouldSuspend(verdict)
+			if trusted && (localTrustRisk || reviewTrustRisk) {
 				h.suspendPromptRiskTrustPolicy(policy, subjectKey, "模型复核或本地高危规则命中")
 			}
 		}
@@ -662,7 +670,7 @@ func finalizePromptGuardDecision(decision promptfilter.Decision, verdict promptf
 	if decision.PrimaryOrigin == promptfilter.OriginApplicationCandidate {
 		decision.StrikeEligible = false
 	}
-	if verdict.Reviewed && !verdict.ReviewFlagged {
+	if verdict.Reviewed && !verdict.ReviewFlagged && finalAction == promptfilter.ActionAllow {
 		decision.Terminal = false
 		decision.StrikeEligible = false
 	}

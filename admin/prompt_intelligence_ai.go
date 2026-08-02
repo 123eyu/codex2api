@@ -122,6 +122,41 @@ type promptIntelligenceAICallAttribution struct {
 	APIKeyName string
 }
 
+func promptIntelligenceAIAnalysisFromEvidence(evidence *database.PromptRuleCandidateEvidence) *promptIntelligenceAIAnalysisResponse {
+	if evidence == nil || evidence.SourceKind != database.PromptRuleCandidateSourceAIAnalysis {
+		return nil
+	}
+	var metadata promptIntelligenceAIAnalysisMetadata
+	if json.Unmarshal([]byte(evidence.MetadataJSON), &metadata) != nil || metadata.Result.Decision == "" {
+		return nil
+	}
+	provider := strings.TrimSpace(metadata.Provider)
+	if provider == "" {
+		provider = strings.TrimSpace(evidence.Provider)
+	}
+	model := strings.TrimSpace(metadata.Model)
+	if model == "" {
+		model = strings.TrimSpace(evidence.Model)
+	}
+	identityUpdate := promptIdentityUpdateResult{
+		Mode:               promptIdentityUpdateModeSuggest,
+		AnalysisEvidenceID: evidence.ID,
+	}
+	if metadata.Result.IdentityPatch != nil {
+		identityUpdate.Suggested = true
+		identityUpdate.Clauses = append([]string(nil), metadata.Result.IdentityPatch.Clauses...)
+		identityUpdate.BlockReason = metadata.IdentityValidationError
+	}
+	return &promptIntelligenceAIAnalysisResponse{
+		AnalysisEvidenceID: evidence.ID,
+		Provider:           provider,
+		Model:              model,
+		Decision:           metadata.Result,
+		RuleError:          metadata.RuleValidationError,
+		IdentityUpdate:     identityUpdate,
+	}
+}
+
 func (h *Handler) GetPromptIntelligenceAIProviders(c *gin.Context) {
 	keys, err := h.db.ListAPIKeys(c.Request.Context())
 	if err != nil {

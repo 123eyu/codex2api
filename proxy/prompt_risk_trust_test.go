@@ -67,3 +67,36 @@ func TestPromptRiskAdaptiveTrustBypassesOnlyCleanSynchronousReview(t *testing.T)
 		t.Fatal("risky request did not immediately remove adaptive trust from runtime")
 	}
 }
+
+func TestPromptRiskAdaptiveReviewSamplesAndDoesNotBlameReviewErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Set(promptPolicyRequestCorrelationContextKey, "adaptive-sample-request")
+	now := time.Now().UTC()
+	policy := database.PromptRiskTrustPolicy{ID: 9, Source: database.PromptRiskTrustSourceAutomatic, LastModelReviewAt: &now}
+	cfg := promptfilter.DefaultConfig()
+	cfg.Advanced.AdaptiveReview.Enabled = true
+	cfg.Advanced.AdaptiveReview.SamplePercent = 0
+	cfg.Advanced.AdaptiveReview.ForceReviewIntervalMinutes = 360
+	if promptRiskTrustReviewRequired(c, cfg, policy, "adaptive-recent") {
+		t.Fatal("recently reviewed low-risk policy unexpectedly required another model review")
+	}
+	stale := now.Add(-7 * time.Hour)
+	policy.LastModelReviewAt = &stale
+	if !promptRiskTrustReviewRequired(c, cfg, policy, "adaptive-stale") {
+		t.Fatal("stale policy did not force a model review")
+	}
+	if !promptRiskTrustReviewRequired(c, cfg, policy, "adaptive-stale") {
+		t.Fatal("parallel stale request unexpectedly bypassed the forced review")
+	}
+	decision := promptfilter.Decision{Action: promptfilter.ActionAllow}
+	verdict := promptfilter.Verdict{Action: promptfilter.ActionAllow, ReviewError: "timeout"}
+	if promptRiskTrustShouldSuspend(decision, verdict) {
+		t.Fatal("review infrastructure error was attributed to user risk")
+	}
+	verdict.Action = promptfilter.ActionBlock
+	if promptRiskTrustReviewShouldSuspend(verdict) {
+		t.Fatal("fail-closed review error was attributed to user risk")
+	}
+}

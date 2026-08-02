@@ -282,3 +282,12 @@ test('Prompt Filter exposes explicit review scope and live connection testing', 
     assert.equal(source.includes(fragment), true, `full-request review control is missing: ${fragment}`)
   }
 })
+
+test('adaptive model review is a single operator switch with backend-owned safety defaults', () => {
+  const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
+  const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))
+  assert.match(source, /\['adaptive_review', 'enabled'\]/)
+  assert.match(source, /adaptiveReview\.enabled/)
+  assert.match(zh.promptFilter.adaptiveReview.description, /新用户先完整复核/)
+  assert.match(zh.promptFilter.adaptiveReview.defaults, /10 次.*24 小时.*5%.*6 小时/)
+})

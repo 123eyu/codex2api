@@ -3655,7 +3655,15 @@ func ExtractText(body []byte, endpoint string, maxLen int) string {
 	return limitScanText(strings.Join(parts, "\n"), maxLen)
 }
 
-var continuationOnlyPattern = regexp.MustCompile(`(?i)^(?:继续(?:吧|做|处理|执行|完成|生成|写)?(?:它|这个|上面(?:的)?内容|之前(?:的)?内容)?|接着(?:做|处理|执行)?|照做|按(?:上面|之前|刚才)(?:的)?(?:要求|内容|方案)?(?:继续)?(?:做|执行|处理)?|就这样做|continue(?:\s+(?:please|with\s+(?:that|it)))?|go\s+ahead|do\s+it|proceed(?:\s+with\s+it)?|carry\s+on|same\s+as\s+above)[。.!！\s]*$`)
+var continuationOnlyPattern = regexp.MustCompile(`(?i)^(?:(?:(?:请|麻烦)\s*)?继续(?:一下|吧|做|处理|执行|完成|生成|写)?(?:它|这个|上面(?:的)?内容|之前(?:的)?内容)?|接着(?:做|处理|执行)?|照做|按(?:上面|之前|刚才)(?:的)?(?:要求|内容|方案)?(?:继续)?(?:做|执行|处理)?|就这样做|continue(?:\s+(?:please|with\s+(?:that|it)))?|go\s+ahead|do\s+it|proceed(?:\s+with\s+it)?|carry\s+on|same\s+as\s+above|продолж(?:и|ай|айте)(?:\s+(?:это|с\s+этим))?|сделай\s+это|действуй|contin[uú]a(?:\s+con\s+(?:eso|esto))?|sigue(?:\s+adelante)?|hazlo|continuez?|vas[-\s]?y|fais[-\s]?le|mach\s+weiter|mach\s+es|weiter(?:machen)?|続けて|続行して|そのまま続けて|계속해(?:요)?|계속하세요|진행해(?:요)?)[。.!！?？…\s]*$`)
+
+// IsContinuationOnly reports whether text is only a short instruction to
+// continue the immediately preceding user intent. Protocol adapters and
+// session correlation share this classifier so their language coverage cannot
+// drift apart.
+func IsContinuationOnly(text string) bool {
+	return isContinuationOnly(text)
+}
 
 func isContinuationOnly(text string) bool {
 	text = strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(text)), " "))

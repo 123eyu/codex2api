@@ -67,3 +67,51 @@ func TestPromptIntelligenceAIEvidenceAndAdvancedConfigCAS(t *testing.T) {
 		t.Fatalf("candidate=%#v err=%v", item, err)
 	}
 }
+
+func TestListLatestPromptRuleCandidateAIAnalyses(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "prompt-intelligence-ai-latest.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	candidate, _, err := db.StagePromptRuleCandidate(ctx, PromptRuleCandidateInput{
+		Fingerprint: strings.Repeat("f", 64), Kind: PromptRuleCandidateKindEvidence,
+		Source: PromptRuleCandidateSourceUpstreamCyberPolicy, SamplePreview: "redacted CY evidence",
+	}, PromptRuleCandidateEvidenceInput{
+		SourceKind: PromptRuleCandidateSourceUpstreamCyberPolicy, SourceRef: "incident-latest",
+		SourceRefHash: strings.Repeat("1", 64), ObservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, added, err := db.AddPromptRuleCandidateEvidence(ctx, candidate.ID, PromptRuleCandidateEvidenceInput{
+		SourceKind: PromptRuleCandidateSourceAIAnalysis, SourceRef: "analysis-first",
+		SourceRefHash: strings.Repeat("2", 64), MetadataJSON: `{"version":1,"result":{"decision":"no_change","confidence":0.8,"reason":"first"}}`,
+		Provider: "review", Model: "deepseek-first", ObservedAt: time.Now().UTC().Add(-time.Minute),
+	})
+	if err != nil || !added {
+		t.Fatalf("first evidence=%#v added=%v err=%v", first, added, err)
+	}
+	latest, added, err := db.AddPromptRuleCandidateEvidence(ctx, candidate.ID, PromptRuleCandidateEvidenceInput{
+		SourceKind: PromptRuleCandidateSourceAIAnalysis, SourceRef: "analysis-latest",
+		SourceRefHash: strings.Repeat("3", 64), MetadataJSON: `{"version":1,"result":{"decision":"rule","confidence":0.95,"reason":"latest"}}`,
+		Provider: "review", Model: "deepseek-latest", ObservedAt: time.Now().UTC(),
+	})
+	if err != nil || !added {
+		t.Fatalf("latest evidence=%#v added=%v err=%v", latest, added, err)
+	}
+
+	summaries, err := db.ListLatestPromptRuleCandidateAIAnalyses(ctx, []int64{candidate.ID, candidate.ID, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, ok := summaries[candidate.ID]
+	if !ok || summary.Count != 2 || summary.Latest == nil || summary.Latest.ID != latest.ID || summary.Latest.Model != "deepseek-latest" {
+		t.Fatalf("summary=%#v", summary)
+	}
+	empty, err := db.ListLatestPromptRuleCandidateAIAnalyses(ctx, nil)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty=%#v err=%v", empty, err)
+	}
+}

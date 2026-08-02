@@ -1196,6 +1196,7 @@ export interface PromptRiskTrustPolicy {
   subject_type: PromptRiskSubjectType
   subject_key: string
   status: PromptRiskTrustStatus | string
+  source: 'manual' | 'automatic' | string
   reason?: string
   risk_threshold: number
   valid_until: ISODateString
@@ -1204,6 +1205,8 @@ export interface PromptRiskTrustPolicy {
   last_risk_level?: PromptRiskLevel | string
   bypass_count: number
   last_bypass_at?: ISODateString
+  model_review_count: number
+  last_model_review_at?: ISODateString
   created_at: ISODateString
   updated_at: ISODateString
 }
@@ -1582,6 +1585,10 @@ export interface PromptIntelligenceCandidate extends PromptIntelligenceRuleDraft
   model?: string
   api_key_id?: number
   api_key_name?: string
+  ai_analyzed?: boolean
+  ai_analysis_count?: number
+  ai_analyzed_at?: string
+  latest_ai_analysis?: PromptIntelligenceAIAnalysisResponse
   created_at?: string
   updated_at?: string
   last_seen_at?: string

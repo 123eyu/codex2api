@@ -200,6 +200,30 @@ func TestPromptIntelligenceAIAnalysisManualApplyAndRollback(t *testing.T) {
 	if analysis.AnalysisEvidenceID == 0 || analysis.IdentityUpdate.Applied || !analysis.IdentityUpdate.Suggested {
 		t.Fatalf("analysis=%#v", analysis)
 	}
+	listRecorder := httptest.NewRecorder()
+	listContext, _ := gin.CreateTestContext(listRecorder)
+	listContext.Request = httptest.NewRequest(http.MethodGet, "/candidates?page=1&page_size=20&status=pending", nil)
+	handler.ListPromptIntelligenceCandidates(listContext)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("candidate list status=%d body=%s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var listed promptIntelligenceCandidatesResponse
+	if err := json.Unmarshal(listRecorder.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	var restored *promptIntelligenceCandidate
+	for index := range listed.Candidates {
+		if listed.Candidates[index].ID == candidate.ID {
+			restored = &listed.Candidates[index]
+			break
+		}
+	}
+	if restored == nil || !restored.AIAnalyzed || restored.AIAnalysisCount != 1 || restored.AIAnalyzedAt == nil || restored.LatestAIAnalysis == nil {
+		t.Fatalf("persisted analysis marker missing: %#v", restored)
+	}
+	if restored.LatestAIAnalysis.AnalysisEvidenceID != analysis.AnalysisEvidenceID || restored.LatestAIAnalysis.Decision.Decision != analysis.Decision.Decision || restored.LatestAIAnalysis.Decision.Reason != analysis.Decision.Reason {
+		t.Fatalf("restored analysis=%#v original=%#v", restored.LatestAIAnalysis, analysis)
+	}
 	messages, _ := requestBody["messages"].([]any)
 	if len(messages) != 2 {
 		t.Fatalf("analysis request messages=%#v", messages)

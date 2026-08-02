@@ -36,6 +36,7 @@ type AdvancedConfig struct {
 	NewAPI          NewAPIConfig          `json:"newapi"`
 	Guard           GuardConfig           `json:"guard"`
 	ReviewAdapter   ReviewAdapterConfig   `json:"review_adapter"`
+	AdaptiveReview  AdaptiveReviewConfig  `json:"adaptive_review"`
 }
 
 const (
@@ -169,6 +170,21 @@ type RiskConfig struct {
 	SessionWeightPercent int  `json:"session_weight_percent"`
 }
 
+// AdaptiveReviewConfig reduces synchronous model-review latency only after a
+// signed person identity has accumulated enough clean reviewed evidence. Local
+// deterministic protection remains active on every request, and periodic
+// sampling plus an upper review interval prevent trust from becoming permanent.
+type AdaptiveReviewConfig struct {
+	Enabled                    bool `json:"enabled"`
+	MinCleanReviews            int  `json:"min_clean_reviews"`
+	MinObservationHours        int  `json:"min_observation_hours"`
+	SamplePercent              int  `json:"sample_percent"`
+	ForceReviewIntervalMinutes int  `json:"force_review_interval_minutes"`
+	TrustDurationHours         int  `json:"trust_duration_hours"`
+	ReactivationCleanReviews   int  `json:"reactivation_clean_reviews"`
+	ReactivationCooldownHours  int  `json:"reactivation_cooldown_hours"`
+}
+
 type SidecarConfig struct {
 	Enabled                bool   `json:"enabled"`
 	BaseURL                string `json:"base_url"`
@@ -246,6 +262,7 @@ func DefaultAdvancedConfig() AdvancedConfig {
 		Normalization:   NormalizationConfig{MaxDecodeRuns: 1, MaxDecodedBytes: 32768, MaxEncodedBlocks: 16},
 		ContextDiscount: ContextDiscountConfig{Enabled: true, IntentAware: true, MaxDiscount: 90, OperationalMaxDiscount: 0},
 		Risk:            RiskConfig{WindowSeconds: 600, BlockThreshold: 100, ReviewThreshold: 60, UserWeightPercent: 50, IPWeightPercent: 30, SessionWeightPercent: 20},
+		AdaptiveReview:  AdaptiveReviewConfig{MinCleanReviews: 10, MinObservationHours: 24, SamplePercent: 5, ForceReviewIntervalMinutes: 360, TrustDurationHours: 168, ReactivationCleanReviews: 5, ReactivationCooldownHours: 24},
 		Sidecar:         SidecarConfig{TimeoutSeconds: 1, FailClosed: false, MinScore: 30, SamplePercent: 5, Mode: GuardModeShadow, MaxTextLength: 8192, CacheTTLSeconds: 60, MaxConcurrent: 16, CircuitBreakerFailures: 3, CircuitBreakerSeconds: 30},
 		Session:         SessionConfig{WindowSeconds: 300, MaxFragments: 3, MaxTextLength: 4096, ShortFragmentMaxChars: 24, RequireSignedIdentity: true},
 		Attachment:      AttachmentConfig{TimeoutSeconds: 2, MaxFiles: 4, MaxBytes: 65536, MaxExtractedChars: 8192, CacheTTLSeconds: 300, MaxConcurrent: 8, CircuitBreakerFailures: 3, CircuitBreakerSeconds: 30},
@@ -278,11 +295,12 @@ func RecommendedAdvancedConfig() AdvancedConfig {
 	cfg.Risk.UserWeightPercent = 60
 	cfg.Risk.IPWeightPercent = 20
 	cfg.Risk.SessionWeightPercent = 20
+	cfg.AdaptiveReview.Enabled = true
 	cfg.Sidecar.FailClosed = false
-	// Session persistence still uses synchronous cache lease/get/set. Keep it
-	// disabled in the production preset until the cache interface provides the
-	// CAS semantics required for ordered, non-blocking writes.
-	cfg.Session.Enabled = false
+	// Signed session correlation is enabled for the recommended preset. Only an
+	// explicit continuation inherits the preceding accepted user intent for
+	// enforcement; heuristic short-fragment correlation remains opt-in.
+	cfg.Session.Enabled = true
 	cfg.Guard.DefaultProfile = GuardProfileBalanced
 	cfg.Guard.Performance.AsyncShadowAuxiliaryEnabled = true
 	cfg.Guard.Performance.MaxSegments = RecommendedGuardMaxSegments
@@ -749,6 +767,48 @@ func NormalizeAdvancedConfig(cfg AdvancedConfig) AdvancedConfig {
 	}
 	if cfg.Risk.ReviewThreshold <= 0 {
 		cfg.Risk.ReviewThreshold = d.Risk.ReviewThreshold
+	}
+	if cfg.AdaptiveReview.MinCleanReviews <= 0 {
+		cfg.AdaptiveReview.MinCleanReviews = d.AdaptiveReview.MinCleanReviews
+	}
+	if cfg.AdaptiveReview.MinCleanReviews > 1000 {
+		cfg.AdaptiveReview.MinCleanReviews = 1000
+	}
+	if cfg.AdaptiveReview.MinObservationHours <= 0 {
+		cfg.AdaptiveReview.MinObservationHours = d.AdaptiveReview.MinObservationHours
+	}
+	if cfg.AdaptiveReview.MinObservationHours > 30*24 {
+		cfg.AdaptiveReview.MinObservationHours = 30 * 24
+	}
+	if cfg.AdaptiveReview.SamplePercent < 0 {
+		cfg.AdaptiveReview.SamplePercent = 0
+	}
+	if cfg.AdaptiveReview.SamplePercent > 100 {
+		cfg.AdaptiveReview.SamplePercent = 100
+	}
+	if cfg.AdaptiveReview.ForceReviewIntervalMinutes <= 0 {
+		cfg.AdaptiveReview.ForceReviewIntervalMinutes = d.AdaptiveReview.ForceReviewIntervalMinutes
+	}
+	if cfg.AdaptiveReview.ForceReviewIntervalMinutes > 7*24*60 {
+		cfg.AdaptiveReview.ForceReviewIntervalMinutes = 7 * 24 * 60
+	}
+	if cfg.AdaptiveReview.TrustDurationHours <= 0 {
+		cfg.AdaptiveReview.TrustDurationHours = d.AdaptiveReview.TrustDurationHours
+	}
+	if cfg.AdaptiveReview.TrustDurationHours > 30*24 {
+		cfg.AdaptiveReview.TrustDurationHours = 30 * 24
+	}
+	if cfg.AdaptiveReview.ReactivationCleanReviews <= 0 {
+		cfg.AdaptiveReview.ReactivationCleanReviews = d.AdaptiveReview.ReactivationCleanReviews
+	}
+	if cfg.AdaptiveReview.ReactivationCleanReviews > cfg.AdaptiveReview.MinCleanReviews {
+		cfg.AdaptiveReview.ReactivationCleanReviews = cfg.AdaptiveReview.MinCleanReviews
+	}
+	if cfg.AdaptiveReview.ReactivationCooldownHours <= 0 {
+		cfg.AdaptiveReview.ReactivationCooldownHours = d.AdaptiveReview.ReactivationCooldownHours
+	}
+	if cfg.AdaptiveReview.ReactivationCooldownHours > 30*24 {
+		cfg.AdaptiveReview.ReactivationCooldownHours = 30 * 24
 	}
 	if cfg.Sidecar.TimeoutSeconds <= 0 {
 		cfg.Sidecar.TimeoutSeconds = d.Sidecar.TimeoutSeconds

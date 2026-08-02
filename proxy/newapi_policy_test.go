@@ -1017,7 +1017,7 @@ func TestBoundRiskAndSessionStateArePlatformScoped(t *testing.T) {
 		t.Fatalf("session context crossed platform boundary: %+v", buyContinuation.Envelope.Segments)
 	}
 	gatewayAContinuation := evaluateBoundPromptSession(t, handler, "session-gateway-a-cont", 101, "gateway-a", "gateway-a-secret", fingerprint, []byte(`{"input":"继续"}`))
-	if !promptEnvelopeHasOrigin(gatewayAContinuation.Envelope, promptfilter.OriginSessionContext) {
+	if !promptEnvelopeHasLinkedText(gatewayAContinuation.Envelope, promptfilter.OriginHistory, "请记住这段平台隔离上下文") {
 		t.Fatalf("same-platform session context was not linked: %+v", gatewayAContinuation.Envelope.Segments)
 	}
 }

@@ -235,13 +235,31 @@ func TestApplyReviewResultBlocksWhenReviewFailsClosed(t *testing.T) {
 }
 
 func TestApplyReviewResultAllowsWhenReviewFailsOpen(t *testing.T) {
-	verdict := Verdict{Action: ActionBlock}
+	verdict := Verdict{Action: ActionAllow}
 	got := ApplyReviewResult(verdict, false, "omni-moderation-latest", context.DeadlineExceeded, ReviewConfig{FailClosed: false, Model: "omni-moderation-latest"})
 	if got.Action != ActionAllow {
 		t.Fatalf("action = %s, want allow", got.Action)
 	}
 	if got.ReviewError == "" {
 		t.Fatal("expected review_error to be recorded")
+	}
+}
+
+func TestApplyReviewOutcomeRetainsLocalDecisionWhenReviewFailsOpen(t *testing.T) {
+	for _, action := range []string{ActionWarn, ActionBlock} {
+		verdict := Verdict{Action: action, Reason: "local decision"}
+		got := ApplyReviewOutcome(verdict, ReviewOutcome{Model: "review-model"}, context.DeadlineExceeded, ReviewConfig{FailClosed: false, Model: "review-model"})
+		if got.Action != action || got.ReviewError == "" || !strings.Contains(got.Reason, "retained local filter decision") {
+			t.Fatalf("action=%s result=%+v, want retained local decision", action, got)
+		}
+	}
+}
+
+func TestApplyReviewOutcomeCannotClearLocalTerminalBlock(t *testing.T) {
+	verdict := Verdict{Action: ActionBlock, Reason: "local terminal", TerminalStrictHit: true, SensitiveIntent: true}
+	got := ApplyReviewOutcome(verdict, ReviewOutcome{Flagged: false, Confidence: 0.01, Model: "review-model"}, nil, ReviewConfig{Model: "review-model"})
+	if got.Action != ActionBlock || !got.TerminalStrictHit || !strings.Contains(got.Reason, "local terminal policy retained") {
+		t.Fatalf("terminal local block was cleared: %+v", got)
 	}
 }
 
