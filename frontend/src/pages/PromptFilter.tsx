@@ -115,6 +115,10 @@ type ReviewAdapterFormConfig = {
   max_text_length: number
 }
 
+type AdaptiveReviewFormConfig = {
+  enabled: boolean
+}
+
 type RecommendedProtectionStrength = 'monitor' | 'block'
 
 const defaultReviewAdapter: ReviewAdapterFormConfig = {
@@ -142,6 +146,13 @@ function parseReviewAdapter(value: AdvancedConfigObject): ReviewAdapterFormConfi
     max_concurrent: typeof raw.max_concurrent === 'number' && raw.max_concurrent > 0 ? raw.max_concurrent : defaultReviewAdapter.max_concurrent,
     max_text_length: typeof raw.max_text_length === 'number' && raw.max_text_length > 0 ? raw.max_text_length : defaultReviewAdapter.max_text_length,
   }
+}
+
+function parseAdaptiveReview(value: AdvancedConfigObject): AdaptiveReviewFormConfig {
+  const raw = value.adaptive_review && typeof value.adaptive_review === 'object'
+    ? value.adaptive_review as Record<string, unknown>
+    : {}
+  return { enabled: raw.enabled === true }
 }
 
 type PromptGuardEditorConfig = Omit<PromptGuardConfig, 'performance'>
@@ -2667,6 +2678,10 @@ function OverviewView({
     () => parseReviewAdapter(advancedDocument.value ?? {}),
     [advancedDocument.value],
   )
+  const adaptiveReview = useMemo(
+    () => parseAdaptiveReview(advancedDocument.value ?? {}),
+    [advancedDocument.value],
+  )
   const [reviewTestText, setReviewTestText] = useState('请帮我整理今天的会议纪要。')
   const [reviewTesting, setReviewTesting] = useState(false)
   const [reviewTestResult, setReviewTestResult] = useState<PromptReviewTestResponse | null>(null)
@@ -2696,6 +2711,7 @@ function OverviewView({
     advancedProtection.attachment.enabled ? t('promptFilter.enabledFeatures.attachment') : null,
     advancedProtection.output.enabled ? t('promptFilter.enabledFeatures.output') : null,
     advancedProtection.intelligence.enabled ? t('promptFilter.enabledFeatures.intelligence') : null,
+    adaptiveReview.enabled ? t('promptFilter.enabledFeatures.adaptiveReview') : null,
   ].filter((label): label is string => Boolean(label))
   const updateProtectionStrategy = (value: string) => {
     setForm((current) => value === 'off'
@@ -2719,6 +2735,14 @@ function OverviewView({
       return
     }
     setReviewTestResult(null)
+    setForm((current) => ({ ...current, prompt_filter_advanced_config: patched.serialized }))
+  }
+  const updateAdaptiveReview = (enabled: boolean) => {
+    const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, [{ path: ['adaptive_review', 'enabled'], value: enabled }])
+    if (!patched.ok) {
+      showToast(t('promptFilter.advancedConfigInvalidSave'), 'error')
+      return
+    }
     setForm((current) => ({ ...current, prompt_filter_advanced_config: patched.serialized }))
   }
   const runReviewConnectionTest = async () => {
@@ -2817,6 +2841,7 @@ function OverviewView({
                       : t('promptFilter.reviewStrategyFailOpen')}
                 </div>
                 <div className="mt-1 truncate text-xs text-muted-foreground">{form.prompt_filter_review_model || '-'}</div>
+                {adaptiveReview.enabled ? <Badge className="mt-2" variant="secondary">{t('promptFilter.adaptiveReview.activeBadge')}</Badge> : null}
               </div>
               <div className="rounded-lg border bg-background/80 p-3 sm:col-span-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2921,6 +2946,14 @@ function OverviewView({
 
               {reviewSettingsOpen ? (
                 <div className="mt-4 space-y-4 border-t pt-4">
+                  <div className="flex items-start justify-between gap-4 rounded-lg border border-primary/15 bg-primary/[0.04] p-4">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold">{t('promptFilter.adaptiveReview.title')}</div>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.adaptiveReview.description')}</p>
+                      <p className="mt-1 text-[11px] leading-5 text-muted-foreground">{t('promptFilter.adaptiveReview.defaults')}</p>
+                    </div>
+                    <Switch checked={adaptiveReview.enabled} disabled={!form.prompt_filter_review_enabled} onCheckedChange={updateAdaptiveReview} />
+                  </div>
                   <div className="grid gap-4 sm:grid-cols-3">
                     <Field label={t('promptFilter.reviewBaseUrl')}>
                       <Input value={form.prompt_filter_review_base_url} placeholder="https://api.example.com/v1" onChange={(event) => setForm((current) => ({ ...current, prompt_filter_review_base_url: event.target.value }))} />
@@ -3471,7 +3504,7 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
               </div>
               {item.is_person ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => { setTrustDraft({ durationHours: 24, riskThreshold: item.trust_policy?.risk_threshold ?? 35, reason: item.trust_policy?.reason ?? '' }); setTrustOpen(true) }}>{item.trust_policy?.status === 'active' ? t('promptFilter.risk.trust.adjust') : t('promptFilter.risk.trust.enable')}</Button>{item.trust_policy?.status === 'active' ? <Button size="sm" variant="destructive" disabled={trustSaving} onClick={() => void revokeTrust()}>{t('promptFilter.risk.trust.revoke')}</Button> : null}</div> : null}
             </div>
-            {item.trust_policy ? <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><PromptPolicyDetailField label={t('promptFilter.risk.trust.validUntil')} value={formatBeijingTime(item.trust_policy.valid_until)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.threshold')} value={String(item.trust_policy.risk_threshold)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.bypassCount')} value={String(item.trust_policy.bypass_count)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.lastEvaluation')} value={item.trust_policy.last_evaluated_at ? `${item.trust_policy.last_risk_score} · ${formatBeijingTime(item.trust_policy.last_evaluated_at)}` : '-'} /></div> : <p className="mt-3 text-xs text-muted-foreground">{item.is_person ? t('promptFilter.risk.trust.notEnabled') : t('promptFilter.risk.trust.personOnly')}</p>}
+            {item.trust_policy ? <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><PromptPolicyDetailField label={t('promptFilter.risk.trust.source')} value={t(`promptFilter.risk.trust.sources.${item.trust_policy.source || 'manual'}`)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.validUntil')} value={formatBeijingTime(item.trust_policy.valid_until)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.threshold')} value={String(item.trust_policy.risk_threshold)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.bypassCount')} value={String(item.trust_policy.bypass_count)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.modelReviewCount')} value={String(item.trust_policy.model_review_count ?? 0)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.lastModelReview')} value={item.trust_policy.last_model_review_at ? formatBeijingTime(item.trust_policy.last_model_review_at) : '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.lastEvaluation')} value={item.trust_policy.last_evaluated_at ? `${item.trust_policy.last_risk_score} · ${formatBeijingTime(item.trust_policy.last_evaluated_at)}` : '-'} /></div> : <p className="mt-3 text-xs text-muted-foreground">{item.is_person ? t('promptFilter.risk.trust.notEnabled') : t('promptFilter.risk.trust.personOnly')}</p>}
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <MetricTile label={t('promptFilter.risk.totalScore')}><span className="font-mono text-xl">{item.risk_score}</span> <Badge className={promptRiskBadgeClass(item.risk_level)}>{t(`promptFilter.risk.levels.${item.risk_level}`)}</Badge></MetricTile>

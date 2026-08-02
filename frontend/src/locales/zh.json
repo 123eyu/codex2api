@@ -1811,6 +1811,10 @@
         "threshold": "恢复审核阈值",
         "bypassCount": "已节省同步复核",
         "lastEvaluation": "最近周期评判",
+        "source": "策略来源",
+        "sources": {"manual":"管理员设置","automatic":"画像自动启用"},
+        "modelReviewCount": "周期模型复核次数",
+        "lastModelReview": "最近模型复核",
         "notEnabled": "当前没有启用临时信任。",
         "personOnly": "只有经过签名确认的人员画像可以启用临时信任。",
         "history": "信任策略运维记录",
@@ -1822,7 +1826,7 @@
         "reasonHint": "必填；用于审计是谁、为什么、在多长时间内降低首字延迟。",
         "safetyHint": "可信期间仍执行本地高危规则；只有干净请求跳过同步 DS。风险分达到阈值、出现本地高危判定或上游 CY 时立即失效。",
         "status": {"active":"临时信任中","suspended":"已自动暂停","revoked":"已撤销","expired":"已到期"},
-        "events": {"granted":"已启用","reactivated":"重新启用","suspended":"已暂停","auto_suspended":"风险触发自动暂停","revoked":"管理员撤销","expired":"到期失效","bypass_used":"干净请求跳过同步复核","evaluated":"周期评判"}
+        "events": {"granted":"已启用","auto_granted":"画像自动启用","reactivated":"重新启用","suspended":"已暂停","auto_suspended":"风险触发自动暂停","revoked":"管理员撤销","expired":"到期失效","bypass_used":"干净请求跳过同步复核","model_reviewed":"周期模型复核通过","evaluated":"周期评判"}
       },
       "subjects": {"newapi_user":"NewAPI 用户","session":"会话","api_key":"API Key","client_ip":"客户端网络","upstream_account":"上游账号"},
       "levels": {"low":"低","observed":"观察","elevated":"升高","high":"高","critical":"严重"},
@@ -1845,7 +1849,7 @@
     "unknownMode": "未知模式（已保留）",
     "testEmpty": "请输入测试内容",
     "coverageTitle": "当前防护覆盖",
-    "coverageEveryRequest": "每个可提取用户请求均复核",
+    "coverageEveryRequest": "每个可提取请求均进入本地防护链",
     "coverageLearning": "CY 经验进入人工审核",
     "coverageProfiles": "人员周期画像",
     "openLearningReview": "打开学习审核",
@@ -1855,10 +1859,16 @@
     "protectionSummaryDesc": "日常只需管理执行策略与模型复核；底层兼容和实验参数按需展开。",
     "protectionStrategy": "本地执行策略",
     "strategyOff": "关闭检查",
-    "reviewStrategy": "全量模型复核策略",
+    "reviewStrategy": "模型复核策略",
     "reviewStrategyOff": "关闭模型复核",
     "reviewStrategyFailOpen": "开启 · 失败时放行",
     "reviewStrategyFailClosed": "开启 · 失败时拦截",
+    "adaptiveReview": {
+      "title": "自适应模型审核",
+      "description": "新用户先完整复核；已签名人员在持续低风险后自动减少同步 DS 请求。本地规则与会话关联始终运行，命中、CY 或风险上升会立即恢复完整复核。",
+      "defaults": "安全默认：10 次干净复核且观察满 24 小时后生效；5% 周期抽检，最长 6 小时强制复核一次。",
+      "activeBadge": "低风险人员自适应降频"
+    },
     "expertSettingsSummary": "底层与兼容设置",
     "advancedFeatureCount": "{{count}} 项底层能力启用",
     "enabledFeaturesTitle": "已开启能力",
@@ -1871,7 +1881,8 @@
       "session": "会话片段关联",
       "attachment": "附件解析",
       "output": "流式输出扫描",
-      "intelligence": "规则情报任务"
+      "intelligence": "规则情报任务",
+      "adaptiveReview": "自适应模型审核"
     },
     "reviewKeyCount": "{{count}} 个审核 Key",
     "applyRecommended": "应用推荐完整防护",

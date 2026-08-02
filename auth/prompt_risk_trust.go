@@ -44,3 +44,18 @@ func (s *Store) RemovePromptRiskTrustPolicy(subjectKey string) {
 	delete(s.promptRiskTrustPolicies, subjectKey)
 	s.promptRiskTrustMu.Unlock()
 }
+
+func (s *Store) RecordPromptRiskTrustModelReview(subjectKey string, reviewedAt time.Time) {
+	if s == nil || strings.TrimSpace(subjectKey) == "" {
+		return
+	}
+	s.promptRiskTrustMu.Lock()
+	item, ok := s.promptRiskTrustPolicies[subjectKey]
+	if ok {
+		reviewedAt = reviewedAt.UTC()
+		item.LastModelReviewAt = &reviewedAt
+		item.ModelReviewCount++
+		s.promptRiskTrustPolicies[subjectKey] = item
+	}
+	s.promptRiskTrustMu.Unlock()
+}

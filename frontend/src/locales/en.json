@@ -1811,6 +1811,10 @@
         "threshold": "Restore review threshold",
         "bypassCount": "Synchronous reviews saved",
         "lastEvaluation": "Latest periodic evaluation",
+        "source": "Policy source",
+        "sources": {"manual":"Administrator","automatic":"Automatic profile decision"},
+        "modelReviewCount": "Periodic model reviews",
+        "lastModelReview": "Latest model review",
         "notEnabled": "Temporary trust is not enabled.",
         "personOnly": "Only signed person profiles can receive temporary trust.",
         "history": "Trust operations history",
@@ -1822,7 +1826,7 @@
         "reasonHint": "Required for auditing who reduced first-token latency, why, and for how long.",
         "safetyHint": "Local high-risk rules still run. Only clean requests skip synchronous DS. The exemption ends on threshold breach, local high-risk decisions, or upstream CY.",
         "status": {"active":"Temporarily trusted","suspended":"Automatically suspended","revoked":"Revoked","expired":"Expired"},
-        "events": {"granted":"Enabled","reactivated":"Re-enabled","suspended":"Suspended","auto_suspended":"Risk-triggered suspension","revoked":"Admin revoked","expired":"Expired","bypass_used":"Clean request skipped synchronous review","evaluated":"Periodic evaluation"}
+        "events": {"granted":"Enabled","auto_granted":"Automatically enabled","reactivated":"Re-enabled","suspended":"Suspended","auto_suspended":"Risk-triggered suspension","revoked":"Admin revoked","expired":"Expired","bypass_used":"Clean request skipped synchronous review","model_reviewed":"Periodic model review passed","evaluated":"Periodic evaluation"}
       },
       "subjects": {"newapi_user":"NewAPI user","session":"Session","api_key":"API key","client_ip":"Client network","upstream_account":"Upstream account"},
       "levels": {"low":"Low","observed":"Observed","elevated":"Elevated","high":"High","critical":"Critical"},
@@ -1845,7 +1849,7 @@
     "unknownMode": "Unknown mode (preserved)",
     "testEmpty": "Enter test content",
     "coverageTitle": "Current protection coverage",
-    "coverageEveryRequest": "Every extractable user request is reviewed",
+    "coverageEveryRequest": "Every extractable request enters the local protection pipeline",
     "coverageLearning": "CY evidence enters human review",
     "coverageProfiles": "Periodic people profiles",
     "openLearningReview": "Open learning review",
@@ -1855,10 +1859,16 @@
     "protectionSummaryDesc": "Daily operations only need the enforcement and model-review policies. Compatibility and experimental controls stay collapsed until needed.",
     "protectionStrategy": "Local enforcement policy",
     "strategyOff": "Protection off",
-    "reviewStrategy": "Full-request model review",
+    "reviewStrategy": "Model review policy",
     "reviewStrategyOff": "Model review off",
     "reviewStrategyFailOpen": "On · allow on failure",
     "reviewStrategyFailClosed": "On · block on failure",
+    "adaptiveReview": {
+      "title": "Adaptive model review",
+      "description": "New identities receive full review. Signed people with sustained low risk automatically reduce synchronous model calls. Local rules and session correlation always run; a hit, CY, or rising risk restores full review immediately.",
+      "defaults": "Safe defaults: 10 clean reviews across 24 hours, 5% sampling, and at least one forced model review every 6 hours.",
+      "activeBadge": "Adaptive review for low-risk people"
+    },
     "expertSettingsSummary": "Runtime and compatibility settings",
     "advancedFeatureCount": "{{count}} runtime features enabled",
     "enabledFeaturesTitle": "Enabled capabilities",
@@ -1871,7 +1881,8 @@
       "session": "Session-fragment correlation",
       "attachment": "Attachment parsing",
       "output": "Streaming output scanning",
-      "intelligence": "Rule intelligence jobs"
+      "intelligence": "Rule intelligence jobs",
+      "adaptiveReview": "Adaptive model review"
     },
     "reviewKeyCount": "{{count}} review keys",
     "applyRecommended": "Apply recommended full protection",
