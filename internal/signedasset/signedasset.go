@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"strconv"
@@ -91,6 +92,10 @@ func imageAssetSecret() []byte {
 		if _, err := rand.Read(secret); err != nil {
 			panic(fmt.Sprintf("signedasset: generate image proxy secret: %v", err))
 		}
+		// Every process gets its own key, so links break on restart and each
+		// replica rejects the others' links. That surfaces to users as
+		// intermittent 403s, which is impossible to diagnose without this line.
+		log.Printf("signedasset: %s is not set; signed image links use a per-process random key and will not survive a restart or work across replicas", imageAssetSigningSecretEnv)
 	})
 	return secret
 }

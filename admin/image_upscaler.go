@@ -17,25 +17,25 @@ import (
 const maxImageUpscalerResponseBytes = 64 << 20
 
 func upscaleImageBytes(ctx context.Context, imageBytes []byte, scale, requestedSize string) ([]byte, string, string, error) {
-	endpoint := strings.TrimSpace(os.Getenv("IMAGE_UPSCALER_ENDPOINT"))
-	if endpoint == "" {
-		data, contentType, err := imageproc.DoUpscale(imageBytes, scale)
-		return data, contentType, "catmull-rom", err
-	}
-
+	// Both backends resolve the same target box first. The requested size is
+	// the authoritative target: asking for 2048x2048 must not produce the 2K
+	// tier's 2560 long side just because that is how the tier is named.
 	width, height := imageDimensions(imageBytes)
 	targetLongSide := imageproc.UpscaleLongSide(scale)
 	if width <= 0 || height <= 0 || targetLongSide <= 0 {
 		return nil, "", "", fmt.Errorf("image upscaler: invalid source or target dimensions")
 	}
-	longSide := width
-	if height > longSide {
-		longSide = height
+	targetWidth, targetHeight, exactTarget := imageUpscaleTargetDimensions(width, height, targetLongSide, requestedSize)
+
+	endpoint := strings.TrimSpace(os.Getenv("IMAGE_UPSCALER_ENDPOINT"))
+	if endpoint == "" {
+		data, contentType, err := imageproc.DoUpscaleTo(imageBytes, targetWidth, targetHeight, exactTarget)
+		return data, contentType, "catmull-rom", err
 	}
-	if longSide >= targetLongSide {
+
+	if width >= targetWidth && height >= targetHeight {
 		return nil, "", "realesrgan", nil
 	}
-	targetWidth, targetHeight, exactTarget := imageUpscaleTargetDimensions(width, height, targetLongSide, requestedSize)
 
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -47,11 +47,13 @@ func upscaleImageBytes(ctx context.Context, imageBytes []byte, scale, requestedS
 	query.Set("target_height", strconv.Itoa(targetHeight))
 	query.Set("format", "png")
 	query.Set("trigger_ratio", "1")
-	fit := normalizeImageUpscalerFit(os.Getenv("IMAGE_UPSCALER_FIT"))
-	if exactTarget {
-		fit = "cover"
-	}
-	query.Set("fit", fit)
+	// Fit inside the target box by default so a source whose aspect ratio does
+	// not match the requested size is scaled down rather than cropped, matching
+	// the local backend. When the ratios do match, inside and cover produce the
+	// same result, so an exact requested size is still hit exactly. Operators
+	// who would rather fill the box can opt into cropping with
+	// IMAGE_UPSCALER_FIT=cover.
+	query.Set("fit", normalizeImageUpscalerFit(os.Getenv("IMAGE_UPSCALER_FIT")))
 	parsed.RawQuery = query.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), bytes.NewReader(imageBytes))
@@ -96,11 +98,31 @@ func upscaleImageBytes(ctx context.Context, imageBytes []byte, scale, requestedS
 	if len(body) == 0 {
 		return nil, "", "", fmt.Errorf("image upscaler returned empty image data")
 	}
-	contentType := response.Header.Get("Content-Type")
-	if contentType == "" || contentType == "application/octet-stream" {
-		contentType = "image/png"
+	contentType := normalizeImageUpscalerContentType(response.Header.Get("Content-Type"))
+	if contentType == "" {
+		return nil, "", "", fmt.Errorf("image upscaler returned unsupported content type %q", response.Header.Get("Content-Type"))
 	}
 	return body, contentType, method, nil
+}
+
+// normalizeImageUpscalerContentType keeps the stored asset MIME type within
+// image/*. The value ends up on the asset record and is echoed back inline by
+// the asset route, so a compromised or man-in-the-middled upscaler must not be
+// able to make the gateway serve markup from its own origin. An empty or
+// generic binary type is treated as the PNG the request asked for; anything
+// else outside image/* is rejected.
+func normalizeImageUpscalerContentType(value string) string {
+	mediaType := strings.ToLower(strings.TrimSpace(value))
+	if index := strings.Index(mediaType, ";"); index >= 0 {
+		mediaType = strings.TrimSpace(mediaType[:index])
+	}
+	if mediaType == "" || mediaType == "application/octet-stream" {
+		return "image/png"
+	}
+	if strings.HasPrefix(mediaType, "image/") {
+		return mediaType
+	}
+	return ""
 }
 
 func imageUpscalerBackend() string {

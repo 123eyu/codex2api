@@ -2339,6 +2339,7 @@ export interface ImageGenerationJob {
   api_key_name: string
   api_key_masked: string
   error_message: string
+  warning?: string
   duration_ms: number
   created_at: ISODateString
   started_at?: ISODateString

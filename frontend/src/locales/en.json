@@ -3833,6 +3833,7 @@
     "background": "Background",
     "localUpscale": "Local Upscale",
     "upscaleOptions": {
+      "auto": "Auto (follow model and size)",
       "none": "Off",
       "2k": "Upscale to 2K",
       "4k": "Upscale to 4K"

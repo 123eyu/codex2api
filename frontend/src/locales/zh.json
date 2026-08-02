@@ -3833,6 +3833,7 @@
     "background": "背景",
     "localUpscale": "本地放大",
     "upscaleOptions": {
+      "auto": "自动（跟随模型与尺寸）",
       "none": "不放大",
       "2k": "放大到 2K",
       "4k": "放大到 4K"
