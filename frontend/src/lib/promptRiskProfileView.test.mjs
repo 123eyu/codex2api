@@ -10,8 +10,11 @@ const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url
 test('risk profiles have independent list and event pagination', () => {
   assert.match(source, /usePersistedPageSize\('prompt_risk_profiles'/)
   assert.match(source, /usePersistedPageSize\('prompt_risk_profile_events'/)
+  assert.match(source, /usePersistedPageSize\('prompt_risk_profile_trust_events'/)
   assert.match(api, /event_page=\$\{eventPage\}/)
+  assert.match(api, /trust_event_page=\$\{trustEventPage\}/)
   assert.match(source, /page=\{eventPage\}[\s\S]*totalItems=\{detail\?\.event_total \?\? 0\}/)
+  assert.match(source, /page=\{trustEventPage\}[\s\S]*totalItems=\{detail\?\.trust_event_total \?\? 0\}/)
 })
 
 test('risk profile identity boundaries and operational guardrail are visible', () => {
@@ -47,6 +50,19 @@ test('person profiles expose auditable temporary adaptive trust without a perman
   assert.match(zh.promptFilter.risk.trust.description, /同步 DS/)
   assert.match(zh.promptFilter.risk.trust.dialogDescription, /不是永久白名单/)
   assert.match(zh.promptFilter.risk.trust.safetyHint, /CY/)
+})
+
+test('adaptive review basis and linked model-review audit are visible', () => {
+  assert.match(types, /PromptRiskAdaptiveReviewBasis/)
+  assert.match(types, /request_id_hash\?: string/)
+  assert.match(source, /adaptive_review_basis/)
+  assert.match(source, /clean_review_count/)
+  assert.match(source, /next_forced_review_at/)
+  assert.match(source, /request_id_hash/)
+  assert.match(source, /prompt_preview/)
+  assert.match(source, /incident_id/)
+  assert.match(zh.promptFilter.risk.trust.basisDescription, /为何|為何|why/i)
+  assert.match(zh.promptFilter.risk.trust.history, /模型审核决策|模型審核決策/)
 })
 
 test('risk page separates people from environment subjects', () => {

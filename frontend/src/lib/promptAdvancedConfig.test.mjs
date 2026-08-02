@@ -199,6 +199,11 @@ test('hidden runtime settings survive visible editor patches', () => {
 
 test('Prompt Filter editor does not render runtime tuning controls', () => {
   const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
+  const editorStart = source.indexOf('function AdvancedProtectionEditor(')
+  const editorEnd = source.indexOf('\nfunction AdvancedPanel(', editorStart)
+  assert.notEqual(editorStart, -1)
+  assert.notEqual(editorEnd, -1)
+  const editorSource = source.slice(editorStart, editorEnd)
   const forbiddenFragments = [
     'promptFilter.guard.performance.',
     'scan_clean_enabled',
@@ -212,7 +217,7 @@ test('Prompt Filter editor does not render runtime tuning controls', () => {
     'max_clock_skew_seconds',
   ]
   for (const fragment of forbiddenFragments) {
-    assert.equal(source.includes(fragment), false, `internal control leaked into editor source: ${fragment}`)
+    assert.equal(editorSource.includes(fragment), false, `internal control leaked into editor source: ${fragment}`)
   }
 })
 

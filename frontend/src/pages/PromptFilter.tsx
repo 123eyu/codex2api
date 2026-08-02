@@ -1603,6 +1603,7 @@ function IntelligenceView() {
     try {
       const value = await api.applyPromptIntelligenceIdentityUpdate(aiTarget.id, aiResult.analysis_evidence_id)
       setAIResult((current) => current ? { ...current, identity_update: value.identity_update } : current)
+      setAITarget((current) => current ? { ...current, lifecycle_status: 'published' } : current)
       showToast(t('promptFilter.intelligence.identityApplied'))
       await loadCandidates()
     } catch (error) {
@@ -1617,6 +1618,7 @@ function IntelligenceView() {
     try {
       const value = await api.rollbackPromptIntelligenceIdentityUpdate(candidateID, revisionEvidenceID)
       setAIResult((current) => current ? { ...current, identity_update: value.identity_update } : current)
+      setAITarget((current) => current ? { ...current, lifecycle_status: 'pending' } : current)
       if (evidenceDialog?.candidate.id === candidateID) {
         setEvidenceDialog(await api.getPromptIntelligenceCandidateEvidence(candidateID))
       }
@@ -1632,8 +1634,12 @@ function IntelligenceView() {
   const lifecycleLabel = (status: string) => t(`promptFilter.intelligence.lifecycle.${status}`, { defaultValue: status || '-' })
   const sourceLabel = (source?: string) => t(`promptFilter.intelligence.source.${source || 'unknown'}`, { defaultValue: source || '-' })
   const candidateTitle = (candidate: PromptIntelligenceCandidate) => candidate.kind === 'evidence'
-    ? t('promptFilter.intelligence.awaitingAttribution')
+    ? t(candidate.lifecycle_status === 'published' ? 'promptFilter.intelligence.attributedEvidence' : 'promptFilter.intelligence.awaitingAttribution')
     : candidate.name || t('promptFilter.intelligence.unnamedRule')
+
+  const candidateLifecycleLabel = (candidate: PromptIntelligenceCandidate) => candidate.kind === 'evidence' && candidate.lifecycle_status === 'published'
+    ? t('promptFilter.intelligence.attributed')
+    : lifecycleLabel(candidate.lifecycle_status)
 
   return (
     <div className="space-y-5">
@@ -1743,7 +1749,7 @@ function IntelligenceView() {
                     {candidate.rationale ? <p className="mt-1 text-xs text-muted-foreground">{candidate.rationale}</p> : null}
                   </TableCell>
                   <TableCell><Badge variant="outline">{sourceLabel(candidate.source)}</Badge></TableCell>
-                  <TableCell><Badge variant="outline">{lifecycleLabel(candidate.lifecycle_status)}</Badge></TableCell>
+                  <TableCell><Badge variant="outline">{candidateLifecycleLabel(candidate)}</Badge></TableCell>
                   <TableCell>{candidate.evidence_count}</TableCell>
                   <TableCell className="whitespace-nowrap text-sm text-muted-foreground">{candidate.last_seen_at ? formatBeijingTime(candidate.last_seen_at) : '-'}</TableCell>
                   <TableCell>
@@ -1757,16 +1763,18 @@ function IntelligenceView() {
                           {candidate.change_type === 'update' ? t('promptFilter.intelligence.updateRule') : t('promptFilter.intelligence.addRule')}
                         </Button>
                       ) : null}
-                      {candidate.lifecycle_status === 'pending' && candidate.kind === 'evidence' ? (
+                      {candidate.kind === 'evidence' && (candidate.lifecycle_status === 'pending' || candidate.ai_analyzed) ? (
                         <>
                           <Button size="sm" variant="outline" disabled={candidateAction === candidate.id} onClick={() => void openAIAnalysis(candidate)}>
                             <Sparkles className="size-4" />
                             {candidate.ai_analyzed ? t('promptFilter.intelligence.aiViewResult') : t('promptFilter.intelligence.aiAnalyze')}
                           </Button>
-                          <Button size="sm" disabled={candidateAction === candidate.id} onClick={() => openDraft(candidate)}>
-                            <Pencil className="size-4" />
-                            {t('promptFilter.intelligence.createDraft')}
-                          </Button>
+                          {candidate.lifecycle_status === 'pending' ? (
+                            <Button size="sm" disabled={candidateAction === candidate.id} onClick={() => openDraft(candidate)}>
+                              <Pencil className="size-4" />
+                              {t('promptFilter.intelligence.createDraft')}
+                            </Button>
+                          ) : null}
                         </>
                       ) : null}
                       {candidate.lifecycle_status === 'pending' ? (
@@ -1930,15 +1938,23 @@ function IntelligenceView() {
                 <div className="rounded-lg border p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="font-medium">{t('promptFilter.intelligence.aiIdentitySuggestion')}</div>
-                    {aiResult.identity_update.applied ? <Badge className="bg-emerald-600">{t('promptFilter.intelligence.identityAppliedBadge')}</Badge> : <Badge variant="outline">{t('promptFilter.intelligence.identityPendingBadge')}</Badge>}
+                    {aiResult.identity_update.applied ? (
+                      <Badge className="bg-emerald-600">{t('promptFilter.intelligence.identityAppliedBadge')}</Badge>
+                    ) : aiResult.identity_update.rolled_back ? (
+                      <Badge variant="outline">{t('promptFilter.intelligence.identityRolledBackBadge')}</Badge>
+                    ) : aiResult.identity_update.block_reason ? (
+                      <Badge variant="outline">{t('promptFilter.intelligence.identityBlockedBadge')}</Badge>
+                    ) : (
+                      <Badge variant="outline">{t('promptFilter.intelligence.identityPendingBadge')}</Badge>
+                    )}
                   </div>
                   <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
                     {aiResult.decision.identity_patch.clauses.map((clause, index) => <li key={`${clause}-${index}`}>{clause}</li>)}
                   </ul>
                   {aiResult.identity_update.block_reason ? <p className="mt-2 text-xs text-amber-600">{aiResult.identity_update.block_reason}</p> : null}
                   <div className="mt-3 flex flex-wrap gap-2">
-                    {!aiResult.identity_update.applied ? (
-                      <Button size="sm" disabled={aiLoading} onClick={() => void applyAIIdentity()}>
+                    {!aiResult.identity_update.applied && aiTarget?.lifecycle_status === 'pending' ? (
+                      <Button size="sm" disabled={aiLoading || Boolean(aiResult.identity_update.block_reason)} onClick={() => void applyAIIdentity()}>
                         <Save className="size-4" />
                         {t('promptFilter.intelligence.applyIdentityPatch')}
                       </Button>
@@ -1955,7 +1971,7 @@ function IntelligenceView() {
           ) : null}
           <DialogFooter>
             <Button variant="outline" disabled={aiLoading} onClick={() => { setAITarget(null); setAIResult(null) }}>{t('common.close')}</Button>
-            <Button disabled={aiLoading || !aiTarget} onClick={() => void runAIAnalysis()}>
+            <Button disabled={aiLoading || !aiTarget || aiTarget.lifecycle_status !== 'pending' || Boolean(aiResult?.identity_update.applied)} onClick={() => void runAIAnalysis()}>
               <Sparkles className="size-4" />
               {aiLoading ? t('promptFilter.intelligence.aiAnalyzing') : aiResult ? t('promptFilter.intelligence.aiRunAgain') : t('promptFilter.intelligence.aiRunAnalysis')}
             </Button>
@@ -3441,6 +3457,8 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
   const [detail, setDetail] = useState<PromptRiskProfileDetailResponse | null>(null)
   const [eventPage, setEventPage] = useState(1)
   const [eventPageSize, setEventPageSize] = usePersistedPageSize('prompt_risk_profile_events', 20, DEFAULT_PAGE_SIZE_OPTIONS)
+  const [trustEventPage, setTrustEventPage] = useState(1)
+  const [trustEventPageSize, setTrustEventPageSize] = usePersistedPageSize('prompt_risk_profile_trust_events', 20, DEFAULT_PAGE_SIZE_OPTIONS)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -3449,17 +3467,18 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
     setLoading(true)
     setError(null)
     try {
-      setDetail(await api.getPromptRiskProfile(profile.subject_type, profile.subject_key, eventPage, eventPageSize))
+      setDetail(await api.getPromptRiskProfile(profile.subject_type, profile.subject_key, eventPage, eventPageSize, trustEventPage, trustEventPageSize))
     } catch (err) {
       setError(getErrorMessage(err))
     } finally {
       setLoading(false)
     }
-  }, [eventPage, eventPageSize, open, profile.subject_key, profile.subject_type])
+  }, [eventPage, eventPageSize, open, profile.subject_key, profile.subject_type, trustEventPage, trustEventPageSize])
 
   useEffect(() => { void loadDetail() }, [loadDetail])
   const item = detail?.profile ?? profile
   const totalPages = Math.max(1, Math.ceil((detail?.event_total ?? 0) / eventPageSize))
+  const trustEventTotalPages = Math.max(1, Math.ceil((detail?.trust_event_total ?? 0) / trustEventPageSize))
   const saveTrust = async () => {
     setTrustSaving(true)
     try {
@@ -3490,7 +3509,7 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
     }
   }
   return <>
-    <Button size="sm" variant="outline" onClick={() => { setEventPage(1); setOpen(true) }}>{t('promptFilter.cyberDetail')}</Button>
+    <Button size="sm" variant="outline" onClick={() => { setEventPage(1); setTrustEventPage(1); setOpen(true) }}>{t('promptFilter.cyberDetail')}</Button>
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent className="max-h-[90vh] sm:max-w-6xl overflow-y-auto">
         <DialogHeader><DialogTitle>{t('promptFilter.risk.detailTitle')}</DialogTitle><DialogDescription>{promptRiskIdentityPrimary(item)} · {t(`promptFilter.risk.subjects.${item.subject_type}`)}</DialogDescription></DialogHeader>
@@ -3506,6 +3525,23 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
             </div>
             {item.trust_policy ? <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><PromptPolicyDetailField label={t('promptFilter.risk.trust.source')} value={t(`promptFilter.risk.trust.sources.${item.trust_policy.source || 'manual'}`)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.validUntil')} value={formatBeijingTime(item.trust_policy.valid_until)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.threshold')} value={String(item.trust_policy.risk_threshold)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.bypassCount')} value={String(item.trust_policy.bypass_count)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.modelReviewCount')} value={String(item.trust_policy.model_review_count ?? 0)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.lastModelReview')} value={item.trust_policy.last_model_review_at ? formatBeijingTime(item.trust_policy.last_model_review_at) : '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.lastEvaluation')} value={item.trust_policy.last_evaluated_at ? `${item.trust_policy.last_risk_score} · ${formatBeijingTime(item.trust_policy.last_evaluated_at)}` : '-'} /></div> : <p className="mt-3 text-xs text-muted-foreground">{item.is_person ? t('promptFilter.risk.trust.notEnabled') : t('promptFilter.risk.trust.personOnly')}</p>}
           </div>
+          {detail?.adaptive_review_basis ? <div className="rounded-lg border border-sky-500/25 bg-sky-500/[0.04] p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div><div className="font-semibold">{t('promptFilter.risk.trust.basisTitle')}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.risk.trust.basisDescription')}</p></div>
+              <Badge variant={detail.adaptive_review_basis.decision === 'adaptive_active' ? 'default' : 'outline'}>{t(`promptFilter.risk.trust.decisions.${detail.adaptive_review_basis.decision}`, { defaultValue: detail.adaptive_review_basis.decision })}</Badge>
+            </div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <PromptPolicyDetailField label={t('promptFilter.risk.trust.cleanReviews')} value={`${detail.adaptive_review_basis.clean_review_count} / ${detail.adaptive_review_basis.min_clean_reviews}`} />
+              <PromptPolicyDetailField label={t('promptFilter.risk.trust.observationPeriod')} value={`${detail.adaptive_review_basis.observation_hours}h / ${detail.adaptive_review_basis.min_observation_hours}h`} />
+              <PromptPolicyDetailField label={t('promptFilter.risk.trust.positiveEvidence')} value={String(detail.adaptive_review_basis.positive_evidence_count)} />
+              <PromptPolicyDetailField label={t('promptFilter.risk.trust.riskBoundary')} value={`${item.risk_score} / ${detail.adaptive_review_basis.risk_threshold}`} />
+              <PromptPolicyDetailField label={t('promptFilter.risk.trust.sampleRate')} value={`${detail.adaptive_review_basis.sample_percent}%`} />
+              <PromptPolicyDetailField label={t('promptFilter.risk.trust.forceReviewInterval')} value={`${detail.adaptive_review_basis.force_review_interval_minutes} min`} />
+              <PromptPolicyDetailField label={t('promptFilter.risk.trust.lastCleanReview')} value={detail.adaptive_review_basis.last_clean_at ? formatBeijingTime(detail.adaptive_review_basis.last_clean_at) : '-'} />
+              <PromptPolicyDetailField label={t('promptFilter.risk.trust.nextForcedReview')} value={detail.adaptive_review_basis.force_review_due ? t('promptFilter.risk.trust.reviewDueNow') : detail.adaptive_review_basis.next_forced_review_at ? formatBeijingTime(detail.adaptive_review_basis.next_forced_review_at) : '-'} />
+            </div>
+            <div className="mt-3 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">{item.trust_policy?.reason || t('promptFilter.risk.trust.basisFallbackReason')}</div>
+          </div> : null}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <MetricTile label={t('promptFilter.risk.totalScore')}><span className="font-mono text-xl">{item.risk_score}</span> <Badge className={promptRiskBadgeClass(item.risk_level)}>{t(`promptFilter.risk.levels.${item.risk_level}`)}</Badge></MetricTile>
             <MetricTile label={t('promptFilter.risk.localSignal')}><span className="font-mono text-xl">{item.score_breakdown.local_signal}</span></MetricTile>
@@ -3524,11 +3560,11 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
           </div>
           <div><div className="mb-2 text-sm font-semibold">{t('promptFilter.risk.eventHistory')} · {detail?.event_total ?? 0}</div>
             <div className="overflow-x-auto rounded-lg border border-border"><Table><TableHeader><TableRow><TableHead>{t('promptFilter.colTime')}</TableHead><TableHead>{t('promptFilter.risk.eventKind')}</TableHead><TableHead>{t('promptFilter.risk.requestEvidence')}</TableHead><TableHead>{t('promptFilter.colEndpoint')}</TableHead><TableHead>{t('promptFilter.risk.scope')}</TableHead></TableRow></TableHeader><TableBody>
-              {(detail?.events ?? []).map((event) => <TableRow key={event.id}><TableCell className="whitespace-nowrap text-xs">{formatBeijingTime(event.created_at)}</TableCell><TableCell><Badge variant="outline">{t(`promptFilter.risk.events.${event.event_kind}`)}</Badge></TableCell><TableCell className="font-mono text-xs">{event.request_risk_score} × {event.evidence_confidence}%</TableCell><TableCell><div className="font-mono text-xs">{event.endpoint || '-'}</div><div className="text-xs text-muted-foreground">{event.model || '-'}</div></TableCell><TableCell className="text-xs"><div>{event.newapi_user_name || (event.newapi_user_id ? `${t('promptFilter.risk.userId')} #${event.newapi_user_id}` : event.api_key_name || event.api_key_masked || '-')}</div><div className="text-muted-foreground">{event.newapi_user_group ? `${event.newapi_user_group} · ` : ''}{event.account_name || '-'}</div></TableCell></TableRow>)}
+              {(detail?.events ?? []).map((event) => <TableRow key={event.id}><TableCell className="whitespace-nowrap text-xs">{formatBeijingTime(event.created_at)}</TableCell><TableCell><Badge variant="outline">{t(`promptFilter.risk.events.${event.event_kind}`)}</Badge>{event.action || event.local_outcome ? <div className="mt-1 text-[11px] text-muted-foreground">{event.action || '-'} · {event.local_outcome || '-'}</div> : null}</TableCell><TableCell className="text-xs"><div className="font-mono">{event.request_risk_score} × {event.evidence_confidence}%</div>{event.reason_code ? <div className="mt-1 text-muted-foreground">{event.reason_code}</div> : null}{event.prompt_preview ? <div className="mt-1 max-w-[360px] line-clamp-2" title={event.prompt_preview}>{event.prompt_preview}</div> : null}{event.incident_id || event.prompt_filter_log_id || event.request_correlation_id ? <div className="mt-1 font-mono text-[10px] text-muted-foreground" title={event.incident_id || event.request_correlation_id}>{event.incident_id ? `incident ${event.incident_id}` : event.prompt_filter_log_id ? `log #${event.prompt_filter_log_id}` : `request ${event.request_correlation_id}`}</div> : null}</TableCell><TableCell><div className="font-mono text-xs">{event.endpoint || '-'}</div><div className="text-xs text-muted-foreground">{event.model || '-'}</div></TableCell><TableCell className="text-xs"><div>{event.newapi_user_name || (event.newapi_user_id ? `${t('promptFilter.risk.userId')} #${event.newapi_user_id}` : event.api_key_name || event.api_key_masked || '-')}</div><div className="text-muted-foreground">{event.newapi_user_group ? `${event.newapi_user_group} · ` : ''}{event.account_name || '-'}</div></TableCell></TableRow>)}
             </TableBody></Table></div>
             <Pagination page={eventPage} totalPages={totalPages} totalItems={detail?.event_total ?? 0} pageSize={eventPageSize} onPageChange={setEventPage} onPageSizeChange={(next) => { setEventPage(1); setEventPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} />
           </div>
-          {(detail?.trust_events?.length ?? 0) > 0 ? <div><div className="mb-2 text-sm font-semibold">{t('promptFilter.risk.trust.history')}</div><div className="overflow-x-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>{t('promptFilter.colTime')}</TableHead><TableHead>{t('promptFilter.risk.trust.operation')}</TableHead><TableHead>{t('promptFilter.risk.score')}</TableHead><TableHead>{t('promptFilter.risk.trust.reason')}</TableHead></TableRow></TableHeader><TableBody>{detail?.trust_events.map((event) => <TableRow key={event.id}><TableCell className="whitespace-nowrap text-xs">{formatBeijingTime(event.created_at)}</TableCell><TableCell><Badge variant="outline">{t(`promptFilter.risk.trust.events.${event.event_type}`, { defaultValue: event.event_type })}</Badge></TableCell><TableCell className="font-mono text-xs">{event.risk_score}{event.risk_level ? ` · ${event.risk_level}` : ''}</TableCell><TableCell className="text-xs">{event.reason || '-'}</TableCell></TableRow>)}</TableBody></Table></div></div> : null}
+          <div><div className="mb-2 text-sm font-semibold">{t('promptFilter.risk.trust.history')} · {detail?.trust_event_total ?? 0}</div><div className="overflow-x-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>{t('promptFilter.colTime')}</TableHead><TableHead>{t('promptFilter.risk.trust.operation')}</TableHead><TableHead>{t('promptFilter.risk.score')}</TableHead><TableHead>{t('promptFilter.risk.trust.requestAudit')}</TableHead><TableHead>{t('promptFilter.risk.trust.reason')}</TableHead></TableRow></TableHeader><TableBody>{detail?.trust_events.map((event) => <TableRow key={event.id}><TableCell className="whitespace-nowrap text-xs">{formatBeijingTime(event.created_at)}</TableCell><TableCell><Badge variant="outline">{t(`promptFilter.risk.trust.events.${event.event_type}`, { defaultValue: event.event_type })}</Badge></TableCell><TableCell className="font-mono text-xs">{event.risk_score}{event.risk_level ? ` · ${t(`promptFilter.risk.levels.${event.risk_level}`, { defaultValue: event.risk_level })}` : ''}</TableCell><TableCell className="font-mono text-[10px] text-muted-foreground" title={event.request_id_hash}>{event.request_id_hash ? event.request_id_hash.slice(0, 20) : '-'}</TableCell><TableCell className="text-xs">{event.reason || '-'}</TableCell></TableRow>)}{!detail?.trust_events.length ? <TableRow><TableCell colSpan={5} className="py-6 text-center text-muted-foreground">{t('promptFilter.risk.trust.noHistory')}</TableCell></TableRow> : null}</TableBody></Table></div><Pagination page={trustEventPage} totalPages={trustEventTotalPages} totalItems={detail?.trust_event_total ?? 0} pageSize={trustEventPageSize} onPageChange={setTrustEventPage} onPageSizeChange={(next) => { setTrustEventPage(1); setTrustEventPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} /></div>
         </div>}
       </DialogContent>
     </Dialog>

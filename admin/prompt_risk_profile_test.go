@@ -89,3 +89,64 @@ func TestPromptRiskProfileDetailRejectsUnknownSubjectType(t *testing.T) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestPromptRiskProfileDetailReturnsAdaptiveBasisAndPagedTrustAudit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "admin-risk-profile-audit.db"))
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+	if err := db.InsertPromptFilterLog(t.Context(), &database.PromptFilterLogInput{
+		Source: "local_filter", Action: "allow", ReviewModel: "review-model", ReviewFlagged: false,
+		NewAPIPolicyStatus: "verified", NewAPIPlatform: "gateway-a", NewAPIUserID: "audit-user",
+	}); err != nil {
+		t.Fatalf("InsertPromptFilterLog: %v", err)
+	}
+	profiles, total, err := db.ListPromptRiskProfiles(t.Context(), database.PromptRiskProfileQuery{
+		Page: 1, PageSize: 10, SubjectType: database.PromptRiskSubjectNewAPIUser,
+	})
+	if err != nil || total != 1 || len(profiles) != 1 {
+		t.Fatalf("profiles=%#v total=%d err=%v", profiles, total, err)
+	}
+	profile := profiles[0]
+	policy, err := db.UpsertPromptRiskTrustPolicy(t.Context(), database.PromptRiskTrustPolicyInput{
+		SubjectType: profile.SubjectType, SubjectKey: profile.SubjectKey, Reason: "audit pagination",
+		RiskThreshold: 35, ValidUntil: time.Now().UTC().Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("UpsertPromptRiskTrustPolicy: %v", err)
+	}
+	if err := db.RecordPromptRiskTrustBypass(t.Context(), policy.ID, policy.SubjectType, policy.SubjectKey, "request-audit-hash"); err != nil {
+		t.Fatalf("RecordPromptRiskTrustBypass: %v", err)
+	}
+
+	h := &Handler{db: db}
+	router := gin.New()
+	router.GET("/api/admin/prompt-policy/risk-profiles/:subject_type/:subject_key", h.GetPromptRiskProfile)
+	recorder := httptest.NewRecorder()
+	path := "/api/admin/prompt-policy/risk-profiles/newapi_user/" + profile.SubjectKey + "?event_page=1&event_page_size=1&trust_event_page=1&trust_event_page_size=1"
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		AdaptiveReviewBasis promptRiskAdaptiveReviewBasisResponse `json:"adaptive_review_basis"`
+		TrustEvents         []database.PromptRiskTrustEvent       `json:"trust_events"`
+		TrustEventTotal     int                                   `json:"trust_event_total"`
+		TrustEventPage      int                                   `json:"trust_event_page"`
+		TrustEventPageSize  int                                   `json:"trust_event_page_size"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode detail response: %v", err)
+	}
+	if response.TrustEventTotal != 2 || response.TrustEventPage != 1 || response.TrustEventPageSize != 1 || len(response.TrustEvents) != 1 {
+		t.Fatalf("unexpected trust audit pagination: %#v body=%s", response, recorder.Body.String())
+	}
+	if response.TrustEvents[0].RequestIDHash != "request-audit-hash" {
+		t.Fatalf("request audit hash missing: %#v", response.TrustEvents[0])
+	}
+	if response.AdaptiveReviewBasis.Decision == "" || response.AdaptiveReviewBasis.MinCleanReviews <= 0 || response.AdaptiveReviewBasis.TrustDurationHours <= 0 {
+		t.Fatalf("adaptive review basis missing defaults: %#v", response.AdaptiveReviewBasis)
+	}
+}

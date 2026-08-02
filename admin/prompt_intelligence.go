@@ -254,6 +254,10 @@ func (h *Handler) ListPromptIntelligenceHistory(c *gin.Context) {
 func (h *Handler) ListPromptIntelligenceCandidates(c *gin.Context) {
 	page := positiveQueryInt(c, "page", 1)
 	pageSize := positiveQueryInt(c, "page_size", 50)
+	if err := h.db.ReconcilePromptRuleCandidateIdentityStatuses(c.Request.Context()); err != nil {
+		writeInternalError(c, err)
+		return
+	}
 	items, total, err := h.db.ListPromptRuleCandidates(c.Request.Context(), database.PromptRuleCandidateQuery{
 		Page: page, PageSize: pageSize, Status: c.Query("status"), Source: c.Query("source"), Query: c.Query("q"),
 	})
@@ -275,7 +279,7 @@ func (h *Handler) ListPromptIntelligenceCandidates(c *gin.Context) {
 	for _, item := range items {
 		candidate := promptIntelligenceCandidateFromDB(item, cfg)
 		if summary, exists := analyses[item.ID]; exists && summary.Latest != nil {
-			if restored := promptIntelligenceAIAnalysisFromEvidence(summary.Latest); restored != nil {
+			if restored := promptIntelligenceAIAnalysisFromEvidence(summary.Latest, summary.LatestIdentityChange); restored != nil {
 				analyzedAt := summary.Latest.ObservedAt
 				candidate.AIAnalyzed = true
 				candidate.AIAnalysisCount = summary.Count

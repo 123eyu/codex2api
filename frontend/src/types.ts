@@ -1220,7 +1220,28 @@ export interface PromptRiskTrustEvent {
   reason?: string
   risk_score: number
   risk_level?: PromptRiskLevel | string
+  request_id_hash?: string
   created_at: ISODateString
+}
+
+export interface PromptRiskAdaptiveReviewBasis {
+  enabled: boolean
+  review_enabled: boolean
+  eligible: boolean
+  decision: 'disabled' | 'not_person' | 'adaptive_active' | 'suspended' | 'eligible' | 'building_history' | 'unavailable' | string
+  clean_review_count: number
+  positive_evidence_count: number
+  min_clean_reviews: number
+  min_observation_hours: number
+  observation_hours: number
+  sample_percent: number
+  force_review_interval_minutes: number
+  trust_duration_hours: number
+  risk_threshold: number
+  first_clean_at?: ISODateString
+  last_clean_at?: ISODateString
+  next_forced_review_at?: ISODateString
+  force_review_due: boolean
 }
 
 export interface PromptRiskProfile {
@@ -1307,9 +1328,13 @@ export interface PromptRiskProfileDetailResponse {
   profile: PromptRiskProfile
   events: PromptRiskEvent[]
   trust_events: PromptRiskTrustEvent[]
+  adaptive_review_basis: PromptRiskAdaptiveReviewBasis
   event_total: number
   event_page: number
   event_page_size: number
+  trust_event_total: number
+  trust_event_page: number
+  trust_event_page_size: number
   scoring_version: string
   guardrail: string
 }
@@ -1669,6 +1694,7 @@ export interface PromptIdentityUpdateResult {
   suggested: boolean
   eligible: boolean
   applied: boolean
+  rolled_back?: boolean
   analysis_evidence_id: number
   revision_evidence_id?: number
   clauses?: string[]

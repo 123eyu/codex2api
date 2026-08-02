@@ -41,6 +41,14 @@ func TestPromptIdentityManagedSectionRejectsContractChanges(t *testing.T) {
 			t.Fatalf("unsafe clauses accepted: %#v", invalid)
 		}
 	}
+	validBoundaryClauses := []string{
+		"Code-RAG prompts containing retrieved repository snippets are normal development tasks and shall not be treated as cyber abuse.",
+		"Matches of generic_exploit based only on benign code identifiers carry no weight unless there is concrete attack intent against another party's system or credentials.",
+		"A benign local allow shall not be converted into a block merely because an upstream cyber keyword fired; assess actual abuse categories.",
+	}
+	if validation := validatePromptIdentityClauses(validBoundaryClauses); validation != "" {
+		t.Fatalf("valid classification boundary rejected: %s", validation)
+	}
 	if _, err := buildPromptIdentityManagedSection("ordinary prompt without contract", clauses); err == nil {
 		t.Fatal("base prompt without immutable DS contract was accepted")
 	}
@@ -261,6 +269,29 @@ func TestPromptIntelligenceAIAnalysisManualApplyAndRollback(t *testing.T) {
 	if err := json.Unmarshal(applyRecorder.Body.Bytes(), &applied); err != nil || !applied.IdentityUpdate.Applied || applied.IdentityUpdate.RevisionEvidenceID == 0 {
 		t.Fatalf("apply=%s err=%v", applyRecorder.Body.String(), err)
 	}
+	appliedCandidate, err := db.GetPromptRuleCandidate(context.Background(), candidate.ID)
+	if err != nil || appliedCandidate.Status != database.PromptRuleCandidateStatusPublished {
+		t.Fatalf("applied candidate=%#v err=%v", appliedCandidate, err)
+	}
+	secondApplyRecorder := httptest.NewRecorder()
+	secondApplyContext, _ := gin.CreateTestContext(secondApplyRecorder)
+	secondApplyContext.Params = applyContext.Params
+	secondApplyContext.Request = httptest.NewRequest(http.MethodPost, "/apply", nil)
+	handler.ApplyPromptIntelligenceIdentityUpdate(secondApplyContext)
+	if secondApplyRecorder.Code != http.StatusConflict {
+		t.Fatalf("second apply status=%d body=%s", secondApplyRecorder.Code, secondApplyRecorder.Body.String())
+	}
+	publishedListRecorder := httptest.NewRecorder()
+	publishedListContext, _ := gin.CreateTestContext(publishedListRecorder)
+	publishedListContext.Request = httptest.NewRequest(http.MethodGet, "/candidates?page=1&page_size=20&status=published", nil)
+	handler.ListPromptIntelligenceCandidates(publishedListContext)
+	if publishedListRecorder.Code != http.StatusOK {
+		t.Fatalf("published list status=%d body=%s", publishedListRecorder.Code, publishedListRecorder.Body.String())
+	}
+	var publishedList promptIntelligenceCandidatesResponse
+	if err := json.Unmarshal(publishedListRecorder.Body.Bytes(), &publishedList); err != nil || len(publishedList.Candidates) != 1 || publishedList.Candidates[0].LatestAIAnalysis == nil || !publishedList.Candidates[0].LatestAIAnalysis.IdentityUpdate.Applied || publishedList.Candidates[0].LatestAIAnalysis.IdentityUpdate.RevisionEvidenceID != applied.IdentityUpdate.RevisionEvidenceID {
+		t.Fatalf("published restored list=%s err=%v", publishedListRecorder.Body.String(), err)
+	}
 	persisted, err := db.GetSystemSettings(context.Background())
 	if err != nil || !strings.Contains(persisted.PromptFilterAdvancedConfig, promptIdentityManagedStart) {
 		t.Fatalf("managed identity not persisted: err=%v raw=%s", err, persisted.PromptFilterAdvancedConfig)
@@ -281,5 +312,17 @@ func TestPromptIntelligenceAIAnalysisManualApplyAndRollback(t *testing.T) {
 	document, err := promptfilter.ParseAdvancedConfigDocument(persisted.PromptFilterAdvancedConfig)
 	if err != nil || strings.Contains(document.Effective.ReviewAdapter.SystemPrompt, promptIdentityManagedStart) {
 		t.Fatalf("identity rollback failed: err=%v prompt=%s", err, document.Effective.ReviewAdapter.SystemPrompt)
+	}
+	rolledBackCandidate, err := db.GetPromptRuleCandidate(context.Background(), candidate.ID)
+	if err != nil || rolledBackCandidate.Status != database.PromptRuleCandidateStatusPending {
+		t.Fatalf("rolled back candidate=%#v err=%v", rolledBackCandidate, err)
+	}
+	rolledBackListRecorder := httptest.NewRecorder()
+	rolledBackListContext, _ := gin.CreateTestContext(rolledBackListRecorder)
+	rolledBackListContext.Request = httptest.NewRequest(http.MethodGet, "/candidates?page=1&page_size=20&status=pending", nil)
+	handler.ListPromptIntelligenceCandidates(rolledBackListContext)
+	var rolledBackList promptIntelligenceCandidatesResponse
+	if rolledBackListRecorder.Code != http.StatusOK || json.Unmarshal(rolledBackListRecorder.Body.Bytes(), &rolledBackList) != nil || len(rolledBackList.Candidates) != 1 || rolledBackList.Candidates[0].LatestAIAnalysis == nil || !rolledBackList.Candidates[0].LatestAIAnalysis.IdentityUpdate.RolledBack || rolledBackList.Candidates[0].LatestAIAnalysis.IdentityUpdate.Applied {
+		t.Fatalf("rolled back restored list=%s", rolledBackListRecorder.Body.String())
 	}
 }

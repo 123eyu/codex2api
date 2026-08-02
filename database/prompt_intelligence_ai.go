@@ -15,8 +15,9 @@ const (
 )
 
 type PromptRuleCandidateAIAnalysisSummary struct {
-	Count  int
-	Latest *PromptRuleCandidateEvidence
+	Count                int
+	Latest               *PromptRuleCandidateEvidence
+	LatestIdentityChange *PromptRuleCandidateEvidence
 }
 
 // ListLatestPromptRuleCandidateAIAnalyses returns the latest durable AI
@@ -25,6 +26,7 @@ type PromptRuleCandidateAIAnalysisSummary struct {
 // shared by every admin replica.
 func (db *DB) ListLatestPromptRuleCandidateAIAnalyses(ctx context.Context, candidateIDs []int64) (map[int64]PromptRuleCandidateAIAnalysisSummary, error) {
 	result := make(map[int64]PromptRuleCandidateAIAnalysisSummary)
+	analysesByCandidate := make(map[int64]map[int64]*PromptRuleCandidateEvidence)
 	if db == nil || len(candidateIDs) == 0 {
 		return result, nil
 	}
@@ -43,13 +45,10 @@ func (db *DB) ListLatestPromptRuleCandidateAIAnalyses(ctx context.Context, candi
 	if len(unique) == 0 {
 		return result, nil
 	}
-	sourcePlaceholder := "$1"
-	if db.isSQLite() {
-		sourcePlaceholder = "?"
-	}
-	placeholders := dbPlaceholders(db.isSQLite(), 2, len(unique))
-	args := make([]any, 0, len(unique)+1)
-	args = append(args, PromptRuleCandidateSourceAIAnalysis)
+	sourcePlaceholders := dbPlaceholders(db.isSQLite(), 1, 3)
+	placeholders := dbPlaceholders(db.isSQLite(), 4, len(unique))
+	args := make([]any, 0, len(unique)+3)
+	args = append(args, PromptRuleCandidateSourceAIAnalysis, PromptRuleCandidateSourceAIIdentityUpdate, PromptRuleCandidateSourceAIIdentityRollback)
 	for _, candidateID := range unique {
 		args = append(args, candidateID)
 	}
@@ -59,15 +58,11 @@ func (db *DB) ListLatestPromptRuleCandidateAIAnalyses(ctx context.Context, candi
 		       evidence.request_protocol, evidence.request_provider, evidence.model,
 		       evidence.api_key_id, evidence.api_key_name,
 		       COALESCE(evidence.prompt_policy_incident_id, ''), evidence.observed_at,
-		       evidence.created_at, latest.analysis_count
+		       evidence.created_at
 		FROM prompt_rule_candidate_evidence evidence
-		JOIN (
-			SELECT candidate_id, COUNT(*) AS analysis_count, MAX(id) AS latest_id
-			FROM prompt_rule_candidate_evidence
-			WHERE source_kind=`+sourcePlaceholder+` AND candidate_id IN (`+strings.Join(placeholders, ",")+`)
-			GROUP BY candidate_id
-		) latest ON latest.latest_id=evidence.id
-		ORDER BY evidence.candidate_id
+		WHERE evidence.source_kind IN (`+strings.Join(sourcePlaceholders, ",")+`)
+		  AND evidence.candidate_id IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY evidence.candidate_id, evidence.id
 	`, args...)
 	if err != nil {
 		return nil, err
@@ -76,11 +71,10 @@ func (db *DB) ListLatestPromptRuleCandidateAIAnalyses(ctx context.Context, candi
 	for rows.Next() {
 		item := &PromptRuleCandidateEvidence{}
 		var observedRaw, createdRaw any
-		var count int
 		if err := rows.Scan(&item.ID, &item.CandidateID, &item.SourceKind, &item.SourceRef,
 			&item.SourceRefHash, &item.SamplePreview, &item.MetadataJSON, &item.Protocol,
 			&item.Provider, &item.Model, &item.APIKeyID, &item.APIKeyName,
-			&item.PromptPolicyIncidentID, &observedRaw, &createdRaw, &count); err != nil {
+			&item.PromptPolicyIncidentID, &observedRaw, &createdRaw); err != nil {
 			return nil, err
 		}
 		if item.ObservedAt, err = parseDBTimeValue(observedRaw); err != nil {
@@ -89,9 +83,78 @@ func (db *DB) ListLatestPromptRuleCandidateAIAnalyses(ctx context.Context, candi
 		if item.CreatedAt, err = parseDBTimeValue(createdRaw); err != nil {
 			return nil, err
 		}
-		result[item.CandidateID] = PromptRuleCandidateAIAnalysisSummary{Count: count, Latest: item}
+		summary := result[item.CandidateID]
+		if item.SourceKind == PromptRuleCandidateSourceAIAnalysis {
+			summary.Count++
+			summary.Latest = item
+			if analysesByCandidate[item.CandidateID] == nil {
+				analysesByCandidate[item.CandidateID] = make(map[int64]*PromptRuleCandidateEvidence)
+			}
+			analysesByCandidate[item.CandidateID][item.ID] = item
+		} else {
+			summary.LatestIdentityChange = item
+		}
+		result[item.CandidateID] = summary
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for candidateID, summary := range result {
+		if summary.LatestIdentityChange == nil {
+			continue
+		}
+		var revision struct {
+			AnalysisEvidenceID int64 `json:"analysis_evidence_id"`
+		}
+		if json.Unmarshal([]byte(summary.LatestIdentityChange.MetadataJSON), &revision) == nil {
+			if linked := analysesByCandidate[candidateID][revision.AnalysisEvidenceID]; linked != nil {
+				summary.Latest = linked
+				result[candidateID] = summary
+			}
+		}
+	}
+	return result, nil
+}
+
+// ReconcilePromptRuleCandidateIdentityStatuses closes historical identity
+// attribution chains that were persisted before candidate lifecycle updates
+// became transactional. The newest identity update/rollback evidence is the
+// source of truth; original evidence and runtime rules are not changed.
+func (db *DB) ReconcilePromptRuleCandidateIdentityStatuses(ctx context.Context) error {
+	if db == nil {
+		return errors.New("database is nil")
+	}
+	return db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err = tx.ExecContext(ctx, `
+			UPDATE prompt_rule_candidates
+			SET status='published', published_at=COALESCE(published_at, CURRENT_TIMESTAMP),
+				dismissed_at=NULL, updated_at=CURRENT_TIMESTAMP
+			WHERE kind='evidence' AND status='pending'
+			  AND (SELECT evidence.source_kind FROM prompt_rule_candidate_evidence evidence
+			       WHERE evidence.candidate_id=prompt_rule_candidates.id
+			         AND evidence.source_kind IN ($1,$2)
+			       ORDER BY evidence.id DESC LIMIT 1)=$1
+		`, PromptRuleCandidateSourceAIIdentityUpdate, PromptRuleCandidateSourceAIIdentityRollback); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `
+			UPDATE prompt_rule_candidates
+			SET status='pending', published_at=NULL, dismissed_at=NULL, updated_at=CURRENT_TIMESTAMP
+			WHERE kind='evidence' AND status='published'
+			  AND (SELECT evidence.source_kind FROM prompt_rule_candidate_evidence evidence
+			       WHERE evidence.candidate_id=prompt_rule_candidates.id
+			         AND evidence.source_kind IN ($1,$2)
+			       ORDER BY evidence.id DESC LIMIT 1)=$2
+		`, PromptRuleCandidateSourceAIIdentityUpdate, PromptRuleCandidateSourceAIIdentityRollback); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 // AddPromptRuleCandidateEvidence attaches one deduplicated audit event to an
@@ -200,6 +263,7 @@ func (db *DB) CompareAndSwapPromptFilterAdvancedConfigWithEvidence(
 	ctx context.Context,
 	candidateID int64,
 	expectedJSON, replacementJSON string,
+	targetCandidateStatus string,
 	rawEvidence PromptRuleCandidateEvidenceInput,
 ) (bool, *PromptRuleCandidateEvidence, error) {
 	expectedJSON = strings.TrimSpace(expectedJSON)
@@ -212,6 +276,13 @@ func (db *DB) CompareAndSwapPromptFilterAdvancedConfigWithEvidence(
 	}
 	if candidateID <= 0 {
 		return false, nil, errors.New("candidate ID is invalid")
+	}
+	if targetCandidateStatus != PromptRuleCandidateStatusPending && targetCandidateStatus != PromptRuleCandidateStatusPublished {
+		return false, nil, errors.New("candidate target status is invalid")
+	}
+	expectedCandidateStatus := PromptRuleCandidateStatusPending
+	if targetCandidateStatus == PromptRuleCandidateStatusPending {
+		expectedCandidateStatus = PromptRuleCandidateStatusPublished
 	}
 	evidence, err := normalizePromptRuleCandidateEvidenceInput(rawEvidence)
 	if err != nil {
@@ -281,10 +352,13 @@ func (db *DB) CompareAndSwapPromptFilterAdvancedConfigWithEvidence(
 		}
 		result, execErr = tx.ExecContext(ctx, `
 			UPDATE prompt_rule_candidates SET evidence_count=evidence_count+1,
+				status=$3,
+				published_at=CASE WHEN $3='published' THEN COALESCE(published_at, CURRENT_TIMESTAMP) ELSE NULL END,
+				dismissed_at=NULL,
 				updated_at=CURRENT_TIMESTAMP,
 				last_seen_at=CASE WHEN $1 > last_seen_at THEN $1 ELSE last_seen_at END
-			WHERE id=$2
-		`, evidence.ObservedAt, candidateID)
+			WHERE id=$2 AND kind='evidence' AND status=$4
+		`, evidence.ObservedAt, candidateID, targetCandidateStatus, expectedCandidateStatus)
 		if execErr != nil {
 			return execErr
 		}
