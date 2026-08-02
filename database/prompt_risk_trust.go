@@ -489,6 +489,50 @@ type promptRiskTrustEvidenceSummary struct {
 	LastCleanAt   *time.Time
 }
 
+// PromptRiskAdaptiveReviewBasis is the durable evidence used to decide
+// whether a signed person may enter adaptive model-review sampling.
+type PromptRiskAdaptiveReviewBasis struct {
+	CleanReviewCount      int        `json:"clean_review_count"`
+	PositiveEvidenceCount int        `json:"positive_evidence_count"`
+	FirstCleanAt          *time.Time `json:"first_clean_at,omitempty"`
+	LastCleanAt           *time.Time `json:"last_clean_at,omitempty"`
+}
+
+func (db *DB) GetPromptRiskAdaptiveReviewBasis(ctx context.Context, subjectType, subjectKey string, since time.Time) (PromptRiskAdaptiveReviewBasis, error) {
+	if err := db.ensurePromptRiskEventsTable(ctx); err != nil {
+		return PromptRiskAdaptiveReviewBasis{}, err
+	}
+	var result PromptRiskAdaptiveReviewBasis
+	var firstClean, lastClean any
+	err := db.conn.QueryRowContext(ctx, `SELECT
+		COUNT(DISTINCT CASE WHEN event_kind='review_cleared' THEN CASE WHEN request_correlation_id<>'' THEN request_correlation_id ELSE source_type || ':' || source_id END END),
+		COALESCE(SUM(CASE WHEN request_risk_score>0 AND event_kind NOT IN ('local_audit_hit', 'review_cleared') THEN 1 ELSE 0 END), 0),
+		MIN(CASE WHEN event_kind='review_cleared' THEN created_at ELSE NULL END),
+		MAX(CASE WHEN event_kind='review_cleared' THEN created_at ELSE NULL END)
+	FROM prompt_risk_events
+	WHERE subject_type=$1 AND subject_key=$2 AND is_person=TRUE AND created_at >= $3`,
+		strings.TrimSpace(subjectType), strings.TrimSpace(subjectKey), since.UTC()).Scan(
+		&result.CleanReviewCount, &result.PositiveEvidenceCount, &firstClean, &lastClean)
+	if err != nil {
+		return result, err
+	}
+	if firstClean != nil {
+		value, err := parsePromptRiskTimeValue(firstClean)
+		if err != nil {
+			return result, err
+		}
+		result.FirstCleanAt = &value
+	}
+	if lastClean != nil {
+		value, err := parsePromptRiskTimeValue(lastClean)
+		if err != nil {
+			return result, err
+		}
+		result.LastCleanAt = &value
+	}
+	return result, nil
+}
+
 func normalizePromptRiskTrustAdaptiveOptions(options PromptRiskTrustAdaptiveOptions) PromptRiskTrustAdaptiveOptions {
 	if options.MinCleanReviews <= 0 {
 		options.MinCleanReviews = 10
@@ -727,4 +771,44 @@ func (db *DB) ListPromptRiskTrustEvents(ctx context.Context, subjectType, subjec
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// ListPromptRiskTrustEventsPage returns the independent, durable decision and
+// operations history for one adaptive-review subject.
+func (db *DB) ListPromptRiskTrustEventsPage(ctx context.Context, subjectType, subjectKey string, page, pageSize int) ([]*PromptRiskTrustEvent, int, error) {
+	if err := db.ensurePromptRiskTrustTables(ctx); err != nil {
+		return nil, 0, err
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 200 {
+		pageSize = 20
+	}
+	subjectType = strings.TrimSpace(subjectType)
+	subjectKey = strings.TrimSpace(subjectKey)
+	var total int
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_risk_trust_events WHERE subject_type=$1 AND subject_key=$2`, subjectType, subjectKey).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := db.conn.QueryContext(ctx, `SELECT id, policy_id, subject_type, subject_key, event_type, reason, risk_score, risk_level, request_id_hash, created_at
+		FROM prompt_risk_trust_events WHERE subject_type=$1 AND subject_key=$2
+		ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`, subjectType, subjectKey, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]*PromptRiskTrustEvent, 0, pageSize)
+	for rows.Next() {
+		item := &PromptRiskTrustEvent{}
+		var created any
+		if err := rows.Scan(&item.ID, &item.PolicyID, &item.SubjectType, &item.SubjectKey, &item.EventType, &item.Reason, &item.RiskScore, &item.RiskLevel, &item.RequestIDHash, &created); err != nil {
+			return nil, 0, err
+		}
+		if item.CreatedAt, err = parsePromptRiskTimeValue(created); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
 }

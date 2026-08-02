@@ -28,7 +28,7 @@ test('pending evidence cannot be published and every lifecycle action stays in t
   assert.equal(pageSource.includes('publishPromptIntelligenceCandidate(candidate.id)'), true)
   assert.equal(pageSource.includes('dismissPromptIntelligenceCandidate(dismissTarget.id)'), true)
   assert.equal(pageSource.includes('result.staged'), true)
-  assert.equal(pageSource.includes("candidate.lifecycle_status === 'pending' && candidate.kind === 'evidence'"), true)
+  assert.equal(pageSource.includes("candidate.kind === 'evidence' && (candidate.lifecycle_status === 'pending' || candidate.ai_analyzed)"), true)
   assert.equal(pageSource.includes('createPromptIntelligenceCandidateDraft(draftTarget.id'), true)
   assert.equal(pageSource.includes('saveDraft'), true)
 })
@@ -68,5 +68,18 @@ test('persisted AI learning results are restored and visibly marked without reru
     "t('promptFilter.intelligence.aiRunAgain')",
   ]) {
     assert.equal(pageSource.includes(fragment), true, `missing persisted AI result UI: ${fragment}`)
+  }
+})
+
+test('applied identity attribution is closed and remains reviewable', () => {
+  for (const fragment of [
+    "candidate.lifecycle_status === 'published' ? 'promptFilter.intelligence.attributedEvidence'",
+    "candidateLifecycleLabel(candidate)",
+    "candidate.kind === 'evidence' && (candidate.lifecycle_status === 'pending' || candidate.ai_analyzed)",
+    "aiResult.identity_update.rolled_back",
+    "Boolean(aiResult.identity_update.block_reason)",
+    "aiTarget.lifecycle_status !== 'pending'",
+  ]) {
+    assert.equal(pageSource.includes(fragment), true, `missing closed-loop identity UI: ${fragment}`)
   }
 })

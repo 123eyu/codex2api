@@ -177,3 +177,90 @@ func TestPromptRiskAdaptiveTrustPostgresMigrationDDL(t *testing.T) {
 		}
 	}
 }
+
+func TestPromptRiskAdaptiveReviewBasisCountsDistinctCleanRequestsAndPositiveEvidence(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	if err := db.ensurePromptRiskEventsTable(ctx); err != nil {
+		t.Fatalf("ensurePromptRiskEventsTable: %v", err)
+	}
+	subjectKey := PromptRiskNewAPIUserSubjectKey("gateway-a", "basis-user")
+	now := time.Now().UTC()
+	rows := []struct {
+		sourceID  string
+		requestID string
+		eventKind string
+		riskScore int
+		createdAt time.Time
+	}{
+		{sourceID: "clean-1", requestID: "request-clean-1", eventKind: "review_cleared", createdAt: now.Add(-3 * time.Hour)},
+		{sourceID: "clean-1-duplicate", requestID: "request-clean-1", eventKind: "review_cleared", createdAt: now.Add(-2 * time.Hour)},
+		{sourceID: "clean-2", requestID: "request-clean-2", eventKind: "review_cleared", createdAt: now.Add(-time.Hour)},
+		{sourceID: "audit-only", requestID: "request-audit", eventKind: "local_audit_hit", riskScore: 20, createdAt: now.Add(-45 * time.Minute)},
+		{sourceID: "positive", requestID: "request-positive", eventKind: "local_block", riskScore: 80, createdAt: now.Add(-30 * time.Minute)},
+	}
+	for _, row := range rows {
+		if _, err := db.conn.ExecContext(ctx, `INSERT INTO prompt_risk_events (
+			created_at, source_type, source_id, request_correlation_id, subject_type, subject_key, subject_display,
+			platform, is_person, identity_confidence, event_kind, request_risk_score, evidence_confidence
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,TRUE,100,$9,$10,95)`, row.createdAt, promptRiskSourceLog,
+			row.sourceID, row.requestID, PromptRiskSubjectNewAPIUser, subjectKey, "basis-user", "gateway-a", row.eventKind, row.riskScore); err != nil {
+			t.Fatalf("insert risk event %q: %v", row.sourceID, err)
+		}
+	}
+
+	basis, err := db.GetPromptRiskAdaptiveReviewBasis(ctx, PromptRiskSubjectNewAPIUser, subjectKey, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("GetPromptRiskAdaptiveReviewBasis: %v", err)
+	}
+	if basis.CleanReviewCount != 2 || basis.PositiveEvidenceCount != 1 {
+		t.Fatalf("unexpected adaptive basis: %#v", basis)
+	}
+	if basis.FirstCleanAt == nil || basis.LastCleanAt == nil || !basis.FirstCleanAt.Before(*basis.LastCleanAt) {
+		t.Fatalf("adaptive basis clean review bounds missing: %#v", basis)
+	}
+}
+
+func TestPromptRiskTrustEventPaginationIsIndependentAndStable(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	subjectKey := PromptRiskNewAPIUserSubjectKey("gateway-a", "paged-user")
+	policy, err := db.UpsertPromptRiskTrustPolicy(ctx, PromptRiskTrustPolicyInput{
+		SubjectType: PromptRiskSubjectNewAPIUser, SubjectKey: subjectKey, Reason: "paged audit history",
+		RiskThreshold: 35, ValidUntil: time.Now().UTC().Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("UpsertPromptRiskTrustPolicy: %v", err)
+	}
+	if err := db.RecordPromptRiskTrustBypass(ctx, policy.ID, policy.SubjectType, policy.SubjectKey, "request-bypass-1"); err != nil {
+		t.Fatalf("RecordPromptRiskTrustBypass(1): %v", err)
+	}
+	if err := db.RecordPromptRiskTrustModelReview(ctx, policy.ID, policy.SubjectType, policy.SubjectKey, "request-review-1"); err != nil {
+		t.Fatalf("RecordPromptRiskTrustModelReview: %v", err)
+	}
+	if err := db.RecordPromptRiskTrustBypass(ctx, policy.ID, policy.SubjectType, policy.SubjectKey, "request-bypass-2"); err != nil {
+		t.Fatalf("RecordPromptRiskTrustBypass(2): %v", err)
+	}
+
+	page1, total1, err := db.ListPromptRiskTrustEventsPage(ctx, policy.SubjectType, policy.SubjectKey, 1, 2)
+	if err != nil {
+		t.Fatalf("ListPromptRiskTrustEventsPage(1): %v", err)
+	}
+	page2, total2, err := db.ListPromptRiskTrustEventsPage(ctx, policy.SubjectType, policy.SubjectKey, 2, 2)
+	if err != nil {
+		t.Fatalf("ListPromptRiskTrustEventsPage(2): %v", err)
+	}
+	if total1 != 4 || total2 != total1 || len(page1) != 2 || len(page2) != 2 {
+		t.Fatalf("unexpected pagination totals: total1=%d total2=%d page1=%#v page2=%#v", total1, total2, page1, page2)
+	}
+	seen := map[int64]bool{}
+	for _, event := range append(page1, page2...) {
+		if seen[event.ID] {
+			t.Fatalf("duplicate trust event across pages: %#v", event)
+		}
+		seen[event.ID] = true
+	}
+	if page1[0].RequestIDHash != "request-bypass-2" || page2[1].EventType != PromptRiskTrustEventGranted {
+		t.Fatalf("unexpected trust event order: page1=%#v page2=%#v", page1, page2)
+	}
+}

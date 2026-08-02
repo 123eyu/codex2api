@@ -83,6 +83,7 @@ type promptIdentityUpdateResult struct {
 	Suggested          bool     `json:"suggested"`
 	Eligible           bool     `json:"eligible"`
 	Applied            bool     `json:"applied"`
+	RolledBack         bool     `json:"rolled_back,omitempty"`
 	AnalysisEvidenceID int64    `json:"analysis_evidence_id"`
 	RevisionEvidenceID int64    `json:"revision_evidence_id,omitempty"`
 	Clauses            []string `json:"clauses,omitempty"`
@@ -122,7 +123,7 @@ type promptIntelligenceAICallAttribution struct {
 	APIKeyName string
 }
 
-func promptIntelligenceAIAnalysisFromEvidence(evidence *database.PromptRuleCandidateEvidence) *promptIntelligenceAIAnalysisResponse {
+func promptIntelligenceAIAnalysisFromEvidence(evidence, identityChange *database.PromptRuleCandidateEvidence) *promptIntelligenceAIAnalysisResponse {
 	if evidence == nil || evidence.SourceKind != database.PromptRuleCandidateSourceAIAnalysis {
 		return nil
 	}
@@ -145,7 +146,26 @@ func promptIntelligenceAIAnalysisFromEvidence(evidence *database.PromptRuleCandi
 	if metadata.Result.IdentityPatch != nil {
 		identityUpdate.Suggested = true
 		identityUpdate.Clauses = append([]string(nil), metadata.Result.IdentityPatch.Clauses...)
-		identityUpdate.BlockReason = metadata.IdentityValidationError
+		identityUpdate.BlockReason = validatePromptIdentityClauses(identityUpdate.Clauses)
+		identityUpdate.Eligible = identityUpdate.BlockReason == ""
+	}
+	if identityChange != nil && metadata.Result.IdentityPatch != nil {
+		var revision promptIdentityRevisionMetadata
+		if json.Unmarshal([]byte(identityChange.MetadataJSON), &revision) == nil && revision.AnalysisEvidenceID == evidence.ID {
+			switch identityChange.SourceKind {
+			case database.PromptRuleCandidateSourceAIIdentityUpdate:
+				identityUpdate.Mode = revision.Mode
+				identityUpdate.Applied = true
+				identityUpdate.RolledBack = false
+				identityUpdate.Eligible = true
+				identityUpdate.RevisionEvidenceID = identityChange.ID
+				identityUpdate.BlockReason = ""
+			case database.PromptRuleCandidateSourceAIIdentityRollback:
+				identityUpdate.Mode = "rollback"
+				identityUpdate.Applied = false
+				identityUpdate.RolledBack = true
+			}
+		}
 	}
 	return &promptIntelligenceAIAnalysisResponse{
 		AnalysisEvidenceID: evidence.ID,
@@ -185,6 +205,10 @@ func (h *Handler) AnalyzePromptIntelligenceCandidate(c *gin.Context) {
 	candidateID, err := parsePositiveInt64Param(c, "id")
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "候选证据 ID 无效")
+		return
+	}
+	if err := h.db.ReconcilePromptRuleCandidateIdentityStatuses(c.Request.Context()); err != nil {
+		writeInternalError(c, err)
 		return
 	}
 	candidate, err := h.db.GetPromptRuleCandidate(c.Request.Context(), candidateID)
@@ -728,9 +752,9 @@ func (h *Handler) stagePromptIntelligenceAIRule(ctx context.Context, parent *dat
 }
 
 var (
-	promptIdentityForbiddenClause = regexp.MustCompile(`(?i)(sk-[a-z0-9]|authorization\s*:|bearer\s+|cookie\s*:|api[ _-]?key|private[ _-]?key|system\s+prompt|ignore\s+(all\s+)?(previous|prior|system)|override\s+(the\s+)?(instructions|policy)|change\s+(the\s+)?(json|output)|tool\s*call|https?://|<\/?user_input>|\[/?learned safety guidance|系統提示詞|系统提示词|忽略.{0,12}指令|更改.{0,12}輸出|更改.{0,12}输出|api.?密[鑰钥]|訪問令牌|访问令牌|工具調用|工具调用)`) //nolint:lll
-	promptIdentityDomainSignal    = regexp.MustCompile(`(?i)(rce|exploit|malware|credential|unauthori[sz]ed|account abuse|phishing|ransomware|reverse shell|deepfake|doxx|credible threat|cyber|own system|authorized|defensive|漏洞|攻擊|攻击|惡意軟體|恶意软件|憑據|凭据|未授權|未授权|批量帳號|批量账号|釣魚|钓鱼|勒索|反彈.?shell|反弹.?shell|深度偽造|深度伪造|人肉|暴力威脅|暴力威胁|自有系統|自有系统|防禦|防御)`)                                                                                     //nolint:lll
-	promptIdentityDecisionSignal  = regexp.MustCompile(`(?i)(harmful|high.?risk|block|flag|classif|consider|treat|benign|safe|allow|違規|违规|高風險|高风险|攔截|拦截|標記|标记|判定|視為|视为|合規|合规|放行)`)                                                                                                                                                                                                                                                    //nolint:lll
+	promptIdentityForbiddenClause = regexp.MustCompile(`(?i)(sk-[a-z0-9]|authorization\s*:|bearer\s+|cookie\s*:|api[ _-]?key|private[ _-]?key|system\s+prompt|ignore\s+(all\s+)?(previous|prior|system)|override\s+(the\s+)?(instructions|policy)|change\s+(the\s+)?(json|output)|tool\s*call|https?://|<\/?user_input>|\[/?learned safety guidance|系統提示詞|系统提示词|忽略.{0,12}指令|更改.{0,12}輸出|更改.{0,12}输出|api.?密[鑰钥]|訪問令牌|访问令牌|工具調用|工具调用)`)                                                                 //nolint:lll
+	promptIdentityDomainSignal    = regexp.MustCompile(`(?i)(rce|exploit|malware|credential|unauthori[sz]ed|account abuse|phishing|ransomware|reverse shell|deepfake|doxx|credible threat|cyber|own system|authorized|defensive|漏洞|攻擊|攻击|惡意軟體|恶意软件|憑據|凭据|未授權|未授权|批量帳號|批量账号|釣魚|钓鱼|勒索|反彈.?shell|反弹.?shell|深度偽造|深度伪造|人肉|暴力威脅|暴力威胁|自有系統|自有系统|防禦|防御)`)                                                                                                                                                     //nolint:lll
+	promptIdentityDecisionSignal  = regexp.MustCompile(`(?i)(harmful|high.?risk|block|flag|classif|consider|treat|benign|safe|allow|no\s+weight|carry\s+no\s+weight|shall\s+not|must\s+not|normal\s+development|actual\s+(attack|abuse)|concrete\s+(attack|abuse)|unless.{0,80}(intent|attack|abuse)|without.{0,80}(intent|attack|abuse)|違規|违规|高風險|高风险|攔截|拦截|標記|标记|判定|視為|视为|合規|合规|放行|不應.{0,12}(視為|视为|判定|攔截|拦截)|不計.{0,8}(權重|权重)|正常開發|正常开发|除非.{0,30}(攻擊|攻击|濫用|滥用|意圖|意图)|沒有.{0,30}(攻擊|攻击|濫用|滥用|意圖|意图))`) //nolint:lll
 )
 
 func validatePromptIdentityClauses(clauses []string) string {
@@ -814,6 +838,9 @@ func buildPromptIdentityManagedSection(base string, clauses []string) (string, e
 }
 
 func (h *Handler) applyPromptIntelligenceIdentityPatch(ctx context.Context, candidateID, analysisEvidenceID int64, mode string) (promptIdentityUpdateResult, error) {
+	if err := h.db.ReconcilePromptRuleCandidateIdentityStatuses(ctx); err != nil {
+		return promptIdentityUpdateResult{}, err
+	}
 	candidate, err := h.db.GetPromptRuleCandidate(ctx, candidateID)
 	if err != nil {
 		return promptIdentityUpdateResult{}, err
@@ -863,9 +890,6 @@ func (h *Handler) applyPromptIntelligenceIdentityPatch(ctx context.Context, cand
 	if err != nil {
 		return promptIdentityUpdateResult{}, err
 	}
-	if nextPrompt == currentPrompt {
-		return promptIdentityUpdateResult{Mode: mode, Suggested: true, Eligible: true, Applied: true, AnalysisEvidenceID: analysisEvidenceID, Clauses: clauses}, nil
-	}
 	document.Effective.ReviewAdapter.SystemPrompt = nextPrompt
 	replacementRaw, err := promptfilter.MarshalAdvancedConfigDocument(document.Raw, document.Effective)
 	if err != nil {
@@ -881,7 +905,7 @@ func (h *Handler) applyPromptIntelligenceIdentityPatch(ctx context.Context, cand
 	}
 	revisionJSON, _ := json.Marshal(revision)
 	revisionHash := promptfilter.StableEvidenceFingerprint("identity-revision", fmt.Sprintf("%d\x00%s\x00%s", analysisEvidenceID, revision.PreviousPromptHash, revision.AppliedPromptHash))
-	swapped, revisionEvidence, err := h.db.CompareAndSwapPromptFilterAdvancedConfigWithEvidence(ctx, candidateID, expectedRaw, replacementRaw, database.PromptRuleCandidateEvidenceInput{
+	swapped, revisionEvidence, err := h.db.CompareAndSwapPromptFilterAdvancedConfigWithEvidence(ctx, candidateID, expectedRaw, replacementRaw, database.PromptRuleCandidateStatusPublished, database.PromptRuleCandidateEvidenceInput{
 		SourceKind: database.PromptRuleCandidateSourceAIIdentityUpdate,
 		SourceRef:  fmt.Sprintf("analysis:%d", analysisEvidenceID), SourceRefHash: revisionHash,
 		SamplePreview: promptfilter.RedactedPreview(strings.Join(clauses, "；"), 1000), MetadataJSON: string(revisionJSON),
@@ -909,6 +933,9 @@ func (h *Handler) applyPromptIntelligenceIdentityPatch(ctx context.Context, cand
 }
 
 func (h *Handler) rollbackPromptIntelligenceIdentityPatch(ctx context.Context, candidateID, revisionEvidenceID int64) (promptIdentityUpdateResult, error) {
+	if err := h.db.ReconcilePromptRuleCandidateIdentityStatuses(ctx); err != nil {
+		return promptIdentityUpdateResult{}, err
+	}
 	revisionEvidence, err := h.db.GetPromptRuleCandidateEvidence(ctx, revisionEvidenceID)
 	if err != nil {
 		return promptIdentityUpdateResult{}, err
@@ -972,7 +999,7 @@ func (h *Handler) rollbackPromptIntelligenceIdentityPatch(ctx context.Context, c
 	}
 	rollbackJSON, _ := json.Marshal(rollback)
 	rollbackHash := promptfilter.StableEvidenceFingerprint("identity-rollback", fmt.Sprintf("%d\x00%s", revisionEvidenceID, rollback.AppliedPromptHash))
-	swapped, rollbackEvidence, err := h.db.CompareAndSwapPromptFilterAdvancedConfigWithEvidence(ctx, candidateID, expectedRaw, replacementRaw, database.PromptRuleCandidateEvidenceInput{
+	swapped, _, err := h.db.CompareAndSwapPromptFilterAdvancedConfigWithEvidence(ctx, candidateID, expectedRaw, replacementRaw, database.PromptRuleCandidateStatusPending, database.PromptRuleCandidateEvidenceInput{
 		SourceKind: database.PromptRuleCandidateSourceAIIdentityRollback,
 		SourceRef:  fmt.Sprintf("revision:%d", revisionEvidenceID), SourceRefHash: rollbackHash,
 		SamplePreview: "回滚 AI 身份指导版本", MetadataJSON: string(rollbackJSON), Provider: revision.Provider,
@@ -991,9 +1018,9 @@ func (h *Handler) rollbackPromptIntelligenceIdentityPatch(ctx context.Context, c
 		return promptIdentityUpdateResult{}, fmt.Errorf("身份提示词已回滚，但运行时发布失败: %w", err)
 	}
 	result := promptIdentityUpdateResult{
-		Mode: "rollback", Suggested: true, Eligible: true, Applied: true,
-		AnalysisEvidenceID: revision.AnalysisEvidenceID, RevisionEvidenceID: rollbackEvidence.ID,
-		Clauses: append([]string(nil), revision.PreviousManagedClauses...),
+		Mode: "rollback", Suggested: true, Eligible: true, Applied: false, RolledBack: true,
+		AnalysisEvidenceID: revision.AnalysisEvidenceID,
+		Clauses:            append([]string(nil), revision.PreviousManagedClauses...),
 	}
 	h.insertIntelligenceLog(ctx, "intel_identity_update", "rolled_back", revision.Model, result, nil)
 	return result, nil
