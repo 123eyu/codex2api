@@ -206,6 +206,7 @@ func (h *Handler) ListPromptFilterLogs(c *gin.Context) {
 		APIKeyID:            apiKeyID,
 		Query:               c.Query("q"),
 		ReviewState:         c.Query("reviewed"),
+		ReviewResult:        c.Query("review_result"),
 		ExcludeIntelligence: true,
 	})
 	if err != nil {

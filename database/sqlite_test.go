@@ -3231,6 +3231,8 @@ func TestPromptFilterReviewHistorySeparatesIntelligenceAndNullableScores(t *test
 	inputs := []*PromptFilterLogInput{
 		{Source: "intel_run", Endpoint: "prompt_intelligence", Action: "completed", Mode: "audit", FullText: `{}`},
 		{Source: "local_filter", Endpoint: "/v1/responses", Model: "gpt-5.6-sol", Action: "block", Mode: "block", TextPreview: "redacted request", Reviewed: true, ReviewModel: "review-model", ReviewFlagged: true, ReviewConfidence: &confidence, ReviewThreshold: &threshold, ReviewReason: "攻击他人系统", ReviewEndpoint: "https://review.example/chat/completions", ReviewRequestMode: "chat_completions", ReviewLatencyMS: &latencyMS},
+		{Source: "local_filter", Endpoint: "/v1/chat/completions", Model: "gpt-5.6-sol", Action: "allow", Mode: "block", TextPreview: "benign request", Reviewed: true, ReviewModel: "review-model", ReviewFlagged: false, ReviewReason: "正常开发"},
+		{Source: "local_filter", Endpoint: "/v1/responses", Model: "gpt-5.6-sol", Action: "allow", Mode: "block", TextPreview: "review timeout", Reviewed: true, ReviewModel: "review-model", ReviewError: "context deadline exceeded"},
 		{Source: "local_filter", Endpoint: "/v1/messages", Model: "claude-sonnet", Action: "warn", Mode: "warn", Score: 70},
 	}
 	for _, input := range inputs {
@@ -3243,15 +3245,36 @@ func TestPromptFilterReviewHistorySeparatesIntelligenceAndNullableScores(t *test
 	if err != nil {
 		t.Fatalf("ListPromptFilterLogsPage(reviewed): %v", err)
 	}
-	if reviewTotal != 1 || len(reviews) != 1 {
-		t.Fatalf("review total=%d len=%d, want 1", reviewTotal, len(reviews))
+	if reviewTotal != 3 || len(reviews) != 3 {
+		t.Fatalf("review total=%d len=%d, want 3", reviewTotal, len(reviews))
 	}
-	got := reviews[0]
+	flagged, flaggedTotal, err := db.ListPromptFilterLogsPage(ctx, PromptFilterLogQuery{Page: 1, PageSize: 10, ReviewState: "reviewed", ReviewResult: "flagged", ExcludeIntelligence: true})
+	if err != nil {
+		t.Fatalf("ListPromptFilterLogsPage(flagged): %v", err)
+	}
+	if flaggedTotal != 1 || len(flagged) != 1 {
+		t.Fatalf("flagged total=%d len=%d, want 1", flaggedTotal, len(flagged))
+	}
+	got := flagged[0]
 	if !got.Reviewed || got.ReviewConfidence == nil || *got.ReviewConfidence != confidence || got.ReviewThreshold == nil || *got.ReviewThreshold != threshold || got.ReviewLatencyMS == nil || *got.ReviewLatencyMS != latencyMS {
 		t.Fatalf("nullable review metadata = %+v", got)
 	}
 	if got.ReviewReason != "攻击他人系统" || got.ReviewEndpoint != "https://review.example/chat/completions" || got.ReviewRequestMode != "chat_completions" {
 		t.Fatalf("review request/response metadata = %+v", got)
+	}
+	cleared, clearedTotal, err := db.ListPromptFilterLogsPage(ctx, PromptFilterLogQuery{Page: 1, PageSize: 10, ReviewResult: "cleared", ExcludeIntelligence: true})
+	if err != nil {
+		t.Fatalf("ListPromptFilterLogsPage(cleared): %v", err)
+	}
+	if clearedTotal != 1 || len(cleared) != 1 || cleared[0].Endpoint != "/v1/chat/completions" {
+		t.Fatalf("cleared total=%d logs=%+v", clearedTotal, cleared)
+	}
+	reviewErrors, reviewErrorTotal, err := db.ListPromptFilterLogsPage(ctx, PromptFilterLogQuery{Page: 1, PageSize: 10, ReviewResult: "error", ExcludeIntelligence: true})
+	if err != nil {
+		t.Fatalf("ListPromptFilterLogsPage(error): %v", err)
+	}
+	if reviewErrorTotal != 1 || len(reviewErrors) != 1 || reviewErrors[0].ReviewError != "context deadline exceeded" {
+		t.Fatalf("review error total=%d logs=%+v", reviewErrorTotal, reviewErrors)
 	}
 
 	local, localTotal, err := db.ListPromptFilterLogsPage(ctx, PromptFilterLogQuery{Page: 1, PageSize: 10, ReviewState: "not_reviewed", ExcludeIntelligence: true})

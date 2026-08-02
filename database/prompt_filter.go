@@ -679,6 +679,7 @@ type PromptFilterLogQuery struct {
 	APIKeyID            int64
 	Query               string
 	ReviewState         string
+	ReviewResult        string
 	ExcludeIntelligence bool
 }
 
@@ -842,6 +843,14 @@ func promptFilterLogWhere(query PromptFilterLogQuery) (string, []any) {
 		clauses = append(clauses, "reviewed = true")
 	case "not_reviewed", "false":
 		clauses = append(clauses, "reviewed = false")
+	}
+	switch strings.ToLower(strings.TrimSpace(query.ReviewResult)) {
+	case "flagged":
+		clauses = append(clauses, "reviewed = true", "COALESCE(TRIM(review_error), '') = ''", "review_flagged = true")
+	case "cleared":
+		clauses = append(clauses, "reviewed = true", "COALESCE(TRIM(review_error), '') = ''", "review_flagged = false")
+	case "error":
+		clauses = append(clauses, "reviewed = true", "COALESCE(TRIM(review_error), '') <> ''")
 	}
 	if query.APIKeyID > 0 {
 		args = append(args, query.APIKeyID)
