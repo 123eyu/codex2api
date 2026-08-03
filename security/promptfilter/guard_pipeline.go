@@ -1667,8 +1667,23 @@ func (DefaultGuardPolicy) Decide(request GuardRequest, detectionContext Detectio
 		if actionRank(actual) > actionRank(decision.Action) {
 			decision.Action = actual
 		}
-		if signal.Score > decision.AuditScore {
-			decision.AuditScore = signal.Score
+		auditScore := signal.Score
+		if auditScore == 0 && signal.RawScore > 0 && len(signal.Matches) > 0 {
+			// Signal-only evidence must never become enforcement by accumulation,
+			// but it is still real audit evidence. Preserve a bounded non-zero
+			// score so operators can distinguish "matched, non-enforcing" from
+			// "nothing was evaluated or matched".
+			auditScore = signal.RawScore
+			auditCap := request.Config.Threshold / 2
+			if auditCap < 1 {
+				auditCap = 1
+			}
+			if auditScore > auditCap {
+				auditScore = auditCap
+			}
+		}
+		if auditScore > decision.AuditScore {
+			decision.AuditScore = auditScore
 		}
 		if signal.RawScore > decision.AuditRawScore {
 			decision.AuditRawScore = signal.RawScore

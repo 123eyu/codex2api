@@ -969,12 +969,20 @@ func (db *DB) ClearPromptFilterLogs(ctx context.Context) error {
 		return nil
 	}
 	if db.isSQLite() {
-		if _, err := db.conn.ExecContext(ctx, `DELETE FROM prompt_filter_logs; DELETE FROM prompt_policy_incidents; DELETE FROM prompt_risk_events; DELETE FROM prompt_risk_event_sources`); err != nil {
+		if _, err := db.conn.ExecContext(ctx, `DELETE FROM prompt_filter_logs`); err != nil {
 			return err
 		}
-		_, err := db.conn.ExecContext(ctx, `DELETE FROM sqlite_sequence WHERE name IN ('prompt_filter_logs', 'prompt_policy_incidents', 'prompt_risk_events')`)
+		_, err := db.conn.ExecContext(ctx, `DELETE FROM sqlite_sequence WHERE name='prompt_filter_logs'`)
 		return err
 	}
-	_, err := db.conn.ExecContext(ctx, `TRUNCATE TABLE prompt_filter_logs, prompt_policy_incidents, prompt_risk_events, prompt_risk_event_sources RESTART IDENTITY`)
+	_, err := db.conn.ExecContext(ctx, `TRUNCATE TABLE prompt_filter_logs RESTART IDENTITY`)
+	return err
+}
+
+func (db *DB) ClearPromptFilterLogsByReviewStatus(ctx context.Context, reviewed bool) error {
+	if db == nil {
+		return nil
+	}
+	_, err := db.conn.ExecContext(ctx, `DELETE FROM prompt_filter_logs WHERE reviewed = $1`, reviewed)
 	return err
 }

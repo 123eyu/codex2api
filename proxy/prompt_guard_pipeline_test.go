@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +39,39 @@ func promptGuardTestConfig() promptfilter.Config {
 	cfg.StrictTerminalEnabled = true
 	cfg.Advanced.Guard = promptfilter.DefaultGuardConfig()
 	return promptfilter.NormalizeConfig(cfg)
+}
+
+func TestDefensiveSecurityRequestIsAllowedAndRecordedInRiskProfile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := promptGuardTestConfig()
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	store.SetPromptFilterConfig(cfg)
+	handler := NewHandler(store, db, nil, nil)
+	handler.SetRuntimeCache(cache.NewMemory(1))
+	body := []byte(`{"model":"gpt-5.5","input":"Write a YARA rule to detect ransomware encryptors for incident response; do not create malware."}`)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(body)))
+	evaluation := handler.evaluatePromptGuard(c, body, body, "/v1/responses", "gpt-5.5", promptfilter.TransportHTTP)
+	if evaluation.Decision.Action != promptfilter.ActionAllow || evaluation.Decision.AuditRawScore <= 0 || !strings.Contains(promptfilter.MatchesJSON(evaluation.Verdict.Matched), "malware_family") {
+		t.Fatalf("defensive request evaluation=%+v verdict=%+v", evaluation.Decision, evaluation.Verdict)
+	}
+	handler.logPromptFilterVerdictWithDecision(c, "/v1/responses", "gpt-5.5", "local_filter", "", evaluation.Verdict, &evaluation.Decision, &evaluation.Envelope)
+	waitPromptFilterAuditIdle(t, db)
+	profiles, total, err := db.ListPromptRiskProfiles(context.Background(), database.PromptRiskProfileQuery{
+		Page: 1, PageSize: 20, SubjectType: database.PromptRiskSubjectClientIP,
+	})
+	if err != nil || total != 1 || len(profiles) != 1 || profiles[0].RiskScore <= 0 || profiles[0].RiskScore >= 15 {
+		t.Fatalf("risk profiles total=%d items=%#v err=%v", total, profiles, err)
+	}
+	events, eventTotal, err := db.ListPromptRiskEvents(context.Background(), profiles[0].SubjectType, profiles[0].SubjectKey, database.PromptRiskEventQuery{Page: 1, PageSize: 10})
+	if err != nil || eventTotal != 1 || len(events) != 1 || events[0].EventKind != "local_security_context_observed" {
+		t.Fatalf("risk events total=%d items=%#v err=%v", eventTotal, events, err)
+	}
 }
 
 func TestApplicationCandidateUsesTriggerTextForReviewWithoutStrike(t *testing.T) {

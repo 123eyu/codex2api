@@ -2398,6 +2398,72 @@ func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.
 	}
 }
 
+func TestUsageStatsRollupPreservesFullTotalsAndChannelSemantics(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	for _, usageLog := range []*UsageLogInput{
+		{AccountID: 1, Channel: "codex", Endpoint: "/v1/responses", Model: "gpt-5.5", StatusCode: 200, InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CachedTokens: 32, FirstTokenMs: 400},
+		{AccountID: 2, Channel: "grok", Endpoint: "/v1/chat/completions", Model: "grok-4", StatusCode: 500, InputTokens: 60, OutputTokens: 20, TotalTokens: 80, FirstTokenMs: 800},
+		{AccountID: 3, Channel: "codex", Endpoint: "/v1/responses", Model: "gpt-5.5", StatusCode: 499, TotalTokens: 999},
+	} {
+		if err := db.InsertUsageLog(ctx, usageLog); err != nil {
+			t.Fatalf("InsertUsageLog 返回错误: %v", err)
+		}
+	}
+	db.FlushUsageLogs()
+
+	all, err := db.GetUsageStats(ctx, time.Time{}, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("GetUsageStats(all) 返回错误: %v", err)
+	}
+	if all.TotalRequests != 2 || all.TotalTokens != 230 || all.TotalCachedTokens != 32 || all.AvgFirstTokenMs != 600 {
+		t.Fatalf("完整累计汇总 = %+v, want requests=2 tokens=230 cached=32 first_token=600", all)
+	}
+	codex, err := db.GetUsageStats(ctx, time.Time{}, time.Time{}, "codex")
+	if err != nil {
+		t.Fatalf("GetUsageStats(codex) 返回错误: %v", err)
+	}
+	if codex.TotalRequests != 1 || codex.TotalTokens != 150 || codex.TotalCachedTokens != 32 {
+		t.Fatalf("codex 累计汇总 = %+v, want requests=1 tokens=150 cached=32", codex)
+	}
+
+	if err := db.ClearUsageLogs(ctx); err != nil {
+		t.Fatalf("ClearUsageLogs 返回错误: %v", err)
+	}
+	cleared, err := db.GetUsageStats(ctx, time.Time{}, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("GetUsageStats(clear) 返回错误: %v", err)
+	}
+	if cleared.TotalRequests != 2 || cleared.TotalTokens != 230 || cleared.TotalCachedTokens != 32 || cleared.AvgFirstTokenMs != 600 {
+		t.Fatalf("清理日志后完整累计丢失: %+v", cleared)
+	}
+	clearedCodex, err := db.GetUsageStats(ctx, time.Time{}, time.Time{}, "codex")
+	if err != nil {
+		t.Fatalf("GetUsageStats(codex after clear) 返回错误: %v", err)
+	}
+	if clearedCodex.TotalRequests != 0 {
+		t.Fatalf("清理后渠道累计 = %d, want 0（历史 baseline 无渠道维度）", clearedCodex.TotalRequests)
+	}
+
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{AccountID: 4, Channel: "codex", Endpoint: "/v1/responses", Model: "gpt-5.5", StatusCode: 200, TotalTokens: 70}); err != nil {
+		t.Fatalf("InsertUsageLog(after clear) 返回错误: %v", err)
+	}
+	db.FlushUsageLogs()
+	updated, err := db.GetUsageStats(ctx, time.Time{}, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("GetUsageStats(updated) 返回错误: %v", err)
+	}
+	if updated.TotalRequests != 3 || updated.TotalTokens != 300 {
+		t.Fatalf("清理后新增的完整累计 = requests %d tokens %d, want 3/300", updated.TotalRequests, updated.TotalTokens)
+	}
+}
+
 func TestSoftDeleteAccountMarksDeletedStatus(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
@@ -2991,6 +3057,44 @@ func TestGetAccountsBilledSinceUsesPerAccountWindows(t *testing.T) {
 	}
 	if got[3] != 0 {
 		t.Fatalf("account 3 billed = %.2f, want 0", got[3])
+	}
+}
+
+func TestGetAccountUsageWindowsAggregatesBothRangesInOnePass(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	for _, item := range []struct {
+		accountID int64
+		createdAt time.Time
+		tokens    int
+		billed    float64
+	}{
+		{accountID: 1, createdAt: now.Add(-time.Hour), tokens: 100, billed: 1},
+		{accountID: 1, createdAt: now.Add(-48 * time.Hour), tokens: 200, billed: 2},
+		{accountID: 2, createdAt: now.Add(-2 * time.Hour), tokens: 300, billed: 3},
+		{accountID: 2, createdAt: now.Add(-8 * 24 * time.Hour), tokens: 999, billed: 9},
+	} {
+		if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs (account_id, status_code, total_tokens, account_billed, user_billed, created_at)
+			VALUES ($1, 200, $2, $3, $3, $4)`, item.accountID, item.tokens, item.billed, sqliteTimeParam(item.createdAt)); err != nil {
+			t.Fatalf("insert usage log: %v", err)
+		}
+	}
+	shortWindow, longWindow, err := db.GetAccountUsageWindows(ctx, now.Add(-5*time.Hour), now.Add(-7*24*time.Hour))
+	if err != nil {
+		t.Fatalf("GetAccountUsageWindows: %v", err)
+	}
+	if shortWindow[1].Requests != 1 || shortWindow[1].Tokens != 100 || longWindow[1].Requests != 2 || longWindow[1].Tokens != 300 {
+		t.Fatalf("account 1 windows short=%+v long=%+v", shortWindow[1], longWindow[1])
+	}
+	if shortWindow[2].Requests != 1 || longWindow[2].Requests != 1 || longWindow[2].Tokens != 300 {
+		t.Fatalf("account 2 windows short=%+v long=%+v", shortWindow[2], longWindow[2])
 	}
 }
 

@@ -1259,6 +1259,9 @@ export interface PromptRiskProfile {
   risk_level: PromptRiskLevel
   recommended_actions: string[]
   score_breakdown: PromptRiskScoreBreakdown
+  has_activity: boolean
+  identity_source?: string
+  identity_updated_at?: ISODateString
   latest_at: ISODateString
   event_count: number
   events_10m: number

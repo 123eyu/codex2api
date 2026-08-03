@@ -21,6 +21,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const usageStatsRollupInitTimeout = 5 * time.Minute
+
 // AccountRow 数据库中的账号行
 type AccountRow struct {
 	ID                      int64
@@ -471,6 +473,12 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 	if err := db.ensureUsageStatsBaselineBillingColumns(ctx); err != nil {
 		return nil, err
 	}
+	rollupCtx, rollupCancel := usageStatsRollupStartupContext(ctx)
+	rollupErr := db.ensureUsageStatsRollup(rollupCtx)
+	rollupCancel()
+	if rollupErr != nil {
+		return nil, fmt.Errorf("初始化用量累计汇总失败: %w", rollupErr)
+	}
 	db.promptFilterAudit = newPromptFilterAuditQueue(db)
 	db.promptFilterAudit.start()
 	db.RunBackgroundTask(func(taskCtx context.Context) {
@@ -514,6 +522,197 @@ func (db *DB) ensureUsageStatsBaselineBillingColumns(ctx context.Context) error 
 		ALTER TABLE usage_stats_baseline ADD COLUMN IF NOT EXISTS first_token_ms_sum DOUBLE PRECISION NOT NULL DEFAULT 0;
 		ALTER TABLE usage_stats_baseline ADD COLUMN IF NOT EXISTS first_token_samples BIGINT NOT NULL DEFAULT 0;
 	`)
+	return err
+}
+
+type usageStatsRollup struct {
+	TotalRequests      int64
+	TotalTokens        int64
+	PromptTokens       int64
+	CompletionTokens   int64
+	CachedTokens       int64
+	CacheHitRequests   int64
+	FirstTokenMsSum    float64
+	FirstTokenSamples  int64
+	TotalAccountBilled float64
+	TotalUserBilled    float64
+}
+
+// usageStatsRollupStartupContext preserves startup values but deliberately
+// detaches the one-time full-history rollup from the shared ten-second schema
+// initialization deadline. Large existing installations can contain millions
+// of usage rows; the bounded five-minute deadline keeps the migration finite
+// without weakening normal request or database-operation timeouts.
+func usageStatsRollupStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), usageStatsRollupInitTimeout)
+}
+
+func (db *DB) ensureUsageStatsRollup(ctx context.Context) error {
+	if _, err := db.conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS usage_stats_rollup (
+		channel VARCHAR(32) PRIMARY KEY,
+		total_requests BIGINT NOT NULL DEFAULT 0,
+		total_tokens BIGINT NOT NULL DEFAULT 0,
+		prompt_tokens BIGINT NOT NULL DEFAULT 0,
+		completion_tokens BIGINT NOT NULL DEFAULT 0,
+		cached_tokens BIGINT NOT NULL DEFAULT 0,
+		cache_hit_requests BIGINT NOT NULL DEFAULT 0,
+		first_token_ms_sum DOUBLE PRECISION NOT NULL DEFAULT 0,
+		first_token_samples BIGINT NOT NULL DEFAULT 0,
+		account_billed DOUBLE PRECISION NOT NULL DEFAULT 0,
+		user_billed DOUBLE PRECISION NOT NULL DEFAULT 0
+	);
+	CREATE TABLE IF NOT EXISTS usage_stats_rollup_state (
+		id INTEGER PRIMARY KEY,
+		initialized INTEGER NOT NULL DEFAULT 0,
+		last_log_id BIGINT NOT NULL DEFAULT 0,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		return err
+	}
+	var initialized int
+	err := db.conn.QueryRowContext(ctx, `SELECT initialized FROM usage_stats_rollup_state WHERE id=1`).Scan(&initialized)
+	if err == nil && initialized == 1 {
+		return nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	return db.rebuildUsageStatsRollup(ctx)
+}
+
+func (db *DB) rebuildUsageStatsRollup(ctx context.Context) error {
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM usage_stats_rollup`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO usage_stats_rollup (
+		channel, total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens,
+		cache_hit_requests, first_token_ms_sum, first_token_samples, account_billed, user_billed
+	) SELECT '', b.total_requests + COUNT(u.id), b.total_tokens + COALESCE(SUM(u.total_tokens), 0),
+		b.prompt_tokens + COALESCE(SUM(u.prompt_tokens), 0), b.completion_tokens + COALESCE(SUM(u.completion_tokens), 0),
+		b.cached_tokens + COALESCE(SUM(u.cached_tokens), 0),
+		b.cache_hit_requests + COALESCE(SUM(CASE WHEN u.cached_tokens > 0 THEN 1 ELSE 0 END), 0),
+		b.first_token_ms_sum + COALESCE(SUM(CASE WHEN u.first_token_ms > 0 THEN u.first_token_ms ELSE 0 END), 0),
+		b.first_token_samples + COALESCE(SUM(CASE WHEN u.first_token_ms > 0 THEN 1 ELSE 0 END), 0),
+		b.account_billed + COALESCE(SUM(u.account_billed), 0), b.user_billed + COALESCE(SUM(u.user_billed), 0)
+	FROM usage_stats_baseline b LEFT JOIN usage_logs u ON u.status_code <> 499 WHERE b.id=1
+	GROUP BY b.total_requests, b.total_tokens, b.prompt_tokens, b.completion_tokens, b.cached_tokens,
+		b.cache_hit_requests, b.first_token_ms_sum, b.first_token_samples, b.account_billed, b.user_billed`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO usage_stats_rollup (
+		channel, total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens,
+		cache_hit_requests, first_token_ms_sum, first_token_samples, account_billed, user_billed
+	) SELECT TRIM(COALESCE(channel, '')), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(prompt_tokens), 0),
+		COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(cached_tokens), 0),
+		COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(account_billed), 0), COALESCE(SUM(user_billed), 0)
+	FROM usage_logs WHERE status_code <> 499 AND TRIM(COALESCE(channel, '')) <> '' GROUP BY TRIM(COALESCE(channel, ''))`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO usage_stats_rollup_state (id, initialized, last_log_id, updated_at)
+		VALUES (1, 1, COALESCE((SELECT MAX(id) FROM usage_logs), 0), CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET initialized=1, last_log_id=excluded.last_log_id, updated_at=CURRENT_TIMESTAMP`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (db *DB) loadUsageStatsRollup(ctx context.Context, channel string) (usageStatsRollup, error) {
+	var result usageStatsRollup
+	var lastLogID, currentMaxID int64
+	if err := db.conn.QueryRowContext(ctx, `SELECT last_log_id FROM usage_stats_rollup_state WHERE id=1 AND initialized=1`).Scan(&lastLogID); err != nil {
+		if rebuildErr := db.rebuildUsageStatsRollup(ctx); rebuildErr != nil {
+			return result, rebuildErr
+		}
+		if err := db.conn.QueryRowContext(ctx, `SELECT last_log_id FROM usage_stats_rollup_state WHERE id=1`).Scan(&lastLogID); err != nil {
+			return result, err
+		}
+	}
+	if err := db.conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM usage_logs`).Scan(&currentMaxID); err != nil {
+		return result, err
+	}
+	if currentMaxID != lastLogID {
+		if err := db.rebuildUsageStatsRollup(ctx); err != nil {
+			return result, err
+		}
+	}
+	err := db.conn.QueryRowContext(ctx, `SELECT total_requests, total_tokens, prompt_tokens, completion_tokens,
+		cached_tokens, cache_hit_requests, first_token_ms_sum, first_token_samples, account_billed, user_billed
+		FROM usage_stats_rollup WHERE channel=$1`, strings.TrimSpace(channel)).Scan(
+		&result.TotalRequests, &result.TotalTokens, &result.PromptTokens, &result.CompletionTokens,
+		&result.CachedTokens, &result.CacheHitRequests, &result.FirstTokenMsSum, &result.FirstTokenSamples,
+		&result.TotalAccountBilled, &result.TotalUserBilled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return usageStatsRollup{}, nil
+	}
+	return result, err
+}
+
+func applyUsageStatsRollupWithExec(ctx context.Context, execer sqlExecer, batch []usageLogEntry) error {
+	if execer == nil || len(batch) == 0 {
+		return nil
+	}
+	rollups := make(map[string]*usageStatsRollup)
+	add := func(channel string, entry usageLogEntry) {
+		item := rollups[channel]
+		if item == nil {
+			item = &usageStatsRollup{}
+			rollups[channel] = item
+		}
+		item.TotalRequests++
+		item.TotalTokens += int64(entry.TotalTokens)
+		item.PromptTokens += int64(entry.PromptTokens)
+		item.CompletionTokens += int64(entry.CompletionTokens)
+		item.CachedTokens += int64(entry.CachedTokens)
+		if entry.CachedTokens > 0 {
+			item.CacheHitRequests++
+		}
+		if entry.FirstTokenMs > 0 {
+			item.FirstTokenMsSum += float64(entry.FirstTokenMs)
+			item.FirstTokenSamples++
+		}
+		item.TotalAccountBilled += entry.AccountBilled
+		item.TotalUserBilled += entry.UserBilled
+	}
+	for _, entry := range batch {
+		if !entry.StoreUsageLog || entry.StatusCode == 499 {
+			continue
+		}
+		add("", entry)
+		if channel := strings.TrimSpace(entry.Channel); channel != "" {
+			add(channel, entry)
+		}
+	}
+	for channel, item := range rollups {
+		if _, err := execer.ExecContext(ctx, `INSERT INTO usage_stats_rollup (
+			channel, total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens,
+			cache_hit_requests, first_token_ms_sum, first_token_samples, account_billed, user_billed
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		ON CONFLICT(channel) DO UPDATE SET
+			total_requests=usage_stats_rollup.total_requests+excluded.total_requests,
+			total_tokens=usage_stats_rollup.total_tokens+excluded.total_tokens,
+			prompt_tokens=usage_stats_rollup.prompt_tokens+excluded.prompt_tokens,
+			completion_tokens=usage_stats_rollup.completion_tokens+excluded.completion_tokens,
+			cached_tokens=usage_stats_rollup.cached_tokens+excluded.cached_tokens,
+			cache_hit_requests=usage_stats_rollup.cache_hit_requests+excluded.cache_hit_requests,
+			first_token_ms_sum=usage_stats_rollup.first_token_ms_sum+excluded.first_token_ms_sum,
+			first_token_samples=usage_stats_rollup.first_token_samples+excluded.first_token_samples,
+			account_billed=usage_stats_rollup.account_billed+excluded.account_billed,
+			user_billed=usage_stats_rollup.user_billed+excluded.user_billed`, channel, item.TotalRequests,
+			item.TotalTokens, item.PromptTokens, item.CompletionTokens, item.CachedTokens, item.CacheHitRequests,
+			item.FirstTokenMsSum, item.FirstTokenSamples, item.TotalAccountBilled, item.TotalUserBilled); err != nil {
+			return err
+		}
+	}
+	_, err := execer.ExecContext(ctx, `UPDATE usage_stats_rollup_state SET initialized=1,
+		last_log_id=COALESCE((SELECT MAX(id) FROM usage_logs), 0), updated_at=CURRENT_TIMESTAMP WHERE id=1`)
 	return err
 }
 
@@ -3613,6 +3812,9 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 	if err := db.applyAPIKeyQuotaUsageWithExec(ctx, tx, batch); err != nil {
 		return fmt.Errorf("更新 API Key 额度用量: %w", err)
 	}
+	if err := applyUsageStatsRollupWithExec(ctx, tx, logsToStore); err != nil {
+		return fmt.Errorf("更新用量累计汇总: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交事务: %w", err)
 	}
@@ -3656,6 +3858,9 @@ func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error 
 	}
 	if err := db.applyAPIKeyQuotaUsageWithExec(ctx, tx, batch); err != nil {
 		return err
+	}
+	if err := applyUsageStatsRollupWithExec(ctx, tx, logsToStore); err != nil {
+		return fmt.Errorf("更新用量累计汇总: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交事务: %w", err)
@@ -3889,61 +4094,26 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time,
 		return nil, err
 	}
 
-	// 统计当前可见请求总数和计费总额（排除 499，保证与使用统计列表口径一致）
-	var visibleTotal int64
-	var visibleCacheHitRequests int64
-	var visibleFirstTokenSamples int64
-	var currentTokens, currentPrompt, currentCompletion, currentCached int64
-	var currentFirstTokenMsSum float64
-	var currentAccountBilled, currentUserBilled float64
-	totalWhere := "status_code <> 499"
-	totalArgs := []interface{}{}
-	if channel != "" {
-		totalWhere += " AND channel = $1"
-		totalArgs = append(totalArgs, channel)
+	rollup, err := db.loadUsageStatsRollup(ctx, channel)
+	if err != nil {
+		return nil, fmt.Errorf("读取用量累计汇总: %w", err)
 	}
-	_ = db.conn.QueryRowContext(ctx, `
-			SELECT
-				COUNT(*),
-				COALESCE(SUM(total_tokens), 0),
-				COALESCE(SUM(prompt_tokens), 0),
-				COALESCE(SUM(completion_tokens), 0),
-				COALESCE(SUM(cached_tokens), 0),
-				COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(account_billed), 0),
-				COALESCE(SUM(user_billed), 0)
-			FROM usage_logs
-			WHERE `+totalWhere, totalArgs...).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheHitRequests, &currentFirstTokenMsSum, &visibleFirstTokenSamples, &currentAccountBilled, &currentUserBilled)
-
-	// 加上基线值（清空日志前保存的累计值）；渠道过滤时 baseline 无渠道维度，跳过。
-	var bReq, bTok, bPrompt, bComp, bCached, bCacheHitRequests, bFirstTokenSamples int64
-	var bFirstTokenMsSum float64
-	var bAccountBilled, bUserBilled float64
-	if channel == "" {
-		_ = db.conn.QueryRowContext(ctx, `
-			SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, cache_hit_requests, first_token_ms_sum, first_token_samples, account_billed, user_billed
-			FROM usage_stats_baseline WHERE id = 1
-		`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bCacheHitRequests, &bFirstTokenMsSum, &bFirstTokenSamples, &bAccountBilled, &bUserBilled)
-	}
-
-	stats.TotalRequests = visibleTotal + bReq
-	stats.TotalTokens = currentTokens + bTok
-	stats.TotalPrompt = currentPrompt + bPrompt
-	stats.TotalCompletion = currentCompletion + bComp
-	stats.TotalCachedTokens = currentCached + bCached
+	stats.TotalRequests = rollup.TotalRequests
+	stats.TotalTokens = rollup.TotalTokens
+	stats.TotalPrompt = rollup.PromptTokens
+	stats.TotalCompletion = rollup.CompletionTokens
+	stats.TotalCachedTokens = rollup.CachedTokens
 	stats.TodayCachedTokens = todayCached
-	stats.TotalAccountBilled = currentAccountBilled + bAccountBilled
-	stats.TotalUserBilled = currentUserBilled + bUserBilled
+	stats.TotalAccountBilled = rollup.TotalAccountBilled
+	stats.TotalUserBilled = rollup.TotalUserBilled
 	if stats.TodayRequests > 0 {
 		stats.TodayCacheRate = float64(todayCacheHitRequests) / float64(stats.TodayRequests) * 100
 	}
 	if stats.TotalRequests > 0 {
-		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(stats.TotalRequests) * 100
+		stats.TotalCacheRate = float64(rollup.CacheHitRequests) / float64(stats.TotalRequests) * 100
 	}
-	if totalFirstTokenSamples := visibleFirstTokenSamples + bFirstTokenSamples; totalFirstTokenSamples > 0 {
-		stats.AvgFirstTokenMs = (currentFirstTokenMsSum + bFirstTokenMsSum) / float64(totalFirstTokenSamples)
+	if rollup.FirstTokenSamples > 0 {
+		stats.AvgFirstTokenMs = rollup.FirstTokenMsSum / float64(rollup.FirstTokenSamples)
 	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)
@@ -4511,13 +4681,9 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 			Date:  todayStart.Format("2006-01-02"),
 			Label: todayStart.Format("01/02"),
 		},
-		History: []AccountUsageDayStat{},
-	}
-
-	// 汇总统计
-	dayExpr := "DATE(created_at)"
-	if db.isSQLite() {
-		dayExpr = "date(created_at)"
+		History:  []AccountUsageDayStat{},
+		Models:   []AccountModelStat{},
+		ByAPIKey: []AccountKeyStat{},
 	}
 	timeWhere := "created_at >= $2 AND created_at < $3"
 	queryArgs := []interface{}{accountID, db.timeArg(periodStart), db.timeArg(periodEnd)}
@@ -4525,58 +4691,182 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 		timeWhere = "created_at < $2"
 		queryArgs = []interface{}{accountID, db.timeArg(periodEnd)}
 	}
-
-	summaryQuery := `
-	SELECT
-		COUNT(*),
-		COALESCE(SUM(total_tokens), 0),
-		COALESCE(SUM(input_tokens), 0),
-		COALESCE(SUM(output_tokens), 0),
-		COALESCE(SUM(reasoning_tokens), 0),
-		COALESCE(SUM(cached_tokens), 0),
-		COALESCE(SUM(account_billed), 0),
-		COALESCE(SUM(user_billed), 0),
-		COALESCE(AVG(NULLIF(duration_ms, 0)), 0),
-		COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN is_retry_attempt OR attempt_index > 0 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN stream THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN compact THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN duration_ms > 0 THEN 1 ELSE 0 END), 0),
-		COUNT(DISTINCT ` + dayExpr + `)
+	rows, err := db.conn.QueryContext(ctx, `SELECT created_at,
+		COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown'),
+		COALESCE(api_key_id, 0), COALESCE(NULLIF(api_key_name, ''), ''), COALESCE(api_key_masked, ''),
+		COALESCE(total_tokens, 0), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
+		COALESCE(reasoning_tokens, 0), COALESCE(cached_tokens, 0),
+		COALESCE(account_billed, 0), COALESCE(user_billed, 0), COALESCE(duration_ms, 0),
+		COALESCE(first_token_ms, 0), status_code, COALESCE(is_retry_attempt, false),
+		COALESCE(attempt_index, 0), COALESCE(stream, false), COALESCE(compact, false)
 	FROM usage_logs
-	WHERE account_id = $1
-	  AND ` + timeWhere + `
-	  AND status_code <> 499`
-
-	var cacheHitRequests int64
-	var firstTokenMsSum float64
-	var durationSamples int64
-	if err := db.conn.QueryRowContext(ctx, summaryQuery, queryArgs...).Scan(
-		&result.TotalRequests, &result.TotalTokens,
-		&result.InputTokens, &result.OutputTokens,
-		&result.ReasoningTokens, &result.CachedTokens,
-		&result.TotalAccountBilled, &result.TotalUserBilled,
-		&result.AvgDurationMs,
-		&cacheHitRequests,
-		&result.ErrorRequests,
-		&result.RetryRequests,
-		&firstTokenMsSum,
-		&result.FirstTokenSamples,
-		&result.StreamRequests,
-		&result.CompactRequests,
-		&durationSamples,
-		&result.ActiveDays,
-	); err != nil {
+	WHERE account_id = $1 AND `+timeWhere+` AND status_code <> 499`, queryArgs...)
+	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
+
+	type accountUsageKey struct {
+		ID     int64
+		Name   string
+		Masked string
+	}
+	dayStats := make(map[string]*AccountUsageDayStat)
+	modelStats := make(map[string]*AccountModelStat)
+	keyStats := make(map[accountUsageKey]*AccountKeyStat)
+	durations := make([]int64, 0, 1024)
+	var cacheHitRequests, durationSamples int64
+	var durationMsSum, firstTokenMsSum float64
+	for rows.Next() {
+		var createdAtRaw any
+		var model, apiKeyName, apiKeyMasked string
+		var apiKeyID int64
+		var totalTokens, inputTokens, outputTokens, reasoningTokens, cachedTokens int64
+		var accountBilled, userBilled float64
+		var durationMs, firstTokenMs int64
+		var statusCode, attemptIndex int
+		var retryAttempt, stream, compact bool
+		if err := rows.Scan(&createdAtRaw, &model, &apiKeyID, &apiKeyName, &apiKeyMasked,
+			&totalTokens, &inputTokens, &outputTokens, &reasoningTokens, &cachedTokens,
+			&accountBilled, &userBilled, &durationMs, &firstTokenMs, &statusCode,
+			&retryAttempt, &attemptIndex, &stream, &compact); err != nil {
+			return nil, err
+		}
+		createdAt, parseErr := parseDBTimeValue(createdAtRaw)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		localCreatedAt := createdAt.In(now.Location())
+		dayKey := localCreatedAt.Format("2006-01-02")
+		day := dayStats[dayKey]
+		if day == nil {
+			day = &AccountUsageDayStat{Date: dayKey, Label: localCreatedAt.Format("01/02")}
+			dayStats[dayKey] = day
+		}
+		day.Requests++
+		day.Tokens += totalTokens
+		day.AccountBilled += accountBilled
+		day.UserBilled += userBilled
+
+		result.TotalRequests++
+		result.TotalTokens += totalTokens
+		result.InputTokens += inputTokens
+		result.OutputTokens += outputTokens
+		result.ReasoningTokens += reasoningTokens
+		result.CachedTokens += cachedTokens
+		result.TotalAccountBilled += accountBilled
+		result.TotalUserBilled += userBilled
+		if cachedTokens > 0 {
+			cacheHitRequests++
+		}
+		if statusCode >= 400 {
+			result.ErrorRequests++
+		}
+		if retryAttempt || attemptIndex > 0 {
+			result.RetryRequests++
+		}
+		if durationMs > 0 {
+			durationSamples++
+			durationMsSum += float64(durationMs)
+			durations = append(durations, durationMs)
+		}
+		if firstTokenMs > 0 {
+			result.FirstTokenSamples++
+			firstTokenMsSum += float64(firstTokenMs)
+		}
+		if stream {
+			result.StreamRequests++
+		}
+		if compact {
+			result.CompactRequests++
+		}
+		if !createdAt.Before(todayStart) && createdAt.Before(periodEnd) {
+			result.Today.Requests++
+			result.Today.Tokens += totalTokens
+			result.Today.AccountBilled += accountBilled
+			result.Today.UserBilled += userBilled
+		}
+
+		modelStat := modelStats[model]
+		if modelStat == nil {
+			modelStat = &AccountModelStat{Model: model}
+			modelStats[model] = modelStat
+		}
+		modelStat.Requests++
+		modelStat.Tokens += totalTokens
+		modelStat.InputTokens += inputTokens
+		modelStat.OutputTokens += outputTokens
+		modelStat.ReasoningTokens += reasoningTokens
+		modelStat.CachedTokens += cachedTokens
+		modelStat.AccountBilled += accountBilled
+		modelStat.UserBilled += userBilled
+
+		key := accountUsageKey{ID: apiKeyID, Name: apiKeyName, Masked: apiKeyMasked}
+		keyStat := keyStats[key]
+		if keyStat == nil {
+			keyStat = &AccountKeyStat{APIKeyID: apiKeyID, APIKeyName: apiKeyName, APIKeyMasked: apiKeyMasked}
+			keyStats[key] = keyStat
+		}
+		keyStat.Requests++
+		keyStat.Tokens += totalTokens
+		keyStat.AccountBilled += accountBilled
+		keyStat.UserBilled += userBilled
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	result.ActiveDays = len(dayStats)
+	for _, day := range dayStats {
+		result.History = append(result.History, *day)
+		if result.HighestCostDay == nil || day.AccountBilled > result.HighestCostDay.AccountBilled ||
+			(day.AccountBilled == result.HighestCostDay.AccountBilled && day.Requests > result.HighestCostDay.Requests) {
+			copyDay := *day
+			result.HighestCostDay = &copyDay
+		}
+		if result.HighestRequestDay == nil || day.Requests > result.HighestRequestDay.Requests ||
+			(day.Requests == result.HighestRequestDay.Requests && day.AccountBilled > result.HighestRequestDay.AccountBilled) {
+			copyDay := *day
+			result.HighestRequestDay = &copyDay
+		}
+	}
+	sort.Slice(result.History, func(i, j int) bool { return result.History[i].Date < result.History[j].Date })
+	for _, item := range modelStats {
+		result.Models = append(result.Models, *item)
+	}
+	sort.Slice(result.Models, func(i, j int) bool {
+		if result.Models[i].Requests == result.Models[j].Requests {
+			return result.Models[i].Model < result.Models[j].Model
+		}
+		return result.Models[i].Requests > result.Models[j].Requests
+	})
+	for _, item := range keyStats {
+		result.ByAPIKey = append(result.ByAPIKey, *item)
+	}
+	sort.Slice(result.ByAPIKey, func(i, j int) bool {
+		if result.ByAPIKey[i].Requests == result.ByAPIKey[j].Requests {
+			if result.ByAPIKey[i].APIKeyID == result.ByAPIKey[j].APIKeyID {
+				return result.ByAPIKey[i].APIKeyName < result.ByAPIKey[j].APIKeyName
+			}
+			return result.ByAPIKey[i].APIKeyID < result.ByAPIKey[j].APIKeyID
+		}
+		return result.ByAPIKey[i].Requests > result.ByAPIKey[j].Requests
+	})
+
 	if result.TotalRequests > 0 {
 		result.CacheHitRate = float64(cacheHitRequests) / float64(result.TotalRequests) * 100
 		result.ErrorRate = float64(result.ErrorRequests) / float64(result.TotalRequests) * 100
 		result.StreamRate = float64(result.StreamRequests) / float64(result.TotalRequests) * 100
 		result.CompactRate = float64(result.CompactRequests) / float64(result.TotalRequests) * 100
+	}
+	if durationSamples > 0 {
+		result.AvgDurationMs = durationMsSum / float64(durationSamples)
+		sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+		index := int(math.Ceil(float64(len(durations))*0.95)) - 1
+		if index < 0 {
+			index = 0
+		}
+		result.P95DurationMs = float64(durations[index])
 	}
 	if result.FirstTokenSamples > 0 {
 		result.AvgFirstTokenMs = firstTokenMsSum / float64(result.FirstTokenSamples)
@@ -4588,187 +4878,8 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 		result.AvgDailyRequests = float64(result.TotalRequests) / activeDays
 		result.AvgDailyTokens = float64(result.TotalTokens) / activeDays
 	}
-	if durationSamples > 0 {
-		offset := int64(math.Ceil(float64(durationSamples)*0.95)) - 1
-		if offset < 0 {
-			offset = 0
-		}
-		paramIdx := len(queryArgs) + 1
-		p95Query := fmt.Sprintf(`
-	SELECT duration_ms
-	FROM usage_logs
-	WHERE account_id = $1
-	  AND %s
-	  AND status_code <> 499
-	  AND duration_ms > 0
-	ORDER BY duration_ms ASC
-	LIMIT $%d OFFSET $%d`, timeWhere, paramIdx, paramIdx+1)
-		p95Args := append(append([]interface{}{}, queryArgs...), 1, offset)
-		var p95Duration int64
-		if err := db.conn.QueryRowContext(ctx, p95Query, p95Args...).Scan(&p95Duration); err != nil {
-			return nil, err
-		}
-		result.P95DurationMs = float64(p95Duration)
-	}
 
-	todayQuery := `
-	SELECT
-		COUNT(*),
-		COALESCE(SUM(total_tokens), 0),
-		COALESCE(SUM(account_billed), 0),
-		COALESCE(SUM(user_billed), 0)
-	FROM usage_logs
-	WHERE account_id = $1
-	  AND created_at >= $2 AND created_at < $3
-	  AND status_code <> 499`
-	if err := db.conn.QueryRowContext(ctx, todayQuery, accountID, db.timeArg(todayStart), db.timeArg(periodEnd)).Scan(
-		&result.Today.Requests,
-		&result.Today.Tokens,
-		&result.Today.AccountBilled,
-		&result.Today.UserBilled,
-	); err != nil {
-		return nil, err
-	}
-
-	dateExpr := "TO_CHAR(created_at, 'YYYY-MM-DD')"
-	labelExpr := "TO_CHAR(created_at, 'MM/DD')"
-	if db.isSQLite() {
-		dateExpr = "strftime('%Y-%m-%d', created_at)"
-		labelExpr = "strftime('%m/%d', created_at)"
-	}
-	dayStatsQuery := `
-	SELECT
-		` + dateExpr + ` AS day_date,
-		` + labelExpr + ` AS day_label,
-		COUNT(*) AS requests,
-		COALESCE(SUM(total_tokens), 0) AS tokens,
-		COALESCE(SUM(account_billed), 0) AS account_billed,
-		COALESCE(SUM(user_billed), 0) AS user_billed
-	FROM usage_logs
-	WHERE account_id = $1
-	  AND ` + timeWhere + `
-	  AND status_code <> 499
-	GROUP BY 1, 2
-	ORDER BY 1`
-	dayRows, err := db.conn.QueryContext(ctx, dayStatsQuery, queryArgs...)
-	if err != nil {
-		return nil, err
-	}
-	defer dayRows.Close()
-	for dayRows.Next() {
-		var day AccountUsageDayStat
-		if err := dayRows.Scan(&day.Date, &day.Label, &day.Requests, &day.Tokens, &day.AccountBilled, &day.UserBilled); err != nil {
-			return nil, err
-		}
-		result.History = append(result.History, day)
-		if result.HighestCostDay == nil ||
-			day.AccountBilled > result.HighestCostDay.AccountBilled ||
-			(day.AccountBilled == result.HighestCostDay.AccountBilled && day.Requests > result.HighestCostDay.Requests) {
-			copyDay := day
-			result.HighestCostDay = &copyDay
-		}
-		if result.HighestRequestDay == nil ||
-			day.Requests > result.HighestRequestDay.Requests ||
-			(day.Requests == result.HighestRequestDay.Requests && day.AccountBilled > result.HighestRequestDay.AccountBilled) {
-			copyDay := day
-			result.HighestRequestDay = &copyDay
-		}
-	}
-	if err := dayRows.Err(); err != nil {
-		return nil, err
-	}
-
-	// 模型分布
-	modelQuery := `
-	SELECT
-		COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown'),
-		COUNT(*) AS requests,
-		COALESCE(SUM(total_tokens), 0) AS tokens,
-		COALESCE(SUM(input_tokens), 0) AS input_tokens,
-		COALESCE(SUM(output_tokens), 0) AS output_tokens,
-		COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
-		COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
-		COALESCE(SUM(account_billed), 0) AS account_billed,
-		COALESCE(SUM(user_billed), 0) AS user_billed
-	FROM usage_logs
-	WHERE account_id = $1
-	  AND ` + timeWhere + `
-	  AND status_code <> 499
-	GROUP BY 1
-	ORDER BY 2 DESC`
-
-	rows, err := db.conn.QueryContext(ctx, modelQuery, queryArgs...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var m AccountModelStat
-		if err := rows.Scan(
-			&m.Model,
-			&m.Requests,
-			&m.Tokens,
-			&m.InputTokens,
-			&m.OutputTokens,
-			&m.ReasoningTokens,
-			&m.CachedTokens,
-			&m.AccountBilled,
-			&m.UserBilled,
-		); err != nil {
-			return nil, err
-		}
-		result.Models = append(result.Models, m)
-	}
-	if result.Models == nil {
-		result.Models = []AccountModelStat{}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	// 按下游 Key 拆分：这个账号被哪些 Key 各调用了多少（成本核算用）。
-	keyQuery := `
-	SELECT
-		COALESCE(api_key_id, 0),
-		COALESCE(NULLIF(api_key_name, ''), ''),
-		COALESCE(api_key_masked, ''),
-		COUNT(*) AS requests,
-		COALESCE(SUM(total_tokens), 0) AS tokens,
-		COALESCE(SUM(account_billed), 0) AS account_billed,
-		COALESCE(SUM(user_billed), 0) AS user_billed
-	FROM usage_logs
-	WHERE account_id = $1
-	  AND ` + timeWhere + `
-	  AND status_code <> 499
-	GROUP BY 1, 2, 3
-	ORDER BY 4 DESC`
-
-	keyRows, err := db.conn.QueryContext(ctx, keyQuery, queryArgs...)
-	if err != nil {
-		return nil, err
-	}
-	defer keyRows.Close()
-	for keyRows.Next() {
-		var k AccountKeyStat
-		if err := keyRows.Scan(
-			&k.APIKeyID,
-			&k.APIKeyName,
-			&k.APIKeyMasked,
-			&k.Requests,
-			&k.Tokens,
-			&k.AccountBilled,
-			&k.UserBilled,
-		); err != nil {
-			return nil, err
-		}
-		result.ByAPIKey = append(result.ByAPIKey, k)
-	}
-	if result.ByAPIKey == nil {
-		result.ByAPIKey = []AccountKeyStat{}
-	}
-
-	return result, keyRows.Err()
+	return result, nil
 }
 
 // ListUsageLogsByTimeRange 按时间范围查询请求日志
@@ -5123,35 +5234,54 @@ func (db *DB) ListUsageLogsByFilter(ctx context.Context, f UsageLogFilter) ([]*U
 
 // ClearUsageLogs 清空所有使用日志（先快照累计值到基线表）
 func (db *DB) ClearUsageLogs(ctx context.Context) error {
-	// 先将当前日志的累计值叠加到基线表
-	_, err := db.conn.ExecContext(ctx, `
-		UPDATE usage_stats_baseline SET
-			total_requests  = total_requests  + COALESCE((SELECT COUNT(*) FROM usage_logs WHERE status_code <> 499), 0),
-			total_tokens    = total_tokens    + COALESCE((SELECT SUM(total_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-			prompt_tokens   = prompt_tokens   + COALESCE((SELECT SUM(prompt_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-			completion_tokens = completion_tokens + COALESCE((SELECT SUM(completion_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-			cached_tokens   = cached_tokens   + COALESCE((SELECT SUM(cached_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-			cache_hit_requests = cache_hit_requests + COALESCE((SELECT SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END) FROM usage_logs WHERE status_code <> 499), 0),
-			first_token_ms_sum = first_token_ms_sum + COALESCE((SELECT SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END) FROM usage_logs WHERE status_code <> 499), 0),
-			first_token_samples = first_token_samples + COALESCE((SELECT SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) FROM usage_logs WHERE status_code <> 499), 0),
-			account_billed  = account_billed  + COALESCE((SELECT SUM(account_billed) FROM usage_logs WHERE status_code <> 499), 0),
-			user_billed     = user_billed     + COALESCE((SELECT SUM(user_billed) FROM usage_logs WHERE status_code <> 499), 0)
-			WHERE id = 1
-		`)
-	if err != nil {
-		return fmt.Errorf("快照统计基线失败: %w", err)
+	// 先校验增量汇总是否与明细日志同步。这也兼容测试、手工 SQL 等绕过正常写入队列的场景。
+	if _, err := db.loadUsageStatsRollup(ctx, ""); err != nil {
+		return fmt.Errorf("读取清理前完整累计失败: %w", err)
 	}
-
-	// 再清空日志
-	if db.isSQLite() {
-		if _, err = db.conn.ExecContext(ctx, `DELETE FROM usage_logs`); err != nil {
-			return err
-		}
-		_, err = db.conn.ExecContext(ctx, `DELETE FROM sqlite_sequence WHERE name = 'usage_logs'`)
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	_, err = db.conn.ExecContext(ctx, `TRUNCATE TABLE usage_logs RESTART IDENTITY`)
-	return err
+	defer tx.Rollback()
+	if !db.isSQLite() {
+		// 先锁明细表，等待正在写入的批次完整提交；之后的新写入在清理事务结束前不会插入。
+		if _, err := tx.ExecContext(ctx, `LOCK TABLE usage_logs IN ACCESS EXCLUSIVE MODE`); err != nil {
+			return err
+		}
+	}
+	var rollup usageStatsRollup
+	if err := tx.QueryRowContext(ctx, `SELECT total_requests, total_tokens, prompt_tokens, completion_tokens,
+		cached_tokens, cache_hit_requests, first_token_ms_sum, first_token_samples, account_billed, user_billed
+		FROM usage_stats_rollup WHERE channel=''`).Scan(&rollup.TotalRequests, &rollup.TotalTokens,
+		&rollup.PromptTokens, &rollup.CompletionTokens, &rollup.CachedTokens, &rollup.CacheHitRequests,
+		&rollup.FirstTokenMsSum, &rollup.FirstTokenSamples, &rollup.TotalAccountBilled, &rollup.TotalUserBilled); err != nil {
+		return fmt.Errorf("锁定后读取完整累计失败: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE usage_stats_baseline SET
+		total_requests=$1, total_tokens=$2, prompt_tokens=$3, completion_tokens=$4,
+		cached_tokens=$5, cache_hit_requests=$6, first_token_ms_sum=$7, first_token_samples=$8,
+		account_billed=$9, user_billed=$10 WHERE id=1`, rollup.TotalRequests, rollup.TotalTokens,
+		rollup.PromptTokens, rollup.CompletionTokens, rollup.CachedTokens, rollup.CacheHitRequests,
+		rollup.FirstTokenMsSum, rollup.FirstTokenSamples, rollup.TotalAccountBilled, rollup.TotalUserBilled); err != nil {
+		return fmt.Errorf("快照统计基线失败: %w", err)
+	}
+	if db.isSQLite() {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM usage_logs`); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `DELETE FROM sqlite_sequence WHERE name = 'usage_logs'`); err != nil {
+			return err
+		}
+	} else if _, err = tx.ExecContext(ctx, `TRUNCATE TABLE usage_logs RESTART IDENTITY`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM usage_stats_rollup WHERE channel <> ''`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE usage_stats_rollup_state SET initialized=1, last_log_id=0, updated_at=CURRENT_TIMESTAMP WHERE id=1`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Ping 检查 PostgreSQL 连通性
@@ -5245,6 +5375,44 @@ func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (ma
 		result[usage.AccountID] = usage
 	}
 	return result, rows.Err()
+}
+
+// GetAccountUsageWindows 在一次 7 天索引扫描内同时计算短窗口和长窗口，
+// 避免账号列表刷新时对 usage_logs 连续做两次大范围 GROUP BY。
+func (db *DB) GetAccountUsageWindows(ctx context.Context, shortSince, longSince time.Time) (map[int64]*AccountTimeRangeUsage, map[int64]*AccountTimeRangeUsage, error) {
+	if shortSince.Before(longSince) {
+		shortSince, longSince = longSince, shortSince
+	}
+	rows, err := db.conn.QueryContext(ctx, `SELECT account_id,
+		COALESCE(SUM(CASE WHEN created_at >= $1 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN created_at >= $1 THEN total_tokens ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN created_at >= $1 THEN account_billed ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN created_at >= $1 THEN user_billed ELSE 0 END), 0),
+		COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(account_billed), 0), COALESCE(SUM(user_billed), 0)
+	FROM usage_logs
+	WHERE created_at >= $2 AND status_code <> 499
+	GROUP BY account_id`, db.timeArg(shortSince), db.timeArg(longSince))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	shortWindow := make(map[int64]*AccountTimeRangeUsage)
+	longWindow := make(map[int64]*AccountTimeRangeUsage)
+	for rows.Next() {
+		shortUsage := &AccountTimeRangeUsage{}
+		longUsage := &AccountTimeRangeUsage{}
+		if err := rows.Scan(&shortUsage.AccountID, &shortUsage.Requests, &shortUsage.Tokens, &shortUsage.AccountBilled, &shortUsage.UserBilled,
+			&longUsage.Requests, &longUsage.Tokens, &longUsage.AccountBilled, &longUsage.UserBilled); err != nil {
+			return nil, nil, err
+		}
+		longUsage.AccountID = shortUsage.AccountID
+		shortWindow[shortUsage.AccountID] = shortUsage
+		longWindow[longUsage.AccountID] = longUsage
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return shortWindow, longWindow, nil
 }
 
 // GetAccountBilledSince 返回指定时间戳以来 account_billed 的总和

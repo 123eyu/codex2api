@@ -869,8 +869,12 @@ export const api = {
     }
     return request<PromptFilterLogsResponse>(`/prompt-filter/logs?${search.toString()}`)
   },
-  clearPromptFilterLogs: () =>
-    request<MessageResponse>('/prompt-filter/logs', { method: 'DELETE' }),
+  clearPromptFilterLogs: (params: { reviewed?: boolean } = {}) => {
+    const search = new URLSearchParams()
+    if (typeof params.reviewed === 'boolean') search.set('reviewed', String(params.reviewed))
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<MessageResponse>(`/prompt-filter/logs${suffix}`, { method: 'DELETE' })
+  },
   matchPromptFilterLog: (params: { at: string; endpoint?: string; apiKeyId?: number; source?: string }) => {
     const search = new URLSearchParams()
     search.set('at', params.at)
@@ -896,6 +900,8 @@ export const api = {
 	},
 	getPromptPolicyIncident: (incidentId: string) =>
 		request<PromptPolicyIncidentDetailResponse>(`/prompt-policy/incidents/${encodeURIComponent(incidentId)}`),
+	clearPromptPolicyIncidents: () =>
+		request<MessageResponse>('/prompt-policy/incidents', { method: 'DELETE' }),
 	getPromptRiskProfiles: (params: { page?: number; pageSize?: number; subjectType?: string; platform?: string; riskLevel?: string; apiKeyId?: string; accountId?: string; minScore?: string; q?: string } = {}) => {
 		const search = new URLSearchParams()
 		search.set('page', String(params.page || 1))

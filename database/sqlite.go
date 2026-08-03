@@ -994,13 +994,18 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 	}
 	minuteAgo := now.Add(-1 * time.Minute)
 
-	query := `
-			SELECT created_at, total_tokens, prompt_tokens, completion_tokens,
-			       cached_tokens, first_token_ms, duration_ms, status_code, account_billed, user_billed
-			FROM usage_logs
-			WHERE created_at >= $1 AND status_code <> 499
-		`
-	args := []interface{}{db.timeArg(rangeStart)}
+	query := `SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(prompt_tokens), 0),
+		COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(cached_tokens), 0),
+		COALESCE(SUM(account_billed), 0), COALESCE(SUM(user_billed), 0),
+		COALESCE(AVG(duration_ms), 0),
+		COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN created_at >= $2 THEN total_tokens ELSE 0 END), 0)
+	FROM usage_logs WHERE created_at >= $1 AND status_code <> 499`
+	args := []interface{}{db.timeArg(rangeStart), db.timeArg(minuteAgo)}
 	if !rangeEnd.IsZero() {
 		query += fmt.Sprintf(" AND created_at < $%d", len(args)+1)
 		args = append(args, db.timeArg(rangeEnd))
@@ -1010,66 +1015,22 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 		args = append(args, channel)
 	}
 
-	rows, err := db.conn.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	stats := &UsageStats{}
+	var err error
 	var todayErrors int64
-	var totalDuration float64
 	var totalFirstTokenMs float64
 	var totalFirstTokenSamples int64
 	var todayCacheHitRequests int64
-
-	for rows.Next() {
-		var createdRaw interface{}
-		var totalTokens, promptTokens, completionTokens, cachedTokens int64
-		var firstTokenMs, durationMs int
-		var statusCode int
-		var accountBilled, userBilled float64
-		if err := rows.Scan(&createdRaw, &totalTokens, &promptTokens, &completionTokens,
-			&cachedTokens, &firstTokenMs, &durationMs, &statusCode, &accountBilled, &userBilled); err != nil {
-			return nil, err
-		}
-		createdAt, err := parseDBTimeValue(createdRaw)
-		if err != nil || createdAt.IsZero() {
-			continue
-		}
-
-		stats.TodayRequests++
-		stats.TodayTokens += totalTokens
-		stats.TodayPrompt += promptTokens
-		stats.TodayCompletion += completionTokens
-		stats.TotalCachedTokens += cachedTokens
-		stats.TodayCachedTokens += cachedTokens
-		stats.TodayAccountBilled += accountBilled
-		stats.TodayUserBilled += userBilled
-		totalDuration += float64(durationMs)
-		if firstTokenMs > 0 {
-			totalFirstTokenMs += float64(firstTokenMs)
-			totalFirstTokenSamples++
-		}
-		if cachedTokens > 0 {
-			todayCacheHitRequests++
-		}
-
-		if statusCode >= 400 {
-			todayErrors++
-		}
-		// 最近 1 分钟窗口：RPM / TPM
-		if !createdAt.Before(minuteAgo) {
-			stats.RPM++
-			stats.TPM += float64(totalTokens)
-		}
-	}
-	if err := rows.Err(); err != nil {
+	if err := db.conn.QueryRowContext(ctx, query, args...).Scan(
+		&stats.TodayRequests, &stats.TodayTokens, &stats.TodayPrompt, &stats.TodayCompletion,
+		&stats.TodayCachedTokens, &stats.TodayAccountBilled, &stats.TodayUserBilled,
+		&stats.AvgDurationMs, &totalFirstTokenMs, &totalFirstTokenSamples,
+		&todayCacheHitRequests, &todayErrors, &stats.RPM, &stats.TPM,
+	); err != nil {
 		return nil, err
 	}
 
 	if stats.TodayRequests > 0 {
-		stats.AvgDurationMs = totalDuration / float64(stats.TodayRequests)
 		stats.ErrorRate = float64(todayErrors) / float64(stats.TodayRequests) * 100
 		stats.TodayCacheRate = float64(todayCacheHitRequests) / float64(stats.TodayRequests) * 100
 	}
@@ -1077,55 +1038,22 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 		stats.AvgFirstTokenMs = totalFirstTokenMs / float64(totalFirstTokenSamples)
 	}
 
-	// 可见请求总数（排除 499）
-	var visibleTotal, visibleCacheHitRequests, visibleFirstTokenSamples int64
-	var currentTokens, currentPrompt, currentCompletion, currentCached int64
-	var currentFirstTokenMsSum float64
-	var currentAccountBilled, currentUserBilled float64
-	totalWhere := "status_code <> 499"
-	totalArgs := []interface{}{}
-	if channel != "" {
-		totalWhere += " AND channel = $1"
-		totalArgs = append(totalArgs, channel)
+	rollup, err := db.loadUsageStatsRollup(ctx, channel)
+	if err != nil {
+		return nil, fmt.Errorf("读取用量累计汇总: %w", err)
 	}
-	_ = db.conn.QueryRowContext(ctx, `
-		SELECT
-			COUNT(*),
-			COALESCE(SUM(total_tokens), 0),
-			COALESCE(SUM(prompt_tokens), 0),
-			COALESCE(SUM(completion_tokens), 0),
-			COALESCE(SUM(cached_tokens), 0),
-			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(account_billed), 0),
-			COALESCE(SUM(user_billed), 0)
-		FROM usage_logs
-		WHERE `+totalWhere, totalArgs...).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheHitRequests, &currentFirstTokenMsSum, &visibleFirstTokenSamples, &currentAccountBilled, &currentUserBilled)
-
-	// 基线值；渠道过滤时 baseline 无渠道维度，跳过（口径与 Postgres 侧一致）。
-	var bReq, bTok, bPrompt, bComp, bCached, bCacheHitRequests, bFirstTokenSamples int64
-	var bFirstTokenMsSum float64
-	var bAccountBilled, bUserBilled float64
-	if channel == "" {
-		_ = db.conn.QueryRowContext(ctx, `
-		SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, cache_hit_requests, first_token_ms_sum, first_token_samples, account_billed, user_billed
-		FROM usage_stats_baseline WHERE id = 1
-	`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bCacheHitRequests, &bFirstTokenMsSum, &bFirstTokenSamples, &bAccountBilled, &bUserBilled)
-	}
-
-	stats.TotalRequests = visibleTotal + bReq
-	stats.TotalTokens = currentTokens + bTok
-	stats.TotalPrompt = currentPrompt + bPrompt
-	stats.TotalCompletion = currentCompletion + bComp
-	stats.TotalCachedTokens = currentCached + bCached
-	stats.TotalAccountBilled = currentAccountBilled + bAccountBilled
-	stats.TotalUserBilled = currentUserBilled + bUserBilled
+	stats.TotalRequests = rollup.TotalRequests
+	stats.TotalTokens = rollup.TotalTokens
+	stats.TotalPrompt = rollup.PromptTokens
+	stats.TotalCompletion = rollup.CompletionTokens
+	stats.TotalCachedTokens = rollup.CachedTokens
+	stats.TotalAccountBilled = rollup.TotalAccountBilled
+	stats.TotalUserBilled = rollup.TotalUserBilled
 	if stats.TotalRequests > 0 {
-		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(stats.TotalRequests) * 100
+		stats.TotalCacheRate = float64(rollup.CacheHitRequests) / float64(stats.TotalRequests) * 100
 	}
-	if visibleFirstTokenSamples+bFirstTokenSamples > 0 {
-		stats.AvgFirstTokenMs = (currentFirstTokenMsSum + bFirstTokenMsSum) / float64(visibleFirstTokenSamples+bFirstTokenSamples)
+	if rollup.FirstTokenSamples > 0 {
+		stats.AvgFirstTokenMs = rollup.FirstTokenMsSum / float64(rollup.FirstTokenSamples)
 	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)

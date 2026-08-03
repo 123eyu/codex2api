@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -48,6 +49,9 @@ type PromptRiskProfile struct {
 	RiskLevel            string                   `json:"risk_level"`
 	RecommendedActions   []string                 `json:"recommended_actions"`
 	ScoreBreakdown       PromptRiskScoreBreakdown `json:"score_breakdown"`
+	HasActivity          bool                     `json:"has_activity"`
+	IdentitySource       string                   `json:"identity_source,omitempty"`
+	IdentityUpdatedAt    *time.Time               `json:"identity_updated_at,omitempty"`
 	LatestAt             time.Time                `json:"latest_at"`
 	EventCount           int                      `json:"event_count"`
 	Events10m            int                      `json:"events_10m"`
@@ -146,6 +150,8 @@ type promptRiskIdentity struct {
 	UserName       string
 	UserEmail      string
 	UserGroup      string
+	Source         string
+	UpdatedAt      time.Time
 }
 
 type promptRiskSignal struct {
@@ -340,16 +346,29 @@ func promptRiskSignalForLog(log PromptFilterLog) (promptRiskSignal, bool) {
 	kind := ""
 	score := 0
 	confidence := 0
+	securityContextScore, securityContextObserved := promptRiskSecurityContextScore(log)
 	reviewCleared := strings.TrimSpace(log.ReviewModel) != "" && !log.ReviewFlagged && strings.TrimSpace(log.ReviewError) == ""
 	switch {
-	case reviewCleared:
-		kind, score, confidence = "review_cleared", 0, 95
+	case log.ReviewFlagged:
+		kind, score, confidence = "review_flagged_monitor", 40, 95
 	case strings.EqualFold(log.Action, "block") && log.StrikeEligible:
 		kind, score, confidence = "local_block_strike", 48, 95
 	case strings.EqualFold(log.Action, "block"):
 		kind, score, confidence = "local_block", 38, 85
 	case strings.EqualFold(log.Action, "warn"):
 		kind, score, confidence = "local_warn", 22, 75
+	case strings.EqualFold(log.Action, "allow") && securityContextObserved:
+		kind = "local_security_context_observed"
+		score = min(10, max(3, max(log.AuditScore, securityContextScore)/5))
+		confidence = 35
+		if reviewCleared {
+			confidence = 25
+			if log.ReviewConfidence != nil {
+				confidence = max(confidence, min(60, int(math.Round(*log.ReviewConfidence*100))))
+			}
+		}
+	case reviewCleared:
+		kind, score, confidence = "review_cleared", 0, 95
 	default:
 		return promptRiskSignal{}, false
 	}
@@ -360,11 +379,43 @@ func promptRiskSignalForLog(log PromptFilterLog) (promptRiskSignal, bool) {
 		SourceType: promptRiskSourceLog, SourceID: strconv.FormatInt(log.ID, 10), PromptFilterLogID: log.ID,
 		RequestCorrelationID: log.RequestCorrelationID, CreatedAt: log.CreatedAt, EventKind: kind,
 		RequestRiskScore: score, EvidenceConfidence: confidence, ReasonCode: log.ReasonCode, Action: log.Action,
-		Endpoint: log.Endpoint, Model: log.Model, PromptPreview: log.TextPreview, APIKeyID: log.APIKeyID,
+		Endpoint: log.Endpoint, Model: log.Model, PromptFingerprint: promptRiskObservedFingerprint(kind, log.TextPreview),
+		PromptPreview: log.TextPreview, APIKeyID: log.APIKeyID,
 		APIKeyName: log.APIKeyName, APIKeyMasked: log.APIKeyMasked, NewAPIPolicyStatus: log.NewAPIPolicyStatus,
 		NewAPIPlatform: log.NewAPIPlatform, NewAPIUserID: log.NewAPIUserID, SessionHash: log.SessionHash,
 		ClientIPHash: log.ClientIPHash,
 	}, true
+}
+
+func promptRiskSecurityContextScore(log PromptFilterLog) (int, bool) {
+	if strings.TrimSpace(log.MatchedPatterns) == "" {
+		return 0, false
+	}
+	var matches []struct {
+		Category string `json:"category"`
+		Weight   int    `json:"weight"`
+	}
+	if json.Unmarshal([]byte(log.MatchedPatterns), &matches) != nil {
+		return 0, false
+	}
+	score := 0
+	for _, match := range matches {
+		switch strings.ToLower(strings.TrimSpace(match.Category)) {
+		case "prompt_injection", "malware", "evasion", "exploit", "web_attack", "network_attack",
+			"credential_attack", "unauthorized_access", "remote_access", "social_engineering",
+			"supply_chain", "resource_abuse", "container_security", "cloud_security",
+			"wireless_attack", "iot_security", "api_security", "blockchain_security":
+			score += max(0, match.Weight)
+		}
+	}
+	return score, score > 0
+}
+
+func promptRiskObservedFingerprint(eventKind, preview string) string {
+	if eventKind != "local_security_context_observed" || strings.TrimSpace(preview) == "" {
+		return ""
+	}
+	return promptRiskHash("security-context-preview", preview)
 }
 
 func promptRiskSignalForIncident(incident PromptPolicyIncident) promptRiskSignal {
@@ -724,7 +775,7 @@ func (db *DB) loadPromptRiskIdentities(ctx context.Context, subjectKeys []string
 		args = append(args, key)
 		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
 	}
-	rows, err := db.conn.QueryContext(ctx, `SELECT subject_type, subject_key, platform, external_user_id, user_name, user_email, user_group
+	rows, err := db.conn.QueryContext(ctx, `SELECT subject_type, subject_key, platform, external_user_id, user_name, user_email, user_group, source, updated_at
 		FROM prompt_risk_identities WHERE subject_type=$1 AND subject_key IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return nil, err
@@ -733,10 +784,42 @@ func (db *DB) loadPromptRiskIdentities(ctx context.Context, subjectKeys []string
 	items := make(map[string]promptRiskIdentity, len(keys))
 	for rows.Next() {
 		var identity promptRiskIdentity
-		if err := rows.Scan(&identity.SubjectType, &identity.SubjectKey, &identity.Platform, &identity.ExternalUserID, &identity.UserName, &identity.UserEmail, &identity.UserGroup); err != nil {
+		var updatedAtRaw any
+		if err := rows.Scan(&identity.SubjectType, &identity.SubjectKey, &identity.Platform, &identity.ExternalUserID, &identity.UserName, &identity.UserEmail, &identity.UserGroup, &identity.Source, &updatedAtRaw); err != nil {
 			return nil, err
 		}
+		if updatedAtRaw != nil {
+			identity.UpdatedAt, err = parsePromptRiskTimeValue(updatedAtRaw)
+			if err != nil {
+				return nil, err
+			}
+		}
 		items[identity.SubjectKey] = identity
+	}
+	return items, rows.Err()
+}
+
+func (db *DB) listPromptRiskIdentities(ctx context.Context) ([]promptRiskIdentity, error) {
+	rows, err := db.conn.QueryContext(ctx, `SELECT subject_type, subject_key, platform, external_user_id, user_name, user_email, user_group, source, updated_at
+		FROM prompt_risk_identities WHERE subject_type=$1`, PromptRiskSubjectNewAPIUser)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]promptRiskIdentity, 0)
+	for rows.Next() {
+		var identity promptRiskIdentity
+		var updatedAtRaw any
+		if err := rows.Scan(&identity.SubjectType, &identity.SubjectKey, &identity.Platform, &identity.ExternalUserID, &identity.UserName, &identity.UserEmail, &identity.UserGroup, &identity.Source, &updatedAtRaw); err != nil {
+			return nil, err
+		}
+		if updatedAtRaw != nil {
+			identity.UpdatedAt, err = parsePromptRiskTimeValue(updatedAtRaw)
+			if err != nil {
+				return nil, err
+			}
+		}
+		items = append(items, identity)
 	}
 	return items, rows.Err()
 }
@@ -749,6 +832,11 @@ func applyPromptRiskIdentityToProfile(profile *PromptRiskProfile, identity promp
 	profile.NewAPIUserName = identity.UserName
 	profile.NewAPIUserEmail = identity.UserEmail
 	profile.NewAPIUserGroup = identity.UserGroup
+	profile.IdentitySource = identity.Source
+	if !identity.UpdatedAt.IsZero() {
+		updatedAt := identity.UpdatedAt
+		profile.IdentityUpdatedAt = &updatedAt
+	}
 	if display := promptRiskIdentityDisplay(identity); display != "" {
 		profile.SubjectDisplay = display
 	}
@@ -819,7 +907,7 @@ func (db *DB) ListPromptRiskProfiles(ctx context.Context, query PromptRiskProfil
 		MAX(subject_display), MAX(platform), MAX(CASE WHEN is_person THEN 1 ELSE 0 END), MAX(identity_confidence), MAX(created_at),
 		COUNT(*), SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), SUM(CASE WHEN created_at >= $3 THEN 1 ELSE 0 END),
 		SUM(CASE WHEN created_at >= $4 THEN 1 ELSE 0 END),
-		SUM(CASE WHEN request_risk_score>0 AND event_kind NOT IN ('local_audit_hit', 'review_cleared') AND created_at >= $3 THEN 1 ELSE 0 END),
+		SUM(CASE WHEN request_risk_score>0 AND event_kind NOT IN ('local_audit_hit', 'review_cleared', 'local_security_context_observed') AND created_at >= $3 THEN 1 ELSE 0 END),
 		SUM(CASE WHEN event_kind LIKE 'upstream_cy_%' THEN 1 ELSE 0 END),
 		SUM(CASE WHEN event_kind='upstream_cy_confirmed_miss' THEN 1 ELSE 0 END),
 		SUM(CASE WHEN event_kind LIKE 'local_block%' THEN 1 ELSE 0 END),
@@ -850,6 +938,7 @@ func (db *DB) ListPromptRiskProfiles(ctx context.Context, query PromptRiskProfil
 			return nil, 0, err
 		}
 		item.Profile.IsPerson = isPerson != 0
+		item.Profile.HasActivity = true
 		item.Profile.Events30d = item.Profile.EventCount
 		item.Profile.RepeatedFingerprints = max(0, item.FingerprintEvents-item.Profile.DistinctFingerprints)
 		item.Profile.LatestAt, err = parsePromptRiskTimeValue(latestRaw)
@@ -883,6 +972,48 @@ func (db *DB) ListPromptRiskProfiles(ctx context.Context, query PromptRiskProfil
 	}
 	for i := range aggregates {
 		applyPromptRiskIdentityToProfile(&aggregates[i].Profile, identities[aggregates[i].Profile.SubjectKey])
+	}
+	includeIdentityDirectory := query.APIKeyID == 0 && query.AccountID == 0 &&
+		(strings.TrimSpace(query.SubjectType) == "" || strings.TrimSpace(query.SubjectType) == "all" || strings.TrimSpace(query.SubjectType) == PromptRiskSubjectNewAPIUser) &&
+		query.MinScore == 0 && (strings.TrimSpace(query.RiskLevel) == "" || strings.TrimSpace(query.RiskLevel) == "all" || strings.TrimSpace(query.RiskLevel) == PromptRiskLevelLow)
+	if includeIdentityDirectory {
+		directory, listErr := db.listPromptRiskIdentities(ctx)
+		if listErr != nil {
+			return nil, 0, listErr
+		}
+		existing := make(map[string]struct{}, len(aggregates))
+		for i := range aggregates {
+			existing[aggregates[i].Profile.SubjectType+"\x00"+aggregates[i].Profile.SubjectKey] = struct{}{}
+		}
+		platformFilter := strings.TrimSpace(query.Platform)
+		subjectKeyFilter := strings.TrimSpace(query.SubjectKey)
+		queryFilter := strings.ToLower(strings.TrimSpace(query.Query))
+		for _, identity := range directory {
+			if _, ok := existing[identity.SubjectType+"\x00"+identity.SubjectKey]; ok {
+				continue
+			}
+			if platformFilter != "" && identity.Platform != platformFilter {
+				continue
+			}
+			if subjectKeyFilter != "" && identity.SubjectKey != subjectKeyFilter {
+				continue
+			}
+			if queryFilter != "" {
+				haystack := strings.ToLower(strings.Join([]string{identity.SubjectKey, identity.Platform, identity.ExternalUserID, identity.UserName, identity.UserEmail, identity.UserGroup}, "\x00"))
+				if !strings.Contains(haystack, queryFilter) {
+					continue
+				}
+			}
+			profile := PromptRiskProfile{
+				SubjectType: PromptRiskSubjectNewAPIUser, SubjectKey: identity.SubjectKey,
+				SubjectDisplay: promptRiskIdentityDisplay(identity), Platform: identity.Platform,
+				IsPerson: true, IdentityConfidence: 100, RiskLevel: PromptRiskLevelLow,
+				RecommendedActions: []string{"observe"}, HasActivity: false, LatestAt: identity.UpdatedAt,
+				ScoreBreakdown: PromptRiskScoreBreakdown{IdentityConfidence: 100},
+			}
+			applyPromptRiskIdentityToProfile(&profile, identity)
+			aggregates = append(aggregates, promptRiskAggregate{Profile: profile})
+		}
 	}
 	sort.SliceStable(aggregates, func(i, j int) bool {
 		if aggregates[i].Profile.RiskScore == aggregates[j].Profile.RiskScore {

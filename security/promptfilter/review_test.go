@@ -196,7 +196,7 @@ func TestCustomReviewPayloadTemplateSafelySubstitutesJSONValues(t *testing.T) {
 		Adapter: ReviewAdapterConfig{
 			RequestMode:        ReviewRequestModeChatCompletions,
 			UserPromptTemplate: "<user_input>{{text}}</user_input>",
-			PayloadTemplate:    `{"model":"{{model}}","input":"{{user_prompt}}","metadata":{"raw":"{{text}}"}}`,
+			PayloadTemplate:    `{"model":"{{model}}","system":"{{system_prompt}}","input":"{{user_prompt}}","metadata":{"raw":"{{text}}"}}`,
 		},
 	}
 	payload, err := buildReviewPayload(`quote: " and slash: \\`, cfg)
@@ -209,6 +209,41 @@ func TestCustomReviewPayloadTemplateSafelySubstitutesJSONValues(t *testing.T) {
 	}
 	if got := decoded["input"]; got != `<user_input>quote: " and slash: \\</user_input>` {
 		t.Fatalf("input = %q", got)
+	}
+}
+
+func TestCustomChatReviewPayloadRequiresImmutableSystemPromptPlaceholder(t *testing.T) {
+	_, err := buildReviewPayload("test", ReviewConfig{
+		Model: "review-model",
+		Adapter: ReviewAdapterConfig{
+			RequestMode:        ReviewRequestModeChatCompletions,
+			SystemPrompt:       "custom operator prompt",
+			UserPromptTemplate: "<user_input>{{text}}</user_input>",
+			PayloadTemplate:    `{"model":"{{model}}","input":"{{user_prompt}}"}`,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "{{system_prompt}}") {
+		t.Fatalf("unsafe custom chat payload was accepted: %v", err)
+	}
+}
+
+func TestReviewPayloadAlwaysIncludesImmutableOperationalMalwareBoundary(t *testing.T) {
+	for _, payloadTemplate := range []string{"", `{"model":"{{model}}","messages":[{"role":"system","content":"{{system_prompt}}"},{"role":"user","content":"{{user_prompt}}"}]}`} {
+		payload, err := buildReviewPayload("test", ReviewConfig{
+			Model: "review-model",
+			Adapter: ReviewAdapterConfig{
+				RequestMode:        ReviewRequestModeChatCompletions,
+				SystemPrompt:       "custom operator prompt",
+				UserPromptTemplate: "<user_input>{{text}}</user_input>",
+				PayloadTemplate:    payloadTemplate,
+			},
+		})
+		if err != nil {
+			t.Fatalf("buildReviewPayload: %v", err)
+		}
+		if strings.Count(string(payload), "[OPERATIONAL MALWARE BOUNDARY — IMMUTABLE]") != 1 {
+			t.Fatalf("immutable malware boundary missing or duplicated: %s", payload)
+		}
 	}
 }
 

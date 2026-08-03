@@ -29,6 +29,7 @@ import PoolRunwayCard from '../components/PoolRunwayCard'
 const DashboardUsageCharts = lazy(() => import('../components/DashboardUsageCharts'))
 
 const DASHBOARD_REFRESH_INTERVAL_MS = 15_000
+const DASHBOARD_POOL_REFRESH_INTERVAL_MS = 60_000
 const DASHBOARD_POOL_RUNWAY_VISIBILITY_KEY = 'codex2api:dashboard:pool-runway-visible'
 
 function getInitialPoolRunwayVisibility(): boolean {
@@ -89,28 +90,22 @@ export default function Dashboard() {
   const timeRangeRef = useRef<TimeRangeKey>(timeRange)
   const usageStatsRangeInitialized = useRef(false)
   const showPoolRunwayRef = useRef(showPoolRunway)
+  const poolDataRef = useRef<{ accounts: AccountRow[]; opsOverview: OpsOverviewResponse | null }>({ accounts: [], opsOverview: null })
 
-  // 统计始终加载；号池分析仅在开启时拉账号列表 + ops RPM（隐藏时省流量）
+  // 核心统计与号池分析解耦：百万级日志下账号聚合变慢时，不能阻塞整个仪表盘首屏。
   const loadDashboardStats = useCallback(async () => {
     const { start, end } = getTimeRangeISO(timeRangeRef.current)
-    const includePoolRunway = showPoolRunwayRef.current
-    const [stats, usageStats, settings, accountsRes, opsOverview] = await Promise.all([
+    const [stats, usageStats, settings] = await Promise.all([
       api.getStats(),
       api.getUsageStats({ start, end, channel: channelRef.current || undefined }),
       api.getSettings().catch((): SystemSettings | null => null),
-      includePoolRunway
-        ? api.getAccounts().catch(() => ({ accounts: [] as AccountRow[] }))
-        : Promise.resolve({ accounts: [] as AccountRow[] }),
-      includePoolRunway
-        ? api.getOpsOverview().catch((): OpsOverviewResponse | null => null)
-        : Promise.resolve(null),
     ])
     return {
       stats,
       usageStats,
       settings,
-      accounts: accountsRes.accounts ?? [],
-      opsOverview,
+      accounts: poolDataRef.current.accounts,
+      opsOverview: poolDataRef.current.opsOverview,
     }
   }, [])
 
@@ -131,21 +126,37 @@ export default function Dashboard() {
     load: loadDashboardStats,
   })
 
-  // 偏好持久化 + 开关切换时补拉/清空（跳过首屏，避免与 useDataLoader 首拉重复）
-  const poolRunwayToggleReady = useRef(false)
+  const loadPoolRunwayData = useCallback(async () => {
+    if (!showPoolRunwayRef.current) return
+    const [accountsRes, opsOverview] = await Promise.all([
+      api.getAccounts().catch(() => ({ accounts: [] as AccountRow[] })),
+      api.getOpsOverview().catch((): OpsOverviewResponse | null => null),
+    ])
+    if (!showPoolRunwayRef.current) return
+    const next = { accounts: accountsRes.accounts ?? [], opsOverview }
+    poolDataRef.current = next
+    setData((prev) => ({ ...prev, ...next }))
+  }, [setData])
+
+  // 偏好持久化 + 号池独立加载。号池失败只影响号池卡片，不拖死核心统计。
   useEffect(() => {
     showPoolRunwayRef.current = showPoolRunway
     persistPoolRunwayVisibility(showPoolRunway)
-    if (!poolRunwayToggleReady.current) {
-      poolRunwayToggleReady.current = true
-      return
-    }
     if (!showPoolRunway) {
+      poolDataRef.current = { accounts: [], opsOverview: null }
       setData((prev) => ({ ...prev, accounts: [], opsOverview: null }))
       return
     }
-    void reloadSilently()
-  }, [showPoolRunway, reloadSilently, setData])
+    void loadPoolRunwayData()
+  }, [showPoolRunway, loadPoolRunwayData, setData])
+
+  useEffect(() => {
+    if (!showPoolRunway) return
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void loadPoolRunwayData()
+    }, DASHBOARD_POOL_REFRESH_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+  }, [loadPoolRunwayData, showPoolRunway])
 
   useEffect(() => {
     timeRangeRef.current = timeRange

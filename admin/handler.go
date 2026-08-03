@@ -169,10 +169,13 @@ type chartCacheEntry struct {
 const (
 	adminUsageStatsCacheNamespace  = "admin:usage-stats"
 	adminChartCacheNamespace       = "admin:chart-data"
+	adminAccountWindowsNamespace   = "admin:account-usage-windows"
 	adminAPIKeyCacheNamespace      = "api-key"
 	adminAPIKeyCountNamespace      = "api-key-count"
 	adminUsageStatsCacheTTL        = 5 * time.Second
+	adminUsageRangeCacheTTL        = 35 * time.Second
 	adminChartCacheTTL             = 10 * time.Second
+	adminAccountWindowsCacheTTL    = 30 * time.Second
 	importFileSizeLimitBytes       = 20 * 1024 * 1024
 	importFileSizeLimitLabel       = "20MB"
 	accountRefreshBatchConcurrency = 4
@@ -423,13 +426,19 @@ func (h *Handler) invalidateAPIKeyRuntimeCaches(ctx context.Context, apiKey stri
 }
 
 func (h *Handler) getUsageStatsCached(ctx context.Context, rangeStart, rangeEnd time.Time, channel string) (*database.UsageStats, error) {
-	// 只对"默认今日 + 全渠道"区间走 5 秒缓存。
-	// 带显式区间的请求种类多、命中率低,且 ClearUsageLogs 现有的失效逻辑只清 "global" key,
-	// 给区间结果做缓存反而需要扩展失效接口,得不偿失,直接每次重算更简单。
-	useCache := rangeStart.IsZero() && rangeEnd.IsZero() && channel == ""
-	if useCache {
+	cacheKey := ""
+	cacheTTL := adminUsageStatsCacheTTL
+	if rangeStart.IsZero() && rangeEnd.IsZero() && channel == "" {
+		cacheKey = "global"
+	} else if !rangeStart.IsZero() && !rangeEnd.IsZero() {
+		// 仪表盘每 15 秒刷新时 start/end 也会随之平移。按 30 秒桶复用完整统计结果，
+		// 既保留累计、区间、模型和分项口径，又避免同一分钟内重复扫描百万级日志。
+		cacheKey = fmt.Sprintf("range:%d:%d:%s", rangeStart.Unix()/30, rangeEnd.Unix()/30, channel)
+		cacheTTL = adminUsageRangeCacheTTL
+	}
+	if cacheKey != "" {
 		var cached database.UsageStats
-		if h.getRuntimeJSON(ctx, adminUsageStatsCacheNamespace, "global", &cached) {
+		if h.getRuntimeJSON(ctx, adminUsageStatsCacheNamespace, cacheKey, &cached) {
 			return &cached, nil
 		}
 	}
@@ -437,8 +446,8 @@ func (h *Handler) getUsageStatsCached(ctx context.Context, rangeStart, rangeEnd 
 	if err != nil {
 		return nil, err
 	}
-	if useCache {
-		h.setRuntimeJSON(ctx, adminUsageStatsCacheNamespace, "global", stats, adminUsageStatsCacheTTL)
+	if cacheKey != "" {
+		h.setRuntimeJSON(ctx, adminUsageStatsCacheNamespace, cacheKey, stats, cacheTTL)
 	}
 	return stats, nil
 }
@@ -631,6 +640,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/prompt-filter/logs/match", h.MatchPromptFilterLog)
 	api.DELETE("/prompt-filter/logs", h.ClearPromptFilterLogs)
 	api.GET("/prompt-policy/incidents", h.ListPromptPolicyIncidents)
+	api.DELETE("/prompt-policy/incidents", h.ClearPromptPolicyIncidents)
 	api.GET("/prompt-policy/incidents/:incident_id", h.GetPromptPolicyIncident)
 	api.GET("/prompt-policy/risk-profiles", h.ListPromptRiskProfiles)
 	api.GET("/prompt-policy/risk-profiles/:subject_type/:subject_key", h.GetPromptRiskProfile)
@@ -781,12 +791,11 @@ func (h *Handler) GetStats(c *gin.Context) {
 
 	accountCounts, channelCounts := summarizeDashboardAccounts(accounts, h.store.Accounts())
 
-	usageStats, _ := h.getUsageStatsCached(ctx, time.Time{}, time.Time{}, "")
-	todayReqs := int64(0)
-	if usageStats != nil {
-		todayReqs = usageStats.TodayRequests
-	}
 	todayByChannel, _ := h.db.CountTodayRequestsByChannel(ctx)
+	todayReqs := int64(0)
+	for _, count := range todayByChannel {
+		todayReqs += count
+	}
 
 	channels := make(map[string]statsChannelCounts, len(channelCounts))
 	for ch, counts := range channelCounts {
@@ -2297,17 +2306,23 @@ func (h *Handler) getCachedRequestCounts() map[int64]*database.AccountRequestCou
 }
 
 func (h *Handler) getAccountUsageWindows(ctx context.Context) (map[int64]*database.AccountTimeRangeUsage, map[int64]*database.AccountTimeRangeUsage) {
+	type cachedUsageWindows struct {
+		Usage5h map[int64]*database.AccountTimeRangeUsage `json:"usage_5h"`
+		Usage7d map[int64]*database.AccountTimeRangeUsage `json:"usage_7d"`
+	}
+	var cached cachedUsageWindows
+	if h.getRuntimeJSON(ctx, adminAccountWindowsNamespace, "global", &cached) && cached.Usage5h != nil && cached.Usage7d != nil {
+		return cached.Usage5h, cached.Usage7d
+	}
 	now := time.Now()
-	usage5h, err := h.db.GetAccountTimeRangeUsage(ctx, now.Add(-5*time.Hour))
+	usage5h, usage7d, err := h.db.GetAccountUsageWindows(ctx, now.Add(-5*time.Hour), now.AddDate(0, 0, -7))
 	if err != nil {
-		log.Printf("获取账号 5h 用量统计失败: %v", err)
+		log.Printf("获取账号 5h/7d 用量统计失败: %v", err)
 		usage5h = make(map[int64]*database.AccountTimeRangeUsage)
-	}
-	usage7d, err := h.db.GetAccountTimeRangeUsage(ctx, now.AddDate(0, 0, -7))
-	if err != nil {
-		log.Printf("获取账号 7d 用量统计失败: %v", err)
 		usage7d = make(map[int64]*database.AccountTimeRangeUsage)
+		return usage5h, usage7d
 	}
+	h.setRuntimeJSON(ctx, adminAccountWindowsNamespace, "global", cachedUsageWindows{Usage5h: usage5h, Usage7d: usage7d}, adminAccountWindowsCacheTTL)
 	return usage5h, usage7d
 }
 

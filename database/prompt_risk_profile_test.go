@@ -110,6 +110,51 @@ func TestPromptRiskIdentityDirectoryEnrichesHistoricalProfiles(t *testing.T) {
 	}
 }
 
+func TestPromptRiskIdentityDirectoryListsPeopleBeforeFirstRiskEvent(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	if err := db.UpsertPromptRiskIdentities(ctx, []PromptRiskIdentityInput{
+		{Platform: "gateway-a", ExternalUserID: "101", UserName: "new-user", UserEmail: "new@example.com", UserGroup: "standard", Source: "admin_import"},
+		{Platform: "gateway-a", ExternalUserID: "102", UserName: "active-user", Source: "admin_import"},
+	}); err != nil {
+		t.Fatalf("UpsertPromptRiskIdentities: %v", err)
+	}
+	if err := db.InsertPromptFilterLog(ctx, &PromptFilterLogInput{
+		Source: "local_filter", Action: "warn", Score: 40, MatchedPatterns: `[{"name":"x"}]`,
+		NewAPIPolicyStatus: "verified", NewAPIPlatform: "gateway-a", NewAPIUserID: "102",
+	}); err != nil {
+		t.Fatalf("InsertPromptFilterLog: %v", err)
+	}
+
+	profiles, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser})
+	if err != nil || total != 2 || len(profiles) != 2 {
+		t.Fatalf("profiles total=%d items=%#v err=%v", total, profiles, err)
+	}
+	var identityOnly, active *PromptRiskProfile
+	for _, profile := range profiles {
+		switch profile.NewAPIUserID {
+		case "101":
+			identityOnly = profile
+		case "102":
+			active = profile
+		}
+	}
+	if identityOnly == nil || identityOnly.HasActivity || identityOnly.EventCount != 0 || identityOnly.RiskScore != 0 || identityOnly.IdentitySource != "admin_import" || identityOnly.IdentityUpdatedAt == nil {
+		t.Fatalf("identity-only profile = %#v", identityOnly)
+	}
+	if active == nil || !active.HasActivity || active.EventCount != 1 {
+		t.Fatalf("active profile = %#v", active)
+	}
+	filtered, filteredTotal, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser, Query: "new@example.com"})
+	if err != nil || filteredTotal != 1 || len(filtered) != 1 || filtered[0].NewAPIUserID != "101" {
+		t.Fatalf("identity-only search total=%d items=%#v err=%v", filteredTotal, filtered, err)
+	}
+	minimumRisk, minimumRiskTotal, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser, MinScore: 1})
+	if err != nil || minimumRiskTotal != 1 || len(minimumRisk) != 1 || minimumRisk[0].NewAPIUserID != "102" {
+		t.Fatalf("min-risk profiles total=%d items=%#v err=%v", minimumRiskTotal, minimumRisk, err)
+	}
+}
+
 func TestPromptRiskUnsignedIdentityNeverCreatesPersonProfile(t *testing.T) {
 	db := newPromptPolicySQLiteTestDB(t)
 	input := &PromptFilterLogInput{
@@ -165,7 +210,7 @@ func TestPromptRiskBackfillLearnsExistingCYWithoutInventingPerson(t *testing.T) 
 	}
 }
 
-func TestPromptRiskProfilesPaginateFilterAndClearWithAuditHistory(t *testing.T) {
+func TestPromptRiskProfilesPaginateFilterAndSurviveLogClear(t *testing.T) {
 	db := newPromptPolicySQLiteTestDB(t)
 	ctx := context.Background()
 	for _, userID := range []string{"user-a", "user-b", "user-c"} {
@@ -188,8 +233,32 @@ func TestPromptRiskProfilesPaginateFilterAndClearWithAuditHistory(t *testing.T) 
 		t.Fatalf("ClearPromptFilterLogs: %v", err)
 	}
 	_, total, err = db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20})
-	if err != nil || total != 0 {
-		t.Fatalf("profiles survived clear total=%d err=%v", total, err)
+	if err != nil || total != 3 {
+		t.Fatalf("profiles changed after log clear total=%d err=%v", total, err)
+	}
+}
+
+func TestPromptRiskProfilesSurviveIncidentClear(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	incident, candidate, evidence := promptPolicyTestInputs("risk-clear-incident")
+	incident.LocalComparison = PromptPolicyComparisonConfirmedMiss
+	incident.NewAPIPolicyStatus = "verified"
+	incident.NewAPIPlatform = "prod"
+	incident.NewAPIUserID = "incident-user"
+	if err := db.PersistPromptPolicyIncident(ctx, incident, candidate, evidence); err != nil {
+		t.Fatalf("PersistPromptPolicyIncident: %v", err)
+	}
+	_, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20})
+	if err != nil || total == 0 {
+		t.Fatalf("profiles before incident clear total=%d err=%v", total, err)
+	}
+	if err := db.ClearPromptPolicyIncidents(ctx); err != nil {
+		t.Fatalf("ClearPromptPolicyIncidents: %v", err)
+	}
+	_, totalAfter, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20})
+	if err != nil || totalAfter != total {
+		t.Fatalf("profiles changed after incident clear before=%d after=%d err=%v", total, totalAfter, err)
 	}
 }
 
@@ -260,6 +329,50 @@ func TestPromptRiskClearedReviewDoesNotIncreaseRiskOrRecurrence(t *testing.T) {
 	}
 	if profiles[0].RiskScore != 0 || profiles[0].ScoreBreakdown.Recurrence != 0 || profiles[0].RiskLevel != PromptRiskLevelLow {
 		t.Fatalf("cleared reviews increased risk: %#v", profiles[0])
+	}
+}
+
+func TestPromptRiskDefensiveSecurityContextIsObservedAndRepeated(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	confidence := 0.04
+	for index := 0; index < 5; index++ {
+		if err := db.InsertPromptFilterLog(ctx, &PromptFilterLogInput{
+			Source: "local_filter", Action: "allow", AuditScore: 20,
+			MatchedPatterns: `[{"name":"malware_family","weight":20,"category":"malware","signal_only":true}]`,
+			TextPreview:     "Write a YARA rule to detect ransomware encryptors.", Reviewed: true,
+			ReviewModel: "review-model", ReviewConfidence: &confidence,
+			NewAPIPolicyStatus: "verified", NewAPIPlatform: "prod", NewAPIUserID: "defensive-user",
+		}); err != nil {
+			t.Fatalf("InsertPromptFilterLog(%d): %v", index, err)
+		}
+	}
+	profiles, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser})
+	if err != nil || total != 1 || len(profiles) != 1 {
+		t.Fatalf("profiles total=%d items=%#v err=%v", total, profiles, err)
+	}
+	profile := profiles[0]
+	if profile.EventCount != 5 || profile.RepeatedFingerprints != 4 || profile.RiskScore <= 0 || profile.RiskScore >= 35 {
+		t.Fatalf("defensive observation profile=%#v", profile)
+	}
+	events, eventTotal, err := db.ListPromptRiskEvents(ctx, profile.SubjectType, profile.SubjectKey, PromptRiskEventQuery{Page: 1, PageSize: 10})
+	if err != nil || eventTotal != 5 || len(events) != 5 || events[0].EventKind != "local_security_context_observed" || events[0].PromptFingerprint == "" {
+		t.Fatalf("events total=%d items=%#v err=%v", eventTotal, events, err)
+	}
+}
+
+func TestPromptRiskTerminalBlockCannotBeErasedByClearedReview(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	if err := db.InsertPromptFilterLog(context.Background(), &PromptFilterLogInput{
+		Source: "local_filter", Action: "block", StrikeEligible: true, ReviewModel: "review-model",
+		Reviewed: true, ReviewFlagged: false, MatchedPatterns: `[{"name":"terminal","category":"malware"}]`,
+		NewAPIPolicyStatus: "verified", NewAPIPlatform: "prod", NewAPIUserID: "terminal-user",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	profiles, _, err := db.ListPromptRiskProfiles(context.Background(), PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser})
+	if err != nil || len(profiles) != 1 || profiles[0].LocalBlockCount != 1 || profiles[0].RiskScore == 0 {
+		t.Fatalf("terminal block profile=%#v err=%v", profiles, err)
 	}
 }
 
