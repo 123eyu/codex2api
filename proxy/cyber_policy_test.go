@@ -41,9 +41,9 @@ func TestUpstreamCyberPolicyCodeDetectsResponseFailed(t *testing.T) {
 			want:    "cyber_policy",
 		},
 		{
-			name:    "substring fallback (cyber security risk)",
+			name:    "message alone is not explicit CYB",
 			payload: `{"type":"response.failed","response":{"error":{"message":"detected cyber security risk in prompt"}}}`,
-			want:    "cyber_policy",
+			want:    "",
 		},
 		{
 			name:    "unrelated failure is not cyber_policy",

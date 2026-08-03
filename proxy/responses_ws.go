@@ -782,6 +782,13 @@ func (h *Handler) streamResponsesWSUpstream(
 	if fallbackLog != nil {
 		fallbackLog.LogHTTPAttemptCompletion("/v1/responses", account.ID(), fallbackAttempt, totalDuration, firstTokenMs, outcome.logStatusCode)
 	}
+	if metadata, delegated := newAPIUpstreamCyberPolicyDecision(c); delegated && metadata.EventID != "" {
+		// WebSocket response headers were committed during the upgrade. Carry the
+		// signed CYB decision in a per-turn error frame so NewAPI can count it and
+		// decide whether this is the first warning or a ban-worthy recurrence.
+		_ = writeResponsesWSError(conn, newAPIPolicyDecisionAPIError(metadata))
+		return nil
+	}
 	if shouldFallbackWebsocketMessageTooBigToHTTP(outcome, viaWebsocket, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 		resp.Body.Close()
 		return &responsesWSRetryableStreamError{outcome: outcome}

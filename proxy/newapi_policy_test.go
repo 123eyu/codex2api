@@ -359,6 +359,57 @@ func TestWebSocketPolicyDecisionIDUsesLogicalFrameSequence(t *testing.T) {
 	}
 }
 
+func TestOnlyExplicitUpstreamCyberPolicyDecisionIsStrikeEligible(t *testing.T) {
+	cfg := promptGuardTestConfig()
+	binding := database.PromptFilterNewAPIBinding{
+		APIKeyID: 101, PlatformCode: "gateway-a", Secret: "gateway-a-secret", Enabled: true,
+		PolicyMode: database.PromptFilterPolicyModeEnforce, PolicyProfile: database.PromptFilterPolicyProfileBalanced,
+	}
+	handler := newPromptFilterBindingTestHandler(t, cfg, []database.PromptFilterNewAPIBinding{binding})
+	body := []byte(`{"model":"gpt-5.5","input":"ordinary request"}`)
+	c := signedBoundNewAPIPolicyContext(t, "upstream-cyb-request", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, body, 101, "gateway-a", "gateway-a-secret", "")
+	setIngressRequestBodyIfAbsent(c, body)
+
+	_, _ = handler.logUpstreamCyberPolicy(c, "/v1/responses", "gpt-5.5", []byte(`{"error":{"code":"cyber_policy","message":"blocked"}}`))
+	metadata := policyDecisionMetadataFromHeaders(c.Writer.Header())
+	if metadata.ReasonCode != newAPIUpstreamCyberPolicyReasonCode || !metadata.StrikeEligible || metadata.Action != promptfilter.ActionBlock {
+		t.Fatalf("upstream CYB decision metadata = %+v", metadata)
+	}
+	if got, want := c.Writer.Header().Get("X-Codex2API-Policy-Response-Signature"), signNewAPIPolicyDecision("gateway-a-secret", metadata); got == "" || got != want {
+		t.Fatalf("upstream CYB signature = %q, want %q", got, want)
+	}
+
+	local := promptfilter.Decision{
+		Action: promptfilter.ActionBlock, Profile: promptfilter.GuardProfileStrict,
+		ReasonCode: "prompt_policy_match", StrikeEligible: true, Terminal: true,
+	}
+	localMetadata := buildNewAPIPolicyDecisionMetadataWithSecret(
+		newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8", RequestID: "local-policy-request"},
+		local, promptfilter.Verdict{Action: promptfilter.ActionBlock, FullText: "local match"}, cfg,
+		body, "/v1/responses", "gpt-5.5", "", "gateway-a-secret",
+	)
+	if localMetadata.StrikeEligible {
+		t.Fatalf("local prompt decision unexpectedly became strike eligible: %+v", localMetadata)
+	}
+}
+
+func TestOrdinaryUpstream400DoesNotEmitPolicyStrike(t *testing.T) {
+	cfg := promptGuardTestConfig()
+	binding := database.PromptFilterNewAPIBinding{
+		APIKeyID: 101, PlatformCode: "gateway-a", Secret: "gateway-a-secret", Enabled: true,
+		PolicyMode: database.PromptFilterPolicyModeEnforce, PolicyProfile: database.PromptFilterPolicyProfileBalanced,
+	}
+	handler := newPromptFilterBindingTestHandler(t, cfg, []database.PromptFilterNewAPIBinding{binding})
+	body := []byte(`{"model":"gpt-5.5","input":"ordinary request"}`)
+	c := signedBoundNewAPIPolicyContext(t, "ordinary-400-request", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, body, 101, "gateway-a", "gateway-a-secret", "")
+	setIngressRequestBodyIfAbsent(c, body)
+
+	if incidentID, accepted := handler.logUpstreamCyberPolicy(c, "/v1/responses", "gpt-5.5", []byte(`{"error":{"code":"invalid_request_error"}}`)); incidentID != "" || accepted {
+		t.Fatalf("ordinary 400 was treated as CYB: incident=%q accepted=%t", incidentID, accepted)
+	}
+	assertNoPromptPolicyPenaltyHeaders(t, c.Writer.Header())
+}
+
 func TestNewAPIPolicyDecisionAndEventSignatureGoldenVector(t *testing.T) {
 	metadata := newAPIPolicyDecisionMetadata{
 		RequestID: " req-1 ", DecisionID: " dec-1 ", EventID: " responses:7 ",

@@ -453,21 +453,22 @@ func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model 
 	if len(attempts) > 0 {
 		attempt = attempts[0]
 	}
-	return h.enqueueUpstreamCyberPolicyEvidence(c, endpoint, model, errorCode, body, attempt)
+	incidentID, accepted := h.enqueueUpstreamCyberPolicyEvidence(c, endpoint, model, errorCode, body, attempt)
+	// NewAPI owns strike counting and account punishment. Emission intentionally
+	// does not depend on the local async audit queue: a temporary Codex2API audit
+	// storage failure must not turn a verified upstream CYB into an untracked one.
+	_, _ = h.emitNewAPIUpstreamCyberPolicyDecision(c, endpoint, model, body)
+	return incidentID, accepted
 }
 
 func upstreamCyberPolicyCode(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
-	raw := string(body)
-	for _, path := range []string{"codex_error_info", "error.codex_error_info", "error.code", "code"} {
+	for _, path := range []string{"codex_error_info", "error.codex_error_info", "error.code", "error.type", "code", "type"} {
 		if value := strings.TrimSpace(gjson.GetBytes(body, path).String()); strings.EqualFold(value, "cyber_policy") {
 			return "cyber_policy"
 		}
-	}
-	if strings.Contains(strings.ToLower(raw), "cyber_policy") || strings.Contains(strings.ToLower(raw), "cyber security risk") {
-		return "cyber_policy"
 	}
 	return ""
 }

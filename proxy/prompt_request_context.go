@@ -50,6 +50,9 @@ func promptRequestSecurityState(c *gin.Context) *promptRequestSecurityContext {
 func resetPromptRequestSecurityFrame(c *gin.Context) {
 	if c != nil {
 		c.Set(promptRequestSecurityContextKey, &promptRequestSecurityContext{})
+		// A WebSocket connection carries multiple logical requests. Never let a
+		// prior turn's upstream CYB decision leak into the next turn.
+		c.Set(newAPIUpstreamCyberDecisionContextKey, nil)
 	}
 }
 
