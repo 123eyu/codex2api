@@ -881,7 +881,12 @@ function ResetCreditsSection({
       setCount(next)
       setDone(true)
       setConfirming(false)
+      // 后端已等过用量探针，此时刷新拿到的是新的用量与状态。
       onResetDone?.()
+      // 探针超时未落地（usage_refreshed=false）时补刷一次，否则进度条会停在旧值。
+      if (res.usage_refreshed === false) {
+        window.setTimeout(() => onResetDone?.(), 5000)
+      }
       // 重置消耗了一张券,重新拉取明细同步有效期列表。
       void loadDetail()
     } catch (err) {

@@ -581,8 +581,15 @@ export const api = {
     request<{ message: string; success: number; failed: number }>('/accounts/batch-update', { method: 'POST', body: JSON.stringify(data) }),
   resetAccountStatus: (id: number) =>
     request<MessageResponse>(`/accounts/${id}/reset-status`, { method: 'POST' }),
+  // usage_refreshed 表示重置后的用量探针是否在响应前跑完；false 时调用方应稍后补刷一次。
   resetCredits: (id: number) =>
-    request<{ message: string; rate_limit_reset_credits?: number }>(`/accounts/${id}/reset-credits`, { method: 'POST' }),
+    request<{
+      message: string
+      rate_limit_reset_credits?: number
+      windows_reset?: number
+      usage_refreshed?: boolean
+      status?: string
+    }>(`/accounts/${id}/reset-credits`, { method: 'POST' }),
   getResetCredits: (id: number) =>
     request<ResetCreditsDetailResponse>(`/accounts/${id}/reset-credits`),
   getAccountHealthBars: () =>
