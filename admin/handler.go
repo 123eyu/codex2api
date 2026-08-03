@@ -583,6 +583,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/:id/reset-credits", h.ResetCredits)
 	api.GET("/accounts/:id/reset-credits", h.GetResetCredits)
 	api.POST("/accounts/:id/invite", h.SendInvite)
+	api.GET("/accounts/:id/invite/eligibility", h.GetInviteEligibility)
+	api.GET("/accounts/:id/invite/tracking", h.GetInviteTracking)
 	api.GET("/accounts/:id/test", h.TestConnection)
 	api.GET("/accounts/:id/usage", h.GetAccountUsage)
 	api.POST("/accounts/:id/usage/refresh", h.RefreshAccountUsage)
@@ -852,9 +854,12 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 		if strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamGrok) {
 			channel = database.UpstreamChannelGrok
 		}
+		usingCredits := false
 		if acc, ok := runtimeByID[row.ID]; ok {
 			status = strings.ToLower(strings.TrimSpace(acc.RuntimeStatus()))
 			cooldownReason = ""
+			// 积分顶替限流：状态仍报限流（窗口客观打满），但账号照常参与调度，按可用计。
+			usingCredits = acc.UsingCredits()
 			if acc.IsGrokAPI() {
 				channel = database.UpstreamChannelGrok
 			}
@@ -870,7 +875,7 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 		case isDashboardAbnormalAccount(status):
 			counts.abnormal++
 			perChannel.abnormal++
-		case isDashboardRateLimitedAccount(status, cooldownReason):
+		case !usingCredits && isDashboardRateLimitedAccount(status, cooldownReason):
 			counts.rateLimited++
 			perChannel.rateLimited++
 		default:
@@ -901,18 +906,21 @@ func isDashboardRateLimitedAccount(status string, cooldownReason string) bool {
 // ==================== Accounts ====================
 
 type accountResponse struct {
-	ID                         int64                       `json:"id"`
-	Name                       string                      `json:"name"`
-	Email                      string                      `json:"email"`
-	EmailDomain                string                      `json:"email_domain,omitempty"`
-	ChatGPTAccountID           string                      `json:"chatgpt_account_id,omitempty"`
-	PlanType                   string                      `json:"plan_type"`
-	SubscriptionExpiresAt      string                      `json:"subscription_expires_at,omitempty"`
-	Status                     string                      `json:"status"`
-	ErrorMessage               string                      `json:"error_message,omitempty"`
-	ATOnly                     bool                        `json:"at_only"`
-	CreditEnabled              bool                        `json:"credit_enabled"`
-	CreditSkipUsageWindow      bool                        `json:"credit_skip_usage_window"`
+	ID                    int64  `json:"id"`
+	Name                  string `json:"name"`
+	Email                 string `json:"email"`
+	EmailDomain           string `json:"email_domain,omitempty"`
+	ChatGPTAccountID      string `json:"chatgpt_account_id,omitempty"`
+	PlanType              string `json:"plan_type"`
+	SubscriptionExpiresAt string `json:"subscription_expires_at,omitempty"`
+	Status                string `json:"status"`
+	ErrorMessage          string `json:"error_message,omitempty"`
+	ATOnly                bool   `json:"at_only"`
+	CreditEnabled         bool   `json:"credit_enabled"`
+	CreditSkipUsageWindow bool   `json:"credit_skip_usage_window"`
+	// UsingCredits 是与 Status 并列的独立信号：用量窗口已打满但积分顶着，
+	// 状态仍是 active（可调度），前端据此在状态徽章旁并列一个「使用积分」徽章。
+	UsingCredits               bool                        `json:"using_credits,omitempty"`
 	SkipWarmTier               bool                        `json:"skip_warm_tier"`
 	AccountType                string                      `json:"account_type,omitempty"`
 	AccessTokenType            string                      `json:"access_token_type,omitempty"`
@@ -1297,6 +1305,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			}
 			// 使用运行时状态（优先于 DB 状态）
 			resp.Status = acc.RuntimeStatus()
+			resp.UsingCredits = acc.UsingCredits()
 			acc.Mu().RLock()
 			resp.ErrorMessage = acc.ErrorMsg
 			acc.Mu().RUnlock()
@@ -1668,7 +1677,16 @@ func (h *Handler) UpdateAccountCredit(c *gin.Context) {
 
 	acc = h.store.FindByID(id)
 	if acc != nil {
-		c.JSON(http.StatusOK, gin.H{"message": "信用设置已更新", "credit_enabled": acc.CreditEnabled, "credit_skip_usage_window": acc.CreditSkipUsageWindow})
+		// 开关刚打开时账号可能已经背着用量窗口判罚。不主动释放就得干等到窗口重置，
+		// 而「发现限流了才去开开关」正是最常见的用法。
+		released := h.store.ReleaseUsageWindowCooldownForCredits(acc)
+		c.JSON(http.StatusOK, gin.H{
+			"message":                  "信用设置已更新",
+			"credit_enabled":           acc.CreditEnabled,
+			"credit_skip_usage_window": acc.CreditSkipUsageWindow,
+			"using_credits":            acc.UsingCredits(),
+			"cooldown_released":        released,
+		})
 	} else {
 		c.JSON(http.StatusOK, gin.H{"message": "信用设置已更新"})
 	}
