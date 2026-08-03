@@ -45,6 +45,8 @@ import type {
   ImagePromptTemplatePayload,
   ImagePromptTemplatesResponse,
   InviteResponse,
+  InviteEligibilityResponse,
+  InviteTrackingResponse,
   MessageResponse,
   ModelSyncResponse,
   ModelPricingOverride,
@@ -585,8 +587,25 @@ export const api = {
     request<ResetCreditsDetailResponse>(`/accounts/${id}/reset-credits`),
   getAccountHealthBars: () =>
     request<AccountHealthBarsResponse>('/accounts/health-bars'),
-  sendInvite: (id: number, data: { emails?: string[]; emails_text?: string; referral_key?: string; proxy_url?: string; max_emails?: number }) =>
+  sendInvite: (id: number, data: { emails?: string[]; emails_text?: string; program_id?: string; entrypoint?: string; proxy_url?: string; max_emails?: number }) =>
     request<InviteResponse>(`/accounts/${id}/invite`, { method: 'POST', body: JSON.stringify(data) }),
+  getInviteEligibility: (id: number, params?: { program_id?: string; entrypoint?: string; proxy_url?: string }) => {
+    const search = new URLSearchParams()
+    if (params?.program_id) search.set('program_id', params.program_id)
+    if (params?.entrypoint) search.set('entrypoint', params.entrypoint)
+    if (params?.proxy_url) search.set('proxy_url', params.proxy_url)
+    const qs = search.toString()
+    return request<InviteEligibilityResponse>(`/accounts/${id}/invite/eligibility${qs ? `?${qs}` : ''}`)
+  },
+  getInviteTracking: (id: number, params?: { program_id?: string; period?: string; limit?: number; proxy_url?: string }) => {
+    const search = new URLSearchParams()
+    if (params?.program_id) search.set('program_id', params.program_id)
+    if (params?.period) search.set('period', params.period)
+    if (typeof params?.limit === 'number') search.set('limit', String(params.limit))
+    if (params?.proxy_url) search.set('proxy_url', params.proxy_url)
+    const qs = search.toString()
+    return request<InviteTrackingResponse>(`/accounts/${id}/invite/tracking${qs ? `?${qs}` : ''}`)
+  },
   batchResetStatus: (ids: number[]) =>
     request<{ message: string; success: number; failed: number }>('/accounts/batch-reset-status', { method: 'POST', body: JSON.stringify({ ids }) }),
   batchDeleteAccounts: (ids: number[]) =>

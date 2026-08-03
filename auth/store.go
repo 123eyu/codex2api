@@ -1471,8 +1471,125 @@ func resolveGroupBaseConcurrency(groupIDs []int64, s *Store) int64 {
 	return best
 }
 
+// creditsBalanceValue 解析 wham/usage 返回的积分余额字符串（形如 "1000.0000000000"）。
+// 解析不出来按 0 处理——余额读不懂就当没有，不拿它去放行调度。
+func creditsBalanceValue(raw string) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// creditsAvailableLocked 判断账号当前是否还有可花的积分（需持有 mu 读锁）。
+//
+// CreditsValid=false 表示 wham 探针还没跑过、余额未知，这里按「没有积分」处理：
+// 宁可白等一个用量窗口，也不要把请求送进注定 429 的账号。
+// OverageLimitReached 是上游给的权威「超额额度已用尽」信号，优先于余额数字。
+func (a *Account) creditsAvailableLocked() bool {
+	if !a.CreditsValid || a.CreditsOverageLimitReached {
+		return false
+	}
+	if a.CreditsUnlimited {
+		return true
+	}
+	return a.CreditsHasCredits && creditsBalanceValue(a.CreditsBalance) > 0
+}
+
+// creditSkipsUsageWindowLocked 判断是否用积分顶替用量窗口限流。
+//
+// 两个开关只是「授权用积分顶」，真正放行还要求当下确实有积分可花：Codex 的行为是
+// 套餐额度用尽后转为消耗积分，积分归零就该恢复成真实限流，否则调度会一直把请求
+// 送给一个必然 429 的账号。
 func (a *Account) creditSkipsUsageWindowLocked() bool {
-	return a.CreditEnabled && a.CreditSkipUsageWindow
+	if !(a.CreditEnabled && a.CreditSkipUsageWindow) {
+		return false
+	}
+	return a.creditsAvailableLocked()
+}
+
+// UsingCredits 报告账号是否正在用积分顶替用量窗口限流。
+//
+// 这是与 RuntimeStatus 并列的独立信号，不是一种状态值：账号此刻的状态仍是 active
+// （确实可调度），这个标记只是解释「为什么窗口打满了还可用」。前端据此在状态徽章
+// 旁边并列一个「使用积分」徽章。
+func (a *Account) UsingCredits() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.usingCreditsLocked(time.Now())
+}
+
+// usingCreditsLocked 判断账号是否正处于「用积分顶替限流」状态：用量窗口本身已打满
+// （没有积分的话此刻就是 rate_limited / usage_exhausted），但积分可用所以仍在调度中。
+//
+// 上游驱动的 cooldown（真实 429）与 error 优先：真的被拒说明积分没顶住，
+// 此时状态已是限流/错误，不该再声称在用积分顶。
+func (a *Account) usingCreditsLocked(now time.Time) bool {
+	if !(a.CreditEnabled && a.CreditSkipUsageWindow) || !a.creditsAvailableLocked() {
+		return false
+	}
+	if a.Status == StatusError {
+		return false
+	}
+	// 上游驱动的 cooldown（真实 429）优先：真被拒说明积分没顶住。但本地用量窗口判罚
+	// 产生的 cooldown 不算——那正是积分要顶替的东西，一刀切会让徽章在最常见的场景
+	// （发现账号限流了才去开开关）永远不出现。
+	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) && !a.usageWindowCooldownLocked() {
+		return false
+	}
+	// 三条用量窗口限流路径都算：Free 7d 耗尽、premium 5h 打满、以及全套餐通用的
+	// 7d 打满（MarkUsage7dRateLimited 那条）。少算哪条，那条就会显示成普通 active。
+	return a.rawUsageExhaustedLocked() ||
+		a.rawPremium5hRateLimitedLocked(now) ||
+		a.rawUsageWindow7dExhaustedLocked(now)
+}
+
+// rawUsageExhaustedLocked 是不考虑任何跳过开关的 Free 7d 用量耗尽判定。
+func (a *Account) rawUsageExhaustedLocked() bool {
+	return a.UsagePercent7dValid && strings.EqualFold(a.PlanType, "free") && a.UsagePercent7d >= 100
+}
+
+// usageWindowCooldownLocked 判断当前 cooldown 是否由本地用量窗口判罚产生，而非上游 429。
+//
+// 两者共用 "rate_limited" 这个 reason，光看 reason 分不开。可靠的区分点是判罚时长：
+// MarkUsage7dRateLimited 直接把 CooldownUtil 设成 Reset7dAt，而上游 429 的冷却时长
+// 来自 Retry-After / 限流决策，不会正好落在 7d 重置时刻上。留 2s 容差吸收计算抖动。
+func (a *Account) usageWindowCooldownLocked() bool {
+	if a.Status != StatusCooldown {
+		return false
+	}
+	switch a.CooldownReason {
+	case "rate_limited", "rate_limited_7d", "usage_limited", "usage_limit":
+	default:
+		return false
+	}
+	if a.Reset7dAt.IsZero() {
+		return false
+	}
+	drift := a.CooldownUtil.Sub(a.Reset7dAt)
+	return drift > -2*time.Second && drift < 2*time.Second
+}
+
+// UsageWindowCooldown 报告当前 cooldown 是否由本地用量窗口判罚产生。
+func (a *Account) UsageWindowCooldown() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.usageWindowCooldownLocked()
+}
+
+// rawUsageWindow7dExhaustedLocked 判断 7d 窗口是否打满到会被 MarkUsage7dRateLimited
+// 判罚的程度（与那里的条件对齐：重置时间已过就不再判罚）。
+func (a *Account) rawUsageWindow7dExhaustedLocked(now time.Time) bool {
+	if !a.UsagePercent7dValid || a.UsagePercent7d < 100 {
+		return false
+	}
+	return a.Reset7dAt.IsZero() || a.Reset7dAt.After(now)
 }
 
 func (a *Account) recomputeEffectiveIgnoreUsageLimitStatus(global bool) {
@@ -1528,7 +1645,7 @@ func (a *Account) usageExhaustedLocked() bool {
 	if a.skipsUsageWindowLimitsLocked() {
 		return false
 	}
-	return a.UsagePercent7dValid && strings.EqualFold(a.PlanType, "free") && a.UsagePercent7d >= 100
+	return a.rawUsageExhaustedLocked()
 }
 
 // NeedsRefresh 检查 AT 是否需要刷新（过期前 5 分钟刷新）
@@ -1609,6 +1726,15 @@ func (a *Account) RuntimeStatus() string {
 	now := time.Now()
 	if a.healthTierLocked() == HealthTierBanned {
 		return "unauthorized"
+	}
+	// 用积分顶替限流时，显示仍是限流：用量窗口客观上确实打满了，谎称 active 会让人
+	// 以为额度没用完。真正的差别由并列的 UsingCredits 标记表达——前端在限流徽章后面
+	// 挂一个积分徽章，而调度侧（IsAvailable / 冷却）走的是被抑制后的判定，账号照常参与调度。
+	if a.usingCreditsLocked(now) {
+		if a.rawUsageExhaustedLocked() {
+			return "usage_exhausted"
+		}
+		return "rate_limited"
 	}
 	// Free 账号 7d 用量耗尽，优先于冷却状态展示
 	if a.usageExhaustedLocked() {
@@ -4328,6 +4454,10 @@ func (s *Store) cleanByRuntimeStatusMatch(ctx context.Context, targetStatus stri
 		if acc == nil || acc.RuntimeStatus() != targetStatus {
 			continue
 		}
+		// 正在用积分顶替限流的账号显示为限流，但实际仍在正常调度——清理会误删好账号。
+		if acc.UsingCredits() {
+			continue
+		}
 		if match != nil && !match(acc) {
 			continue
 		}
@@ -4374,6 +4504,10 @@ func (s *Store) CleanRateLimitedManual(ctx context.Context) int {
 		}
 		status := acc.RuntimeStatus()
 		if status != "rate_limited" && status != "rate_limited_5h" && status != "rate_limited_7d" && status != "usage_exhausted" {
+			continue
+		}
+		// 同上：积分顶着的账号只是显示为限流，仍可正常调度，不该被"清理限流账号"删掉。
+		if acc.UsingCredits() {
 			continue
 		}
 
@@ -6928,6 +7062,30 @@ func (s *Store) ClearCooldown(acc *Account) {
 	if err := s.db.ClearError(ctx, acc.DBID); err != nil {
 		log.Printf("[账号 %d] 清理账号状态失败: %v", acc.DBID, err)
 	}
+}
+
+// ReleaseUsageWindowCooldownForCredits 在积分门打开后释放由本地用量窗口判罚产生的 cooldown。
+//
+// 为什么需要：信用开关此前只阻止「进入」用量窗口 cooldown（MarkUsage7dRateLimited 早退），
+// 对已经在 cooldown 里的账号无效。而用户最自然的用法恰恰是「发现账号限流了才去开开关」，
+// 那时判罚已经落下，不主动释放就得干等到窗口重置——开关看起来完全没用。
+//
+// 只释放本地用量判罚（usageWindowCooldownLocked 用判罚时长与 Reset7dAt 对齐来识别），
+// 上游 429 的冷却不动。万一识别错放行了，上游会再拒一次并重新进入冷却，代价是一个请求。
+// 返回是否真的释放了。
+func (s *Store) ReleaseUsageWindowCooldownForCredits(acc *Account) bool {
+	if s == nil || acc == nil {
+		return false
+	}
+	acc.mu.RLock()
+	release := acc.creditSkipsUsageWindowLocked() && acc.usageWindowCooldownLocked()
+	acc.mu.RUnlock()
+	if !release {
+		return false
+	}
+	s.ClearCooldown(acc)
+	log.Printf("[账号 %d] 积分可用，已释放用量窗口限流冷却", acc.DBID)
+	return true
 }
 
 // ClearUsageLimitCooldownSince clears only a usage/rate-limit cooldown that

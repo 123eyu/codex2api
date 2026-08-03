@@ -475,6 +475,9 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 			usage.Credits.Unlimited,
 			usage.Credits.OverageLimitReached,
 		)
+		// 余额刚被充上（此前为 0 而账号已背着用量窗口判罚）时立刻放回调度，
+		// 不必等窗口重置。非本地用量判罚的冷却不受影响。
+		store.ReleaseUsageWindowCooldownForCredits(account)
 	}
 
 	w5h, w7d := pickClassifiedWhamWindows(usage.RateLimit.PrimaryWindow, usage.RateLimit.SecondaryWindow, usage.PlanType, observedAt)

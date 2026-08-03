@@ -746,12 +746,22 @@ export default function Accounts() {
   // 由路由驱动（/accounts vs /accounts/grok），刷新浏览器后停留在当前视图。
   const location = useLocation();
   const navigate = useNavigate();
-  const providerView: "codex" | "grok" = location.pathname.replace(/\/+$/, "").endsWith("/accounts/grok")
+  const normalizedPath = location.pathname.replace(/\/+$/, "");
+  const providerView: "codex" | "grok" = normalizedPath.endsWith("/accounts/grok")
     ? "grok"
     : "codex";
   const setProviderView = useCallback(
     (view: "codex" | "grok") => {
       navigate(view === "grok" ? "/accounts/grok" : "/accounts");
+    },
+    [navigate],
+  );
+  // Codex 邀请视图同样由路由驱动（/accounts/invite），与 Grok 视图一致：
+  // 可直接分享链接、刷新浏览器停在原处、浏览器返回键能退回账号列表。
+  const showInvite = normalizedPath.endsWith("/accounts/invite");
+  const setShowInvite = useCallback(
+    (open: boolean) => {
+      navigate(open ? "/accounts/invite" : "/accounts");
     },
     [navigate],
   );
@@ -907,7 +917,6 @@ export default function Accounts() {
     getInitialAnalysisVisibility,
   );
   const [showRecycleBin, setShowRecycleBin] = useState(false);
-  const [showInvite, setShowInvite] = useState(false);
   const [showEmailDomainTags, setShowEmailDomainTags] = useState(
     getInitialEmailDomainVisibility,
   );
@@ -4363,6 +4372,7 @@ export default function Accounts() {
           {showInvite ? (
             <CodexInviteView
               accounts={accounts}
+              loading={loading}
               onClose={() => setShowInvite(false)}
             />
           ) : null}
@@ -5796,6 +5806,7 @@ export default function Accounts() {
                                       }
                                       errorMessage={account.error_message}
                                     />
+                                    <UsingCreditsBadge account={account} />
                                     <AccountStatusCountdown account={account} />
                                     {(account.active_requests ?? 0) > 0 && (
                                       <span
@@ -10416,6 +10427,26 @@ function getSchedulerPriority(account: AccountRow): number {
     : 0;
 }
 
+// UsingCreditsBadge 紧跟在限流徽章后面：账号显示仍是「限流」（用量窗口客观上确实打满了），
+// 这个积分徽章表示"正在用积分顶替限流，因此仍在参与调度"。
+// 后端 using_credits 已经算过全部前提（两个开关 + 当下确有余额 + 窗口真打满），
+// 这里只负责显示，不重算，避免两边判定漂移。
+function UsingCreditsBadge({ account }: { account: AccountRow }) {
+  const { t } = useTranslation();
+  if (!account.using_credits) return null;
+  // 纯图标：余额已经在邮箱下方的徽章里显示过，这里再写一遍是重复信息，
+  // 而且会把「限流 | 7d」和倒计时之间撑开。语义靠 title / aria-label 承载。
+  return (
+    <span
+      className="inline-flex size-5 shrink-0 items-center justify-center rounded-md border border-teal-500/30 bg-teal-500/10 text-teal-700 dark:text-teal-300"
+      title={t("accounts.usingCreditsBadgeTooltip")}
+      aria-label={t("accounts.usingCreditsBadge")}
+    >
+      <Coins className="size-3" />
+    </span>
+  );
+}
+
 function SchedulerPriorityBadge({ account }: { account: AccountRow }) {
   const { t } = useTranslation();
   const priority = getSchedulerPriority(account);
@@ -11811,6 +11842,7 @@ function AccountMobileCard({
               </span>
               <PlanBadge planType={account.plan_type} />
               <SchedulerPriorityBadge account={account} />
+              <UsingCreditsBadge account={account} />
               <AccountStatusCountdown account={account} />
               <ExpiryBadge
                 expiresAt={account.subscription_expires_at}
@@ -12126,7 +12158,8 @@ function AccountMobileCard({
                   detail={getAccountRateLimitWindow(account) ?? undefined}
                   errorMessage={account.error_message}
                 />
-                <div className="mt-1 flex min-h-6 items-center justify-end">
+                <div className="mt-1 flex min-h-6 flex-wrap items-center justify-end gap-1.5">
+                  <UsingCreditsBadge account={account} />
                   <AccountStatusCountdown account={account} />
                 </div>
               </div>
