@@ -10531,6 +10531,10 @@ function isPremiumUsagePlan(planType?: string): boolean {
 type RateLimitWindow = "5h" | "7d";
 
 function isRateLimitedAccount(account: AccountRow): boolean {
+  // 积分顶替限流的账号：状态徽章仍写「限流」（用量窗口客观上确实打满了），但调度侧
+  // 照常放行。健康分类与筛选按"可用"计，否则一个正在正常干活的账号会被算进限流数、
+  // 被「限流」筛选捞出来，与旁边的积分徽章互相矛盾。
+  if (account.using_credits) return false;
   return getAccountRateLimitWindow(account) !== null;
 }
 
@@ -10620,7 +10624,11 @@ function getRateLimitedWindowStats(accounts: AccountRow[]): {
 } {
   const stats = accounts.reduce(
     (stats, account) => {
-      const window = getAccountRateLimitWindow(account);
+      // 走 isRateLimitedAccount 而不是直接取窗口：积分顶替限流的账号按可用计，
+      // 这样 5h + 7d 仍然等于总限流数，不会比汇总里的「限流」多出几个。
+      const window = isRateLimitedAccount(account)
+        ? getAccountRateLimitWindow(account)
+        : null;
       if (!window) {
         return stats;
       }
@@ -13229,17 +13237,20 @@ function getAccountStatusCountdownUntil(
   account: AccountRow,
 ): string | undefined {
   const status = account.status;
+  const rateLimited =
+    status === "rate_limited" ||
+    status === "rate_limited_5h" ||
+    status === "rate_limited_7d";
   if (
     account.cooldown_until &&
-    (status === "rate_limited" ||
-      status === "rate_limited_5h" ||
-      status === "rate_limited_7d" ||
-      status === "error" ||
-      status === "cooldown")
+    (rateLimited || status === "error" || status === "cooldown")
   ) {
     return account.cooldown_until;
   }
-  if (status === "quota_paused") {
+  // 限流态但没有 cooldown：积分顶替限流会主动释放本地用量判罚（cooldown_until 被清空），
+  // premium 5h 打满也是直接由用量窗口判定、从不落 cooldown。这两种情况下倒计时改用窗口
+  // 重置时间——徽章上写着「限流 | 7d」，右边就该显示它多久恢复，而不是整个消失。
+  if (rateLimited || status === "quota_paused") {
     const window = getAccountRateLimitWindow(account);
     if (window === "7d") {
       return account.reset_7d_at;

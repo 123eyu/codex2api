@@ -165,6 +165,9 @@ type Account struct {
 	CreditsUnlimited           bool
 	CreditsOverageLimitReached bool
 	CreditsValid               bool
+	// creditsPersistedKey 是最近一次成功落库的积分快照指纹，用于跳过无变化的写库。
+	// 只比对四个业务字段，不含时间戳——否则每次探针都会写一次库。
+	creditsPersistedKey string
 	// resetCreditsProbedAt 记录最近一次成功 wham 用量探针的时间。
 	// 「主动重置次数」只能通过 wham 探针刷新（普通 /responses 流量不携带该字段），
 	// 因此用它独立判断重置次数是否过期，避免活跃账号因用量快照一直被流量刷新而长期不探针。
@@ -1940,6 +1943,104 @@ func (a *Account) GetCreditBalance() (balance string, hasCredits, unlimited, ove
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.CreditsBalance, a.CreditsHasCredits, a.CreditsUnlimited, a.CreditsOverageLimitReached, a.CreditsValid
+}
+
+// CreditBalanceSnapshot 是落库到 credentials["codex_credits"] 的积分快照。
+// 积分只能由 wham 探针刷新（普通 /responses 流量不带 credits），不落库的话重启后
+// CreditsValid 归零 → 账号被当成「没积分」→ 积分顶替限流失效、且会被「清理限流账号」
+// 误删，直到下一轮 wham 探针落地才恢复。
+type CreditBalanceSnapshot struct {
+	Balance             string    `json:"balance"`
+	HasCredits          bool      `json:"has_credits"`
+	Unlimited           bool      `json:"unlimited"`
+	OverageLimitReached bool      `json:"overage_limit_reached"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+// creditBalanceKey 是快照的比对指纹（不含时间戳）。
+func creditBalanceKey(balance string, hasCredits, unlimited, overageReached bool) string {
+	return fmt.Sprintf("%s|%t|%t|%t", balance, hasCredits, unlimited, overageReached)
+}
+
+// MarshalCreditBalanceSnapshot 序列化积分快照，供落库使用。
+func MarshalCreditBalanceSnapshot(snap CreditBalanceSnapshot) (string, error) {
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// RestoreCreditBalanceFromJSON 用库里的积分快照回填账号（重启后恢复）。
+// 空串/解析失败/未探测过（三个布尔全 false 且余额为空）都视为无快照，返回 false，
+// 保持 CreditsValid=false 的「未知」语义，不会凭空造出一个可用余额。
+func (a *Account) RestoreCreditBalanceFromJSON(raw string) bool {
+	if a == nil {
+		return false
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	var snap CreditBalanceSnapshot
+	if err := json.Unmarshal([]byte(raw), &snap); err != nil {
+		return false
+	}
+	balance := strings.TrimSpace(snap.Balance)
+	if balance == "" && !snap.HasCredits && !snap.Unlimited && !snap.OverageLimitReached {
+		return false
+	}
+	a.mu.Lock()
+	a.CreditsBalance = snap.Balance
+	a.CreditsHasCredits = snap.HasCredits
+	a.CreditsUnlimited = snap.Unlimited
+	a.CreditsOverageLimitReached = snap.OverageLimitReached
+	a.CreditsValid = true
+	// 恢复值本来自库里，指纹一并对齐，避免启动后第一次探针又写一遍同样的内容。
+	a.creditsPersistedKey = creditBalanceKey(snap.Balance, snap.HasCredits, snap.Unlimited, snap.OverageLimitReached)
+	a.mu.Unlock()
+	return true
+}
+
+// PersistCreditBalance 写入积分快照并落库（值无变化时跳过写库）。
+// store 为 nil（单测/无库场景）时只更新内存，行为与 SetCreditBalance 一致。
+func (s *Store) PersistCreditBalance(acc *Account, balance string, hasCredits, unlimited, overageReached bool) {
+	if acc == nil {
+		return
+	}
+	acc.SetCreditBalance(balance, hasCredits, unlimited, overageReached)
+	if s == nil || s.db == nil {
+		return
+	}
+
+	key := creditBalanceKey(balance, hasCredits, unlimited, overageReached)
+	acc.mu.Lock()
+	if acc.creditsPersistedKey == key {
+		acc.mu.Unlock()
+		return
+	}
+	acc.creditsPersistedKey = key
+	acc.mu.Unlock()
+
+	raw, err := MarshalCreditBalanceSnapshot(CreditBalanceSnapshot{
+		Balance:             balance,
+		HasCredits:          hasCredits,
+		Unlimited:           unlimited,
+		OverageLimitReached: overageReached,
+		UpdatedAt:           time.Now(),
+	})
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err = s.db.UpdateCredentials(ctx, acc.DBID, map[string]interface{}{"codex_credits": raw})
+	}
+	if err != nil {
+		// 落库失败就清掉指纹，让下一次探针重试，而不是把"已持久化"错记下来。
+		acc.mu.Lock()
+		acc.creditsPersistedKey = ""
+		acc.mu.Unlock()
+		log.Printf("[账号 %d] 持久化积分快照失败: %v", acc.DBID, err)
+	}
 }
 
 // MarkResetCreditsProbed 记录最近一次成功 wham 用量探针的时间。
@@ -4221,6 +4322,9 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 			account.SetUsageSnapshot5hAt(parsed, resetAt, updatedAt)
 		}
 	}
+	// 恢复积分余额快照：积分只有 wham 探针能刷，不恢复的话重启后账号会被判成
+	// 「没积分」——积分顶替限流失效，还会被「清理限流账号」当成真限流删掉。
+	account.RestoreCreditBalanceFromJSON(row.GetCredential("codex_credits"))
 	if threshold, ok := row.GetCredentialFloat64("auto_pause_5h_threshold"); ok {
 		account.AutoPause5hThreshold = normalizeQuotaAutoPauseThreshold(threshold)
 	}

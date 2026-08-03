@@ -123,6 +123,44 @@ func TestSummarizeDashboardAccountsMatchesAccountPageBuckets(t *testing.T) {
 	}
 }
 
+// 积分顶着限流的账号 RuntimeStatus 仍是 rate_limited（用量窗口客观上打满了），
+// 但它照常参与调度，仪表盘该把它算进「可用」而不是「限流」。
+func TestSummarizeDashboardAccountsCountsCreditBackedAsNormal(t *testing.T) {
+	rows := []*database.AccountRow{
+		{ID: 1, Status: "active", Enabled: true}, // 积分顶替限流
+		{ID: 2, Status: "active", Enabled: true}, // 真限流
+	}
+
+	usingCredits := &auth.Account{
+		DBID:                  1,
+		AccessToken:           "at-1",
+		Status:                auth.StatusReady,
+		PlanType:              "plus",
+		UsagePercent5h:        100,
+		UsagePercent5hValid:   true,
+		Reset5hAt:             time.Now().Add(2 * time.Hour),
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+		CreditsValid:          true,
+		CreditsHasCredits:     true,
+		CreditsBalance:        "1000.0000000000",
+	}
+	if !usingCredits.UsingCredits() {
+		t.Fatalf("fixture is not using credits; RuntimeStatus=%q", usingCredits.RuntimeStatus())
+	}
+	if got := usingCredits.RuntimeStatus(); got != "rate_limited" {
+		t.Fatalf("RuntimeStatus = %q, want rate_limited", got)
+	}
+
+	rateLimited := &auth.Account{DBID: 2, Status: auth.StatusReady, AccessToken: "at-2"}
+	rateLimited.SetCooldownWithReason(time.Hour, "rate_limited")
+
+	got, _ := summarizeDashboardAccounts(rows, []*auth.Account{usingCredits, rateLimited})
+	if got.total != 2 || got.normal != 1 || got.rateLimited != 1 {
+		t.Fatalf("counts = %+v, want total=2 normal=1 rateLimited=1", got)
+	}
+}
+
 func TestNormalizeBackgroundUploadMedia(t *testing.T) {
 	tests := []struct {
 		name        string

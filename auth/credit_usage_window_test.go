@@ -392,3 +392,82 @@ func TestIgnoreUsageLimitStatusDoesNotReportUsingCredits(t *testing.T) {
 		t.Error("UsingCredits() = true, want false — ignore-usage-limit is a separate switch, not credits")
 	}
 }
+
+// 积分快照必须能穿过重启：只留在内存的话，重启后账号被判成「没积分」，
+// 积分顶替限流失效，还会被「清理限流账号」当成真限流删掉。
+func TestCreditBalanceSnapshotRoundTrip(t *testing.T) {
+	raw, err := MarshalCreditBalanceSnapshot(CreditBalanceSnapshot{
+		Balance:    "981.7471800000",
+		HasCredits: true,
+		UpdatedAt:  time.Unix(1754200000, 0),
+	})
+	if err != nil {
+		t.Fatalf("MarshalCreditBalanceSnapshot: %v", err)
+	}
+
+	// 重启后的账号：两个开关来自库里，积分快照未恢复时按"没积分"处理。
+	acc := plus5hExhausted()
+	acc.CreditEnabled = true
+	acc.CreditSkipUsageWindow = true
+	if acc.UsingCredits() {
+		t.Fatal("UsingCredits() = true before restore, want false — an unprobed balance is not credits")
+	}
+
+	if !acc.RestoreCreditBalanceFromJSON(raw) {
+		t.Fatal("RestoreCreditBalanceFromJSON() = false, want true")
+	}
+	balance, hasCredits, unlimited, overage, ok := acc.GetCreditBalance()
+	if !ok || balance != "981.7471800000" || !hasCredits || unlimited || overage {
+		t.Fatalf("GetCreditBalance() = %q/%t/%t/%t/%t, want 981.7471800000/true/false/false/true",
+			balance, hasCredits, unlimited, overage, ok)
+	}
+	if !acc.UsingCredits() {
+		t.Error("UsingCredits() = false after restore, want true — the restored balance must keep the override alive")
+	}
+	if got := acc.RuntimeStatus(); got != "rate_limited" {
+		t.Errorf("RuntimeStatus() = %q, want rate_limited — 状态仍显示限流，只是被积分顶着", got)
+	}
+}
+
+// 没有快照 / 快照损坏 / 全空快照都不能凭空造出一个可用余额。
+func TestRestoreCreditBalanceRejectsEmptyOrInvalid(t *testing.T) {
+	empty, err := MarshalCreditBalanceSnapshot(CreditBalanceSnapshot{})
+	if err != nil {
+		t.Fatalf("MarshalCreditBalanceSnapshot: %v", err)
+	}
+	for _, raw := range []string{"", "   ", "not-json", empty} {
+		acc := plus5hExhausted()
+		acc.CreditEnabled = true
+		acc.CreditSkipUsageWindow = true
+		if acc.RestoreCreditBalanceFromJSON(raw) {
+			t.Errorf("RestoreCreditBalanceFromJSON(%q) = true, want false", raw)
+		}
+		if _, _, _, _, ok := acc.GetCreditBalance(); ok {
+			t.Errorf("RestoreCreditBalanceFromJSON(%q) marked the balance as probed", raw)
+		}
+		if acc.UsingCredits() {
+			t.Errorf("RestoreCreditBalanceFromJSON(%q) enabled the credits override", raw)
+		}
+	}
+}
+
+// 余额为 0 的快照要能恢复：它是「积分已用尽」的权威结论，恢复后应恢复真实限流，
+// 而不是退回「未探测」——否则重启后又会把请求送进注定 429 的账号。
+func TestRestoreCreditBalanceKeepsDrainedBalance(t *testing.T) {
+	raw, err := MarshalCreditBalanceSnapshot(CreditBalanceSnapshot{Balance: "0", HasCredits: true})
+	if err != nil {
+		t.Fatalf("MarshalCreditBalanceSnapshot: %v", err)
+	}
+	acc := plus5hExhausted()
+	acc.CreditEnabled = true
+	acc.CreditSkipUsageWindow = true
+	if !acc.RestoreCreditBalanceFromJSON(raw) {
+		t.Fatal("RestoreCreditBalanceFromJSON() = false, want true for a drained balance")
+	}
+	if acc.UsingCredits() {
+		t.Error("UsingCredits() = true for a zero balance, want false")
+	}
+	if acc.IsAvailable() {
+		t.Error("IsAvailable() = true for a drained credit account, want false")
+	}
+}

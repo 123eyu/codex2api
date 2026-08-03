@@ -845,9 +845,12 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 		if strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamGrok) {
 			channel = database.UpstreamChannelGrok
 		}
+		usingCredits := false
 		if acc, ok := runtimeByID[row.ID]; ok {
 			status = strings.ToLower(strings.TrimSpace(acc.RuntimeStatus()))
 			cooldownReason = ""
+			// 积分顶替限流：状态仍报限流（窗口客观打满），但账号照常参与调度，按可用计。
+			usingCredits = acc.UsingCredits()
 			if acc.IsGrokAPI() {
 				channel = database.UpstreamChannelGrok
 			}
@@ -863,7 +866,7 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 		case isDashboardAbnormalAccount(status):
 			counts.abnormal++
 			perChannel.abnormal++
-		case isDashboardRateLimitedAccount(status, cooldownReason):
+		case !usingCredits && isDashboardRateLimitedAccount(status, cooldownReason):
 			counts.rateLimited++
 			perChannel.rateLimited++
 		default:

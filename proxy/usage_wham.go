@@ -469,7 +469,9 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 
 	// 记录 credits 积分余额快照（wham 的 credits 对象，零额度成本）。
 	if usage.Credits != nil {
-		account.SetCreditBalance(
+		// 走 store 落库版本：积分只有 wham 能刷，只留在内存的话重启后就归零。
+		store.PersistCreditBalance(
+			account,
 			usage.Credits.Balance,
 			usage.Credits.HasCredits,
 			usage.Credits.Unlimited,
