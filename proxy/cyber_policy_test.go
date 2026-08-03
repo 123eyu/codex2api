@@ -14,6 +14,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // TestUpstreamCyberPolicyCodeDetectsResponseFailed 覆盖 #258：cyber_policy 封禁在
@@ -59,6 +60,43 @@ func TestUpstreamCyberPolicyCodeDetectsResponseFailed(t *testing.T) {
 				t.Fatalf("upstreamCyberPolicyCode = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestExplicitCyberPolicyReturnsChineseBanWarningOnlyForCYB(t *testing.T) {
+	cybPayload := []byte(`{"type":"response.failed","response":{"error":{"code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request"}}}`)
+	if !isExplicitUpstreamCyberPolicy(cybPayload) {
+		t.Fatal("explicit cyber_policy response was not recognized")
+	}
+	outcome := classifyResponseFailedOutcome(cybPayload)
+	if outcome.failureMessage != upstreamCyberPolicyUserMessage {
+		t.Fatalf("CYB stream message = %q, want %q", outcome.failureMessage, upstreamCyberPolicyUserMessage)
+	}
+	wsErr := responsesWSUpstreamAPIError(http.StatusBadRequest, responseFailedErrorBody(cybPayload))
+	if wsErr.Message != upstreamCyberPolicyUserMessage {
+		t.Fatalf("CYB websocket message = %q, want %q", wsErr.Message, upstreamCyberPolicyUserMessage)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	(&Handler{}).sendUpstreamError(ctx, http.StatusBadRequest, responseFailedErrorBody(cybPayload))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("CYB HTTP status = %d, want 400", recorder.Code)
+	}
+	if got := gjson.GetBytes(recorder.Body.Bytes(), "error.message").String(); got != upstreamCyberPolicyUserMessage {
+		t.Fatalf("CYB HTTP message = %q, want %q", got, upstreamCyberPolicyUserMessage)
+	}
+	if got := gjson.GetBytes(recorder.Body.Bytes(), "error.code").String(); got != newAPIUpstreamCyberPolicyReasonCode {
+		t.Fatalf("CYB HTTP error code = %q", got)
+	}
+
+	messageOnly := []byte(`{"error":{"message":"This content was flagged for possible cybersecurity risk"}}`)
+	if isExplicitUpstreamCyberPolicy(messageOnly) {
+		t.Fatal("message-only upstream error was treated as explicit CYB")
+	}
+	ordinary := responsesWSUpstreamAPIError(http.StatusBadRequest, messageOnly)
+	if ordinary.Message == upstreamCyberPolicyUserMessage {
+		t.Fatal("ordinary upstream error received the CYB ban warning")
 	}
 }
 

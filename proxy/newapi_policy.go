@@ -694,7 +694,11 @@ func newAPIUpstreamCyberPolicyDecision(c *gin.Context) (newAPIPolicyDecisionMeta
 }
 
 func newAPIPolicyDecisionAPIError(metadata newAPIPolicyDecisionMetadata) *api.APIError {
-	apiErr := api.NewAPIError(api.ErrorCode("request_policy_violation"), "请求违反安全策略，本次请求已被拒绝", api.ErrorTypeInvalidRequest)
+	message := "请求违反安全策略，本次请求已被拒绝"
+	if metadata.ReasonCode == newAPIUpstreamCyberPolicyReasonCode {
+		message = upstreamCyberPolicyUserMessage
+	}
+	apiErr := api.NewAPIError(api.ErrorCode("request_policy_violation"), message, api.ErrorTypeInvalidRequest)
 	details := gin.H{
 		"request_id":         metadata.RequestID,
 		"decision_id":        metadata.DecisionID,

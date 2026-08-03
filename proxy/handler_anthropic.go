@@ -377,6 +377,10 @@ func (h *Handler) Messages(c *gin.Context) {
 				lastBody = errBody
 				continue
 			}
+			if isExplicitUpstreamCyberPolicy(errBody) {
+				sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", upstreamCyberPolicyUserMessage)
+				return
+			}
 
 			// 最终错误：用 Anthropic 格式返回。
 			// 上游账号 401（OAuth token 失效）是账号侧问题，不是下游客户端凭证无效；

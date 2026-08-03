@@ -13,6 +13,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+const upstreamCyberPolicyUserMessage = "此内容因可能存在网络安全风险而被标记。如果你认为这是误判，请重新表述请求。本次 CYB 触发已记录；7 天内累计第 2 次及后续触发将封禁账号。"
+
 // promptFilterFullTextMaxRunes limits the persisted redacted blocked-request text preview.
 const promptFilterFullTextMaxRunes = 32000
 
@@ -471,6 +473,10 @@ func upstreamCyberPolicyCode(body []byte) string {
 		}
 	}
 	return ""
+}
+
+func isExplicitUpstreamCyberPolicy(body []byte) bool {
+	return upstreamCyberPolicyCode(responseFailedErrorBody(body)) != ""
 }
 
 func populatePromptFilterAPIKeyMeta(c *gin.Context, input *database.PromptFilterLogInput) {
