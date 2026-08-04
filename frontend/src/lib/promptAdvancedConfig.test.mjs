@@ -288,6 +288,35 @@ test('Prompt Filter exposes explicit review scope and live connection testing', 
   }
 })
 
+test('terminal enforcement exposes clean-review model exemptions', () => {
+  const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
+  const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))
+  assert.match(source, /terminal_bypass_models: \['codex-auto-review'\]/)
+  assert.match(source, /terminalBypassModelsText/)
+  assert.match(source, /update\('enforcement', \{ terminal_bypass_models:/)
+  assert.match(zh.promptFilter.terminalBypassModelsHint, /二审明确通过后可以清除本地终局命中/)
+  assert.match(source, /conversation_lock_enabled: true/)
+  assert.match(source, /update\('enforcement', \{ conversation_lock_enabled: next \}\)/)
+  assert.match(source, /<SwitchField[^>]+conversationLockEnabled/)
+  assert.doesNotMatch(source, /<SwitchRow/)
+  assert.match(zh.promptFilter.help.conversationLockEnabled, /上游明确返回 cyber_policy/)
+})
+
+test('Moderations review exposes sub2api-compatible category thresholds', () => {
+  const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
+  const requiredFragments = [
+    'moderation_thresholds',
+    "'harassment/threatening': 0.90",
+    "'self-harm/intent': 0.85",
+    "'sexual/minors': 0.65",
+    'resetModerationThresholds',
+    'reviewTestResult.highest_category',
+  ]
+  for (const fragment of requiredFragments) {
+    assert.equal(source.includes(fragment), true, `Moderations threshold control is missing: ${fragment}`)
+  }
+})
+
 test('adaptive model review is a single switch with an explicit low-latency safety policy', () => {
   const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
   const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))

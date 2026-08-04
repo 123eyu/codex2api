@@ -139,24 +139,31 @@ Markdown, commentary, or a flagged field.`
 // installations do not need a database migration and API keys remain in their
 // existing secret-bearing column.
 type ReviewAdapterConfig struct {
-	RequestMode            string  `json:"request_mode"`
-	Scope                  string  `json:"scope"`
-	SystemPrompt           string  `json:"system_prompt"`
-	UserPromptTemplate     string  `json:"user_prompt_template"`
-	PayloadTemplate        string  `json:"payload_template"`
-	ConfidenceThreshold    float64 `json:"confidence_threshold"`
-	MaxConcurrent          int     `json:"max_concurrent"`
-	MaxTextLength          int     `json:"max_text_length"`
-	CircuitBreakerFailures int     `json:"circuit_breaker_failures"`
-	CircuitBreakerSeconds  int     `json:"circuit_breaker_seconds"`
+	RequestMode            string             `json:"request_mode"`
+	Scope                  string             `json:"scope"`
+	SystemPrompt           string             `json:"system_prompt"`
+	UserPromptTemplate     string             `json:"user_prompt_template"`
+	PayloadTemplate        string             `json:"payload_template"`
+	ConfidenceThreshold    float64            `json:"confidence_threshold"`
+	ModerationThresholds   map[string]float64 `json:"moderation_thresholds"`
+	MaxConcurrent          int                `json:"max_concurrent"`
+	MaxTextLength          int                `json:"max_text_length"`
+	CircuitBreakerFailures int                `json:"circuit_breaker_failures"`
+	CircuitBreakerSeconds  int                `json:"circuit_breaker_seconds"`
 }
 
 type ReviewOutcome struct {
-	Flagged    bool    `json:"flagged"`
-	Confidence float64 `json:"confidence"`
-	Reason     string  `json:"reason,omitempty"`
-	Model      string  `json:"model"`
-	Endpoint   string  `json:"endpoint,omitempty"`
+	Flagged              bool               `json:"flagged"`
+	Confidence           float64            `json:"confidence"`
+	Reason               string             `json:"reason,omitempty"`
+	Model                string             `json:"model"`
+	Endpoint             string             `json:"endpoint,omitempty"`
+	HighestCategory      string             `json:"highest_category,omitempty"`
+	DecisionCategory     string             `json:"decision_category,omitempty"`
+	DecisionScore        float64            `json:"decision_score"`
+	DecisionThreshold    float64            `json:"decision_threshold"`
+	CategoryScores       map[string]float64 `json:"category_scores,omitempty"`
+	ModerationThresholds map[string]float64 `json:"moderation_thresholds,omitempty"`
 }
 
 type ReviewClient struct {
@@ -176,7 +183,44 @@ type reviewResponse struct {
 }
 
 type reviewResult struct {
-	Flagged bool `json:"flagged"`
+	CategoryScores map[string]float64 `json:"category_scores"`
+}
+
+var reviewModerationCategoryOrder = []string{
+	"harassment",
+	"harassment/threatening",
+	"hate",
+	"hate/threatening",
+	"illicit",
+	"illicit/violent",
+	"self-harm",
+	"self-harm/intent",
+	"self-harm/instructions",
+	"sexual",
+	"sexual/minors",
+	"violence",
+	"violence/graphic",
+}
+
+// DefaultReviewModerationThresholds mirrors the category-specific policy used
+// by sub2api. Moderations responses are evaluated from category_scores instead
+// of trusting the provider's single flagged boolean.
+func DefaultReviewModerationThresholds() map[string]float64 {
+	return map[string]float64{
+		"harassment":             0.98,
+		"harassment/threatening": 0.90,
+		"hate":                   0.65,
+		"hate/threatening":       0.65,
+		"illicit":                0.95,
+		"illicit/violent":        0.95,
+		"self-harm":              0.65,
+		"self-harm/intent":       0.85,
+		"self-harm/instructions": 0.65,
+		"sexual":                 0.65,
+		"sexual/minors":          0.65,
+		"violence":               0.95,
+		"violence/graphic":       0.95,
+	}
 }
 
 type chatReviewResponse struct {
@@ -241,6 +285,7 @@ func NormalizeReviewAdapterConfig(cfg ReviewAdapterConfig) ReviewAdapterConfig {
 	if cfg.ConfidenceThreshold <= 0 || cfg.ConfidenceThreshold > 1 {
 		cfg.ConfidenceThreshold = DefaultReviewConfidence
 	}
+	cfg.ModerationThresholds = normalizeReviewModerationThresholds(cfg.ModerationThresholds)
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = DefaultReviewMaxConcurrent
 	}
@@ -785,22 +830,77 @@ func decodeModerationReviewResponse(body []byte, cfg ReviewConfig) (ReviewOutcom
 	if len(decoded.Results) == 0 {
 		return ReviewOutcome{}, fmt.Errorf("review response missing results")
 	}
-	flagged := false
+	thresholds := normalizeReviewModerationThresholds(cfg.Adapter.ModerationThresholds)
+	scores := make(map[string]float64)
 	for _, result := range decoded.Results {
-		if result.Flagged {
-			flagged = true
-			break
+		for category, score := range result.CategoryScores {
+			if current, exists := scores[category]; !exists || score > current {
+				scores[category] = score
+			}
 		}
 	}
-	confidence := 0.0
-	if flagged {
-		confidence = 1
+	flagged, highestCategory, confidence, matchedCategory := evaluateReviewModerationScores(scores, thresholds)
+	decisionCategory := highestCategory
+	if matchedCategory != "" {
+		decisionCategory = matchedCategory
+	}
+	decisionScore := scores[decisionCategory]
+	decisionThreshold := thresholds[decisionCategory]
+	reason := ""
+	if decisionCategory != "" {
+		operator := "<"
+		if flagged {
+			operator = ">="
+		}
+		reason = fmt.Sprintf("moderation decision: %s %.4f %s %.4f", decisionCategory, decisionScore, operator, decisionThreshold)
 	}
 	model := strings.TrimSpace(decoded.Model)
 	if model == "" {
 		model = cfg.Model
 	}
-	return ReviewOutcome{Flagged: flagged, Confidence: confidence, Model: model}, nil
+	return ReviewOutcome{
+		Flagged: flagged, Confidence: confidence, Reason: reason, Model: model,
+		HighestCategory: highestCategory, DecisionCategory: decisionCategory,
+		DecisionScore: decisionScore, DecisionThreshold: decisionThreshold,
+		CategoryScores: scores, ModerationThresholds: thresholds,
+	}, nil
+}
+
+func normalizeReviewModerationThresholds(overrides map[string]float64) map[string]float64 {
+	thresholds := DefaultReviewModerationThresholds()
+	for _, category := range reviewModerationCategoryOrder {
+		value, ok := overrides[category]
+		if !ok {
+			continue
+		}
+		if value < 0 {
+			value = 0
+		} else if value > 1 {
+			value = 1
+		}
+		thresholds[category] = value
+	}
+	return thresholds
+}
+
+func evaluateReviewModerationScores(scores, thresholds map[string]float64) (flagged bool, highestCategory string, highestScore float64, matchedCategory string) {
+	for _, category := range reviewModerationCategoryOrder {
+		score, exists := scores[category]
+		if !exists {
+			continue
+		}
+		if highestCategory == "" || score > highestScore {
+			highestCategory = category
+			highestScore = score
+		}
+		if score >= thresholds[category] {
+			flagged = true
+			if matchedCategory == "" || score > scores[matchedCategory] {
+				matchedCategory = category
+			}
+		}
+	}
+	return flagged, highestCategory, highestScore, matchedCategory
 }
 
 func decodeChatReviewResponse(body []byte, cfg ReviewConfig) (ReviewOutcome, error) {

@@ -346,6 +346,11 @@ func (h *Handler) evaluatePromptGuardEnvelope(c *gin.Context, cfg promptfilter.C
 			} else {
 				localTrustRisk := trusted && promptRiskTrustShouldSuspend(decision, verdict)
 				verdict = h.reviewPromptFilterVerdict(ctx, reviewText, verdict, cfg)
+				var terminalBypassed bool
+				verdict, terminalBypassed = applyPromptGuardTerminalModelBypass(verdict, envelope, cfg)
+				if terminalBypassed {
+					localTrustRisk = false
+				}
 				if compatibilityBlock {
 					verdict = retainPromptGuardAuxiliaryCompatibilityBlock(verdict)
 				}
@@ -512,6 +517,11 @@ func (h *Handler) evaluateLegacyPromptGuard(c *gin.Context, ctx context.Context,
 		} else {
 			localTrustRisk := trusted && (verdict.Action != promptfilter.ActionAllow || verdict.Score > 0 || verdict.RawScore > 0 || len(verdict.Matched) > 0)
 			verdict = h.reviewPromptFilterVerdict(ctx, text, verdict, cfg)
+			var terminalBypassed bool
+			verdict, terminalBypassed = applyPromptGuardTerminalModelBypass(verdict, envelope, cfg)
+			if terminalBypassed {
+				localTrustRisk = false
+			}
 			verdict = promptfilter.ApplyReviewMode(verdict, cfg.Mode)
 			if trusted && !localTrustRisk && verdict.ReviewModel != "" && verdict.ReviewError == "" && !verdict.ReviewFlagged && verdict.Action == promptfilter.ActionAllow {
 				h.recordPromptRiskTrustModelReview(c, policy, subjectKey)
@@ -615,6 +625,32 @@ func retainPromptGuardAuxiliaryCompatibilityBlock(verdict promptfilter.Verdict) 
 		verdict.Reason = "upstream compatibility guard retained auxiliary risk block"
 	}
 	return verdict
+}
+
+func applyPromptGuardTerminalModelBypass(verdict promptfilter.Verdict, envelope promptfilter.RequestEnvelope, cfg promptfilter.Config) (promptfilter.Verdict, bool) {
+	if !verdict.Reviewed || verdict.ReviewError != "" || verdict.ReviewFlagged ||
+		(!verdict.TerminalStrictHit && !verdict.TerminalCategoryHit) {
+		return verdict, false
+	}
+	requestedModel := strings.ToLower(strings.TrimSpace(envelope.RequestedModel))
+	if requestedModel == "" {
+		return verdict, false
+	}
+	matched := false
+	for _, model := range cfg.Advanced.Enforcement.TerminalBypassModels {
+		if strings.EqualFold(strings.TrimSpace(model), requestedModel) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return verdict, false
+	}
+	verdict.Action = promptfilter.ActionAllow
+	verdict.TerminalStrictHit = false
+	verdict.TerminalCategoryHit = false
+	verdict.Reason = "clean prompt review cleared terminal match for exempt requested model"
+	return verdict, true
 }
 
 func promptGuardAuditText(decision promptfilter.Decision, envelope promptfilter.RequestEnvelope) string {

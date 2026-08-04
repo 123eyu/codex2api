@@ -75,6 +75,7 @@ type PromptRiskProfile struct {
 	AccountID            int64                    `json:"account_id,omitempty"`
 	AccountName          string                   `json:"account_name,omitempty"`
 	TrustPolicy          *PromptRiskTrustPolicy   `json:"trust_policy,omitempty"`
+	ConversationLock     *PromptConversationLock  `json:"conversation_lock,omitempty"`
 }
 
 type PromptRiskScoreBreakdown struct {

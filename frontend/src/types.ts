@@ -1370,6 +1370,30 @@ export interface PromptRiskProfile {
   account_id?: number
   account_name?: string
   trust_policy?: PromptRiskTrustPolicy
+  conversation_lock?: PromptConversationLock
+}
+
+export interface PromptConversationLock {
+  id: number
+  lock_key: string
+  status: 'active' | 'unlocked'
+  platform: string
+  newapi_user_id: string
+  session_fingerprint: string
+  session_hash: string
+  incident_id?: string
+  decision_id: string
+  request_id?: string
+  reason_code: string
+  endpoint?: string
+  model?: string
+  trigger_count: number
+  unlock_count: number
+  locked_at: ISODateString
+  unlocked_at?: ISODateString
+  unlock_reason?: string
+  created_at: ISODateString
+  updated_at: ISODateString
 }
 
 export interface PromptRiskEvent {
@@ -1451,6 +1475,7 @@ export interface PromptReviewTestRequest {
   user_prompt_template: string
   payload_template: string
   confidence_threshold: number
+  moderation_thresholds: Record<string, number>
   timeout_seconds: number
   max_concurrent: number
   max_text_length: number
@@ -1465,6 +1490,12 @@ export interface PromptReviewKeyTestResult {
   flagged: boolean
   confidence: number
   reason?: string
+  highest_category?: string
+  decision_category?: string
+  decision_score?: number
+  decision_threshold?: number
+  category_scores?: Record<string, number>
+  moderation_thresholds?: Record<string, number>
   latency_ms: number
   error?: string
 }
@@ -1477,6 +1508,12 @@ export interface PromptReviewTestResponse {
   confidence: number
   confidence_threshold: number
   reason?: string
+  highest_category?: string
+  decision_category?: string
+  decision_score?: number
+  decision_threshold?: number
+  category_scores?: Record<string, number>
+  moderation_thresholds?: Record<string, number>
   latency_ms: number
   key_count?: number
   results?: PromptReviewKeyTestResult[]

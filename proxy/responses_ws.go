@@ -528,6 +528,10 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				}
 				continue
 			}
+			if metadata, delegated := newAPIUpstreamCyberPolicyDecision(c); delegated && metadata.EventID != "" {
+				_ = writeResponsesWSError(conn, newAPIPolicyDecisionAPIError(metadata))
+				return nil
+			}
 
 			apiErr = responsesWSUpstreamAPIError(resp.StatusCode, errBody)
 			clientErr := responsesWSClientUpstreamAPIError(apiErr, hideUpstreamErrors)
@@ -778,9 +782,19 @@ func (h *Handler) streamResponsesWSUpstream(
 			Transport: upstreamPromptPolicyTransport(true, viaWebsocket), StatusCode: outcome.logStatusCode,
 			AccountID: account.ID(), AttemptIndex: fallbackAttempt,
 		}))
+		if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
+			outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
+		}
 	}
 	if fallbackLog != nil {
 		fallbackLog.LogHTTPAttemptCompletion("/v1/responses", account.ID(), fallbackAttempt, totalDuration, firstTokenMs, outcome.logStatusCode)
+	}
+	if metadata, delegated := newAPIUpstreamCyberPolicyDecision(c); delegated && metadata.EventID != "" {
+		// WebSocket response headers were committed during the upgrade. Carry the
+		// signed CYB decision in a per-turn error frame so NewAPI can count it and
+		// decide whether this is the first warning or a ban-worthy recurrence.
+		_ = writeResponsesWSError(conn, newAPIPolicyDecisionAPIError(metadata))
+		return nil
 	}
 	if shouldFallbackWebsocketMessageTooBigToHTTP(outcome, viaWebsocket, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 		resp.Body.Close()
@@ -944,6 +958,24 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 		return false, false
 	}
 	cfg := h.promptFilterConfigForRequest(c)
+	if _, locked := h.activePromptConversationLock(c, cfg, nil); locked {
+		profile := strings.ToLower(strings.TrimSpace(cfg.Advanced.Guard.DefaultProfile))
+		switch profile {
+		case promptfilter.GuardProfileBalanced, promptfilter.GuardProfileStrict, promptfilter.GuardProfileResearch:
+		default:
+			profile = promptfilter.GuardProfileBalanced
+		}
+		decision := promptfilter.Decision{Action: promptfilter.ActionBlock, Profile: profile, ReasonCode: promptConversationLockedReasonCode, Terminal: true}
+		verdict := promptfilter.Verdict{Action: promptfilter.ActionBlock, Reason: promptConversationLockedMessage, FullText: promptConversationLockedReasonCode}
+		if policyContext, verified := h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, nil); verified {
+			metadata := buildNewAPIPolicyDecisionMetadataWithSecret(policyContext.Identity, decision, verdict, cfg, rawBody, endpoint, model, policyEventID, policyContext.VerificationSecret)
+			writeNewAPIPolicyDecisionHeaders(c, metadata)
+			_ = writeResponsesWSError(conn, newAPIPolicyDecisionAPIError(metadata))
+			return true, true
+		}
+		_ = writeResponsesWSError(conn, api.NewAPIError(api.ErrorCode(promptConversationLockedReasonCode), promptConversationLockedMessage, api.ErrorTypeInvalidRequest))
+		return true, false
+	}
 	// Keep disabled filters off the WebSocket request-body hot path too.
 	if !promptfilter.RequiresRequestText(cfg) {
 		return false, false
@@ -1047,6 +1079,9 @@ func responsesWSCloseCodeForStatus(statusCode int) int {
 }
 
 func responsesWSUpstreamAPIError(statusCode int, body []byte) *api.APIError {
+	if isExplicitUpstreamCyberPolicy(body) {
+		return api.NewAPIError(api.ErrCodeInvalidRequest, upstreamCyberPolicyUserMessage, api.ErrorTypeInvalidRequest)
+	}
 	message := usageLogErrorMessage(statusCode, body)
 	if strings.TrimSpace(message) == "" {
 		message = fmt.Sprintf("upstream returned HTTP %d", statusCode)

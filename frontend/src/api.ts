@@ -966,6 +966,8 @@ export const api = {
 		request<{ policy: import('./types').PromptRiskTrustPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/trust`, { method: 'PUT', body: JSON.stringify(data) }),
 	revokePromptRiskTrust: (subjectType: string, subjectKey: string) =>
 		request<{ policy: import('./types').PromptRiskTrustPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/trust`, { method: 'DELETE' }),
+	unlockPromptConversation: (lockKey: string, reason = '管理员主动解锁') =>
+		request<{ lock: import('./types').PromptConversationLock }>(`/prompt-policy/conversation-locks/${encodeURIComponent(lockKey)}/unlock`, { method: 'POST', body: JSON.stringify({ reason }) }),
   testPromptFilter: (data: { text: string; endpoint?: string; model?: string }) =>
     request<PromptFilterTestResponse>('/prompt-filter/test', { method: 'POST', body: JSON.stringify(data) }),
   testPromptReview: (data: PromptReviewTestRequest) =>

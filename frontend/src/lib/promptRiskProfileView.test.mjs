@@ -70,3 +70,13 @@ test('risk page separates people from environment subjects', () => {
   assert.match(source, /allObjects/)
   assert.match(zh.promptFilter.risk.nonPersonHint, /環境|环境/)
 })
+
+test('active CYB conversation locks are visible and manually unlockable', () => {
+  assert.match(types, /PromptConversationLock/)
+  assert.match(types, /conversation_lock\?: PromptConversationLock/)
+  assert.match(api, /unlockPromptConversation/)
+  assert.match(api, /conversation-locks\/\$\{encodeURIComponent\(lockKey\)\}\/unlock/)
+  assert.match(source, /conversation_lock\?\.status === 'active'/)
+  assert.match(source, /unlockPromptConversation\(lock\.lock_key\)/)
+  assert.match(zh.promptFilter.risk.conversationLock.description, /不会再次累计处罚/)
+})

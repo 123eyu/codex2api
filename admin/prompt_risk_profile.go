@@ -83,6 +83,7 @@ func (h *Handler) ListPromptRiskProfiles(c *gin.Context) {
 		profiles = []*database.PromptRiskProfile{}
 	}
 	h.attachPromptRiskTrustPolicies(ctx, profiles)
+	h.attachPromptConversationLocks(ctx, profiles)
 	c.JSON(http.StatusOK, promptRiskProfilesResponse{
 		Profiles: profiles, Total: total, Page: page, PageSize: pageSize,
 		ScoringVersion: database.PromptRiskScoringVersion, Guardrail: promptRiskHistoryGuardrail,
@@ -120,6 +121,7 @@ func (h *Handler) GetPromptRiskProfile(c *gin.Context) {
 		events = []*database.PromptRiskEvent{}
 	}
 	h.attachPromptRiskTrustPolicies(ctx, []*database.PromptRiskProfile{profile})
+	h.attachPromptConversationLocks(ctx, []*database.PromptRiskProfile{profile})
 	trustEvents, trustEventTotal, err := h.db.ListPromptRiskTrustEventsPage(ctx, subjectType, subjectKey, trustEventPage, trustEventPageSize)
 	if err != nil {
 		writeInternalError(c, err)
@@ -214,6 +216,21 @@ func (h *Handler) attachPromptRiskTrustPolicies(ctx context.Context, profiles []
 	for _, profile := range profiles {
 		if profile != nil {
 			profile.TrustPolicy = bySubject[profile.SubjectType+"\x00"+profile.SubjectKey]
+		}
+	}
+}
+
+func (h *Handler) attachPromptConversationLocks(ctx context.Context, profiles []*database.PromptRiskProfile) {
+	if h == nil || h.db == nil {
+		return
+	}
+	for _, profile := range profiles {
+		if profile == nil || profile.SubjectType != database.PromptRiskSubjectSession || strings.TrimSpace(profile.SubjectKey) == "" {
+			continue
+		}
+		item, err := h.db.GetActivePromptConversationLockBySessionHash(ctx, profile.SubjectKey)
+		if err == nil {
+			profile.ConversationLock = item
 		}
 	}
 }

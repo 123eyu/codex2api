@@ -1396,10 +1396,21 @@ func classifyStreamOutcome(ctxErr, readErr, writeErr error, gotTerminal bool) st
 func classifyResponseFailedOutcome(payload []byte) streamOutcome {
 	statusCode := responseFailedStatusCode(payload)
 	message := usageLogErrorMessage(statusCode, payload)
+	cyberPolicy := isExplicitUpstreamCyberPolicy(payload)
+	if cyberPolicy {
+		// Upstream response.failed events often omit status_code, whose generic
+		// fallback is 500. CYB is a deterministic request-policy rejection: expose
+		// it as 400 and never rotate accounts/retry the same user request.
+		statusCode = http.StatusBadRequest
+		message = upstreamCyberPolicyUserMessage
+	}
 	if strings.TrimSpace(message) == "" || message == fmt.Sprintf("HTTP %d", statusCode) {
 		message = "上游返回 response.failed"
 	}
 	kind := upstreamErrorKind(statusCode, payload, codex429Decision{})
+	if cyberPolicy {
+		kind = "cyber_policy"
+	}
 	if kind == "" {
 		if statusCode >= 500 {
 			kind = "server"
@@ -1413,7 +1424,7 @@ func classifyResponseFailedOutcome(payload []byte) streamOutcome {
 		logStatusCode:  statusCode,
 		failureKind:    kind,
 		failureMessage: message,
-		penalize:       statusCode == http.StatusUnauthorized || statusCode == http.StatusTooManyRequests || statusCode >= 500 || modelUnsupported,
+		penalize:       !cyberPolicy && (statusCode == http.StatusUnauthorized || statusCode == http.StatusTooManyRequests || statusCode >= 500 || modelUnsupported),
 	}
 }
 
@@ -2691,6 +2702,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
 					AccountID: account.ID(), AttemptIndex: attempt + 1,
 				}))
+				if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
+					outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
+				}
 			}
 			if wsHTTPFallback.ForceHTTP() {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, totalDuration, firstTokenMs, outcome.logStatusCode)
@@ -3299,6 +3313,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
 				AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
+			if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
+				outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
+			}
 		}
 		if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 			wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, totalDuration, firstTokenMs, outcome.logStatusCode)
@@ -4560,6 +4577,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
 				AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
+			if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
+				outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
+			}
 		}
 		if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 			wsHTTPFallback.LogHTTPAttemptCompletion("/v1/chat/completions", account.ID(), attempt+1, totalDuration, firstTokenMs, outcome.logStatusCode)
@@ -5423,6 +5443,16 @@ func parseFloat(s string) float64 {
 
 // sendUpstreamError 发送上游错误响应给客户端
 func (h *Handler) sendUpstreamError(c *gin.Context, statusCode int, body []byte) {
+	if isExplicitUpstreamCyberPolicy(body) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"message": upstreamCyberPolicyResponseMessage(c),
+				"type":    "upstream_error",
+				"code":    newAPIUpstreamCyberPolicyReasonCode,
+			},
+		})
+		return
+	}
 	c.JSON(statusCode, gin.H{
 		"error": gin.H{
 			"message": fmt.Sprintf("上游返回错误 (status %d): %s", statusCode, string(body)),

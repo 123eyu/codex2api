@@ -13,6 +13,11 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+const (
+	upstreamCyberPolicyUserMessage       = "此内容因可能存在网络安全风险而被标记，本次已记录。请重新表述请求；再次触发可能会停用账号。如果确认是误判，请联系管理员。"
+	upstreamCyberPolicyLockedUserMessage = "此内容因可能存在网络安全风险而被标记，本次已记录并锁定当前对话。请新建对话后继续；再次触发可能会停用账号。如果确认是误判，请联系管理员解锁。"
+)
+
 // promptFilterFullTextMaxRunes limits the persisted redacted blocked-request text preview.
 const promptFilterFullTextMaxRunes = 32000
 
@@ -43,6 +48,9 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	cfg := h.promptFilterConfigForRequest(c)
 	signedBody := ingressRequestBody(c, rawBody)
 	if h.rejectRequiredNewAPIIdentity(c, cfg.Advanced.NewAPI, signedBody) {
+		return true
+	}
+	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
 	}
 	// Skip envelope construction and body traversal when neither the local
@@ -82,6 +90,9 @@ func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, end
 	if h.rejectRequiredNewAPIIdentity(c, cfg.Advanced.NewAPI, ingressRequestBody(c, nil)) {
 		return true
 	}
+	if h.rejectLockedPromptConversation(c, cfg, ingressRequestBody(c, nil), []byte(text), endpoint, model) {
+		return true
+	}
 	if !promptfilter.RequiresRequestText(cfg) {
 		return false
 	}
@@ -113,6 +124,9 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 	signedBody := ingressRequestBody(c, rawBody)
 	if apiErr := h.requiredNewAPIIdentityError(c, cfg.Advanced.NewAPI, signedBody); apiErr != nil {
 		sendAnthropicError(c, http.StatusUnauthorized, "authentication_error", apiErr.Message)
+		return true
+	}
+	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
 	}
 	if !promptfilter.RequiresRequestText(cfg) {
@@ -453,23 +467,32 @@ func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model 
 	if len(attempts) > 0 {
 		attempt = attempts[0]
 	}
-	return h.enqueueUpstreamCyberPolicyEvidence(c, endpoint, model, errorCode, body, attempt)
+	incidentID, accepted := h.enqueueUpstreamCyberPolicyEvidence(c, endpoint, model, errorCode, body, attempt)
+	// NewAPI owns strike counting and account punishment. Emission intentionally
+	// does not depend on the local async audit queue: a temporary Codex2API audit
+	// storage failure must not turn a verified upstream CYB into an untracked one.
+	metadata, delegated := h.emitNewAPIUpstreamCyberPolicyDecision(c, endpoint, model, body)
+	if delegated {
+		metadata.ConversationLocked = h.lockPromptConversationAfterUpstreamCYB(c, endpoint, model, incidentID, metadata)
+		c.Set(newAPIUpstreamCyberDecisionContextKey, metadata)
+	}
+	return incidentID, accepted
 }
 
 func upstreamCyberPolicyCode(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
-	raw := string(body)
-	for _, path := range []string{"codex_error_info", "error.codex_error_info", "error.code", "code"} {
+	for _, path := range []string{"codex_error_info", "error.codex_error_info", "error.code", "error.type", "code", "type"} {
 		if value := strings.TrimSpace(gjson.GetBytes(body, path).String()); strings.EqualFold(value, "cyber_policy") {
 			return "cyber_policy"
 		}
 	}
-	if strings.Contains(strings.ToLower(raw), "cyber_policy") || strings.Contains(strings.ToLower(raw), "cyber security risk") {
-		return "cyber_policy"
-	}
 	return ""
+}
+
+func isExplicitUpstreamCyberPolicy(body []byte) bool {
+	return upstreamCyberPolicyCode(responseFailedErrorBody(body)) != ""
 }
 
 func populatePromptFilterAPIKeyMeta(c *gin.Context, input *database.PromptFilterLogInput) {
@@ -508,16 +531,23 @@ func (h *Handler) reviewPromptFilterVerdict(ctx context.Context, text string, ve
 	outcome, err := promptfilter.DefaultReviewClient.ReviewTextDetailed(ctx, text, cfg.Review)
 	reviewed := promptfilter.ApplyReviewOutcome(verdict, outcome, err, cfg.Review)
 	normalized := promptfilter.NormalizeReviewConfig(cfg.Review)
-	threshold := normalized.Adapter.ConfidenceThreshold
 	latencyMS := time.Since(startedAt).Milliseconds()
-	reviewed.ReviewThreshold = &threshold
 	reviewed.ReviewLatencyMS = &latencyMS
 	reviewed.ReviewReason = strings.TrimSpace(outcome.Reason)
 	reviewed.ReviewEndpoint = strings.TrimSpace(outcome.Endpoint)
 	reviewed.ReviewRequestMode = normalized.Adapter.RequestMode
 	if err == nil {
-		confidence := outcome.Confidence
-		reviewed.ReviewConfidence = &confidence
+		if normalized.Adapter.RequestMode == promptfilter.ReviewRequestModeModerations && outcome.DecisionCategory != "" {
+			score := outcome.DecisionScore
+			threshold := outcome.DecisionThreshold
+			reviewed.ReviewConfidence = &score
+			reviewed.ReviewThreshold = &threshold
+		} else if normalized.Adapter.RequestMode == promptfilter.ReviewRequestModeChatCompletions {
+			confidence := outcome.Confidence
+			threshold := normalized.Adapter.ConfidenceThreshold
+			reviewed.ReviewConfidence = &confidence
+			reviewed.ReviewThreshold = &threshold
+		}
 	}
 	return reviewed
 }

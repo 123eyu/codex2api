@@ -671,6 +671,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/prompt-policy/risk-profiles/:subject_type/:subject_key", h.GetPromptRiskProfile)
 	api.PUT("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.UpsertPromptRiskTrustPolicy)
 	api.DELETE("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.RevokePromptRiskTrustPolicy)
+	api.POST("/prompt-policy/conversation-locks/:lock_key/unlock", h.UnlockPromptConversation)
 	api.POST("/prompt-filter/test", h.TestPromptFilter)
 	api.POST("/prompt-filter/review/test", h.TestPromptReviewConnection)
 	api.POST("/prompt-filter/rules/test", h.TestPromptFilterRulePattern)
@@ -8126,6 +8127,13 @@ func promptFilterCustomPatternSnapshotsEquivalent(leftRaw, rightRaw string) bool
 	if leftErr != nil || rightErr != nil || len(left) != len(right) {
 		return false
 	}
+	// Settings responses expose the effective runtime snapshot. Unsafe legacy
+	// rules are quarantined there with enabled=false, while the persisted JSON
+	// deliberately remains unchanged until an administrator saves the rule set.
+	// Compare both sides after applying that same quarantine transformation so
+	// deleting or editing a quarantined rule does not fail forever with 409.
+	left, _ = promptfilter.SanitizeCustomPatterns(left)
+	right, _ = promptfilter.SanitizeCustomPatterns(right)
 	// Omitted enabled and explicit true are the same active runtime rule.
 	for index := range left {
 		if left[index].Enabled != nil && *left[index].Enabled {

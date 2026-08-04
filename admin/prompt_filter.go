@@ -56,44 +56,57 @@ type promptFilterTestResponse struct {
 }
 
 type promptReviewTestRequest struct {
-	Text                string  `json:"text"`
-	APIKey              string  `json:"api_key"`
-	BaseURL             string  `json:"base_url"`
-	Model               string  `json:"model"`
-	RequestMode         string  `json:"request_mode"`
-	SystemPrompt        string  `json:"system_prompt"`
-	UserPromptTemplate  string  `json:"user_prompt_template"`
-	PayloadTemplate     string  `json:"payload_template"`
-	ConfidenceThreshold float64 `json:"confidence_threshold"`
-	TimeoutSeconds      int     `json:"timeout_seconds"`
-	MaxConcurrent       int     `json:"max_concurrent"`
-	MaxTextLength       int     `json:"max_text_length"`
-	TestAllKeys         bool    `json:"test_all_keys"`
+	Text                 string             `json:"text"`
+	APIKey               string             `json:"api_key"`
+	BaseURL              string             `json:"base_url"`
+	Model                string             `json:"model"`
+	RequestMode          string             `json:"request_mode"`
+	SystemPrompt         string             `json:"system_prompt"`
+	UserPromptTemplate   string             `json:"user_prompt_template"`
+	PayloadTemplate      string             `json:"payload_template"`
+	ConfidenceThreshold  float64            `json:"confidence_threshold"`
+	ModerationThresholds map[string]float64 `json:"moderation_thresholds"`
+	TimeoutSeconds       int                `json:"timeout_seconds"`
+	MaxConcurrent        int                `json:"max_concurrent"`
+	MaxTextLength        int                `json:"max_text_length"`
+	TestAllKeys          bool               `json:"test_all_keys"`
 }
 
 type promptReviewKeyTestResult struct {
-	KeyIndex   int     `json:"key_index"`
-	OK         bool    `json:"ok"`
-	Endpoint   string  `json:"endpoint,omitempty"`
-	Model      string  `json:"model,omitempty"`
-	Flagged    bool    `json:"flagged"`
-	Confidence float64 `json:"confidence"`
-	Reason     string  `json:"reason,omitempty"`
-	LatencyMS  int64   `json:"latency_ms"`
-	Error      string  `json:"error,omitempty"`
+	KeyIndex             int                `json:"key_index"`
+	OK                   bool               `json:"ok"`
+	Endpoint             string             `json:"endpoint,omitempty"`
+	Model                string             `json:"model,omitempty"`
+	Flagged              bool               `json:"flagged"`
+	Confidence           float64            `json:"confidence"`
+	Reason               string             `json:"reason,omitempty"`
+	HighestCategory      string             `json:"highest_category,omitempty"`
+	DecisionCategory     string             `json:"decision_category,omitempty"`
+	DecisionScore        float64            `json:"decision_score"`
+	DecisionThreshold    float64            `json:"decision_threshold"`
+	CategoryScores       map[string]float64 `json:"category_scores,omitempty"`
+	ModerationThresholds map[string]float64 `json:"moderation_thresholds,omitempty"`
+	LatencyMS            int64              `json:"latency_ms"`
+	Error                string             `json:"error,omitempty"`
 }
 
 type promptReviewTestResponse struct {
-	OK                  bool                        `json:"ok"`
-	Endpoint            string                      `json:"endpoint"`
-	Model               string                      `json:"model"`
-	Flagged             bool                        `json:"flagged"`
-	Confidence          float64                     `json:"confidence"`
-	ConfidenceThreshold float64                     `json:"confidence_threshold"`
-	Reason              string                      `json:"reason,omitempty"`
-	LatencyMS           int64                       `json:"latency_ms"`
-	KeyCount            int                         `json:"key_count,omitempty"`
-	Results             []promptReviewKeyTestResult `json:"results,omitempty"`
+	OK                   bool                        `json:"ok"`
+	Endpoint             string                      `json:"endpoint"`
+	Model                string                      `json:"model"`
+	Flagged              bool                        `json:"flagged"`
+	Confidence           float64                     `json:"confidence"`
+	ConfidenceThreshold  float64                     `json:"confidence_threshold"`
+	Reason               string                      `json:"reason,omitempty"`
+	HighestCategory      string                      `json:"highest_category,omitempty"`
+	DecisionCategory     string                      `json:"decision_category,omitempty"`
+	DecisionScore        float64                     `json:"decision_score"`
+	DecisionThreshold    float64                     `json:"decision_threshold"`
+	CategoryScores       map[string]float64          `json:"category_scores,omitempty"`
+	ModerationThresholds map[string]float64          `json:"moderation_thresholds,omitempty"`
+	LatencyMS            int64                       `json:"latency_ms"`
+	KeyCount             int                         `json:"key_count,omitempty"`
+	Results              []promptReviewKeyTestResult `json:"results,omitempty"`
 }
 
 type promptFilterRulePatternTestRequest struct {
@@ -481,13 +494,14 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 		reviewCfg.TimeoutSeconds = req.TimeoutSeconds
 	}
 	reviewCfg.Adapter = promptfilter.ReviewAdapterConfig{
-		RequestMode:         req.RequestMode,
-		SystemPrompt:        req.SystemPrompt,
-		UserPromptTemplate:  req.UserPromptTemplate,
-		PayloadTemplate:     req.PayloadTemplate,
-		ConfidenceThreshold: req.ConfidenceThreshold,
-		MaxConcurrent:       req.MaxConcurrent,
-		MaxTextLength:       req.MaxTextLength,
+		RequestMode:          req.RequestMode,
+		SystemPrompt:         req.SystemPrompt,
+		UserPromptTemplate:   req.UserPromptTemplate,
+		PayloadTemplate:      req.PayloadTemplate,
+		ConfidenceThreshold:  req.ConfidenceThreshold,
+		ModerationThresholds: req.ModerationThresholds,
+		MaxConcurrent:        req.MaxConcurrent,
+		MaxTextLength:        req.MaxTextLength,
 	}
 	reviewCfg = promptfilter.NormalizeReviewConfig(reviewCfg)
 	if err := promptfilter.ValidateReviewConfig(reviewCfg); err != nil {
@@ -531,7 +545,11 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 			result := promptReviewKeyTestResult{
 				KeyIndex: item.index + 1, OK: item.err == nil, Flagged: item.outcome.Flagged,
 				Endpoint: item.outcome.Endpoint, Model: item.outcome.Model, Confidence: item.outcome.Confidence,
-				Reason: item.outcome.Reason, LatencyMS: item.latency,
+				Reason: item.outcome.Reason, HighestCategory: item.outcome.HighestCategory,
+				DecisionCategory: item.outcome.DecisionCategory, DecisionScore: item.outcome.DecisionScore,
+				DecisionThreshold: item.outcome.DecisionThreshold,
+				CategoryScores:    item.outcome.CategoryScores, ModerationThresholds: item.outcome.ModerationThresholds,
+				LatencyMS: item.latency,
 			}
 			if item.err != nil {
 				allOK = false
@@ -542,7 +560,11 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 		c.JSON(http.StatusOK, promptReviewTestResponse{
 			OK: allOK, Endpoint: first.Endpoint, Model: reviewCfg.Model, Flagged: first.Flagged,
 			Confidence: first.Confidence, ConfidenceThreshold: reviewCfg.Adapter.ConfidenceThreshold,
-			Reason: first.Reason, LatencyMS: time.Since(started).Milliseconds(), KeyCount: len(keys), Results: results,
+			Reason: first.Reason, HighestCategory: first.HighestCategory,
+			DecisionCategory: first.DecisionCategory, DecisionScore: first.DecisionScore,
+			DecisionThreshold: first.DecisionThreshold,
+			CategoryScores:    first.CategoryScores, ModerationThresholds: first.ModerationThresholds,
+			LatencyMS: time.Since(started).Milliseconds(), KeyCount: len(keys), Results: results,
 		})
 		return
 	}
@@ -553,15 +575,21 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, promptReviewTestResponse{
-		OK:                  true,
-		Endpoint:            outcome.Endpoint,
-		Model:               outcome.Model,
-		Flagged:             outcome.Flagged,
-		Confidence:          outcome.Confidence,
-		ConfidenceThreshold: reviewCfg.Adapter.ConfidenceThreshold,
-		Reason:              outcome.Reason,
-		LatencyMS:           time.Since(started).Milliseconds(),
-		KeyCount:            len(keys),
+		OK:                   true,
+		Endpoint:             outcome.Endpoint,
+		Model:                outcome.Model,
+		Flagged:              outcome.Flagged,
+		Confidence:           outcome.Confidence,
+		ConfidenceThreshold:  reviewCfg.Adapter.ConfidenceThreshold,
+		Reason:               outcome.Reason,
+		HighestCategory:      outcome.HighestCategory,
+		DecisionCategory:     outcome.DecisionCategory,
+		DecisionScore:        outcome.DecisionScore,
+		DecisionThreshold:    outcome.DecisionThreshold,
+		CategoryScores:       outcome.CategoryScores,
+		ModerationThresholds: outcome.ModerationThresholds,
+		LatencyMS:            time.Since(started).Milliseconds(),
+		KeyCount:             len(keys),
 	})
 }
 

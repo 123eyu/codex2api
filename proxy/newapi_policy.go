@@ -25,11 +25,13 @@ const newAPIReplayNamespace = "prompt-filter-newapi-replay"
 const newAPIIdentityContextKey = "prompt_filter_verified_newapi_identity"
 const newAPIPolicyMetaContextKey = "prompt_filter_verified_newapi_policy_meta"
 const newAPIBindingContextKey = "prompt_filter_newapi_binding"
+const newAPIUpstreamCyberDecisionContextKey = "prompt_filter_newapi_upstream_cyber_decision"
 
 const (
 	newAPISignatureVersionV1               = "1"
 	newAPIPolicyDecisionSignatureVersionV1 = "v1"
 	newAPIPolicyEventSignatureVersionV1    = "v1"
+	newAPIUpstreamCyberPolicyReasonCode    = "upstream_cyber_policy"
 )
 
 type newAPIIdentity struct {
@@ -621,15 +623,99 @@ func (h *Handler) sendNewAPIPolicyDecision(c *gin.Context, cfg promptfilter.Conf
 	metadata := buildNewAPIPolicyDecisionMetadataWithSecret(policyContext.Identity, decision, verdict, cfg, body, endpoint, model, "", policyContext.VerificationSecret)
 	writeNewAPIPolicyDecisionHeaders(c, metadata)
 	if requestUsesAnthropicErrorEnvelope(c) {
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "请求违反安全策略，本次请求已被拒绝")
+		message := "请求违反安全策略，本次请求已被拒绝"
+		if metadata.ReasonCode == promptConversationLockedReasonCode {
+			message = promptConversationLockedMessage
+		}
+		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", message)
 		return true
 	}
 	api.SendErrorWithStatus(c, newAPIPolicyDecisionAPIError(metadata), http.StatusBadRequest)
 	return true
 }
 
+// emitNewAPIUpstreamCyberPolicyDecision delegates punishment to NewAPI only
+// after Codex2API has observed an explicit cyber_policy response from the
+// upstream provider. Local prompt matches, external-review verdicts and other
+// upstream 4xx responses never use this path and therefore cannot add a strike.
+func (h *Handler) emitNewAPIUpstreamCyberPolicyDecision(c *gin.Context, endpoint string, model string, upstreamBody []byte) (newAPIPolicyDecisionMetadata, bool) {
+	if c == nil || upstreamCyberPolicyCode(upstreamBody) == "" {
+		return newAPIPolicyDecisionMetadata{}, false
+	}
+	cfg := h.promptFilterConfigForRequest(c)
+	policyContext, verified := h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, ingressRequestBody(c, nil))
+	if !verified {
+		return newAPIPolicyDecisionMetadata{}, false
+	}
+	profile := strings.ToLower(strings.TrimSpace(cfg.Advanced.Guard.DefaultProfile))
+	switch profile {
+	case promptfilter.GuardProfileBalanced, promptfilter.GuardProfileStrict, promptfilter.GuardProfileResearch:
+	default:
+		profile = promptfilter.GuardProfileBalanced
+	}
+	decision := promptfilter.Decision{
+		Action:         promptfilter.ActionBlock,
+		Profile:        profile,
+		ReasonCode:     newAPIUpstreamCyberPolicyReasonCode,
+		StrikeEligible: true,
+		Terminal:       true,
+	}
+	verdict := promptfilter.Verdict{
+		Action:   promptfilter.ActionBlock,
+		FullText: string(upstreamBody),
+	}
+	metadata := buildNewAPIPolicyDecisionMetadataWithSecret(
+		policyContext.Identity,
+		decision,
+		verdict,
+		cfg,
+		upstreamBody,
+		endpoint,
+		model,
+		promptGuardPolicyEventID(c),
+		policyContext.VerificationSecret,
+	)
+	c.Set(newAPIUpstreamCyberDecisionContextKey, metadata)
+	// Ordinary HTTP and pre-first-token SSE failures have not committed their
+	// response yet, so NewAPI can consume the signed decision from headers.
+	// A Responses WebSocket turn uses the signed error envelope below instead.
+	if metadata.EventID == "" && !c.Writer.Written() {
+		writeNewAPIPolicyDecisionHeaders(c, metadata)
+	}
+	return metadata, true
+}
+
+func newAPIUpstreamCyberPolicyDecision(c *gin.Context) (newAPIPolicyDecisionMetadata, bool) {
+	if c == nil {
+		return newAPIPolicyDecisionMetadata{}, false
+	}
+	value, exists := c.Get(newAPIUpstreamCyberDecisionContextKey)
+	if !exists {
+		return newAPIPolicyDecisionMetadata{}, false
+	}
+	metadata, ok := value.(newAPIPolicyDecisionMetadata)
+	return metadata, ok && metadata.DecisionID != ""
+}
+
+func upstreamCyberPolicyResponseMessage(c *gin.Context) string {
+	if metadata, ok := newAPIUpstreamCyberPolicyDecision(c); ok && metadata.ReasonCode == newAPIUpstreamCyberPolicyReasonCode {
+		return newAPIPolicyDecisionAPIError(metadata).Message
+	}
+	return upstreamCyberPolicyUserMessage
+}
+
 func newAPIPolicyDecisionAPIError(metadata newAPIPolicyDecisionMetadata) *api.APIError {
-	apiErr := api.NewAPIError(api.ErrorCode("request_policy_violation"), "请求违反安全策略，本次请求已被拒绝", api.ErrorTypeInvalidRequest)
+	message := "请求违反安全策略，本次请求已被拒绝"
+	if metadata.ReasonCode == newAPIUpstreamCyberPolicyReasonCode {
+		if metadata.ConversationLocked {
+			message = upstreamCyberPolicyLockedUserMessage
+		} else {
+			message = upstreamCyberPolicyUserMessage
+		}
+	} else if metadata.ReasonCode == promptConversationLockedReasonCode {
+		message = promptConversationLockedMessage
+	}
+	apiErr := api.NewAPIError(api.ErrorCode("request_policy_violation"), message, api.ErrorTypeInvalidRequest)
 	details := gin.H{
 		"request_id":         metadata.RequestID,
 		"decision_id":        metadata.DecisionID,
@@ -665,6 +751,10 @@ type newAPIPolicyDecisionMetadata struct {
 	EvidenceSHA256 string
 	EventSignature string
 	Signature      string
+	// ConversationLocked is local response state only. It is intentionally not
+	// included in the signed decision canonical form or forwarded as a policy
+	// punishment header.
+	ConversationLocked bool
 }
 
 func buildNewAPIPolicyDecisionMetadataWithSecret(identity newAPIIdentity, decision promptfilter.Decision, verdict promptfilter.Verdict, cfg promptfilter.Config, body []byte, endpoint string, model string, eventID string, verificationSecret string) newAPIPolicyDecisionMetadata {
@@ -707,14 +797,17 @@ func buildNewAPIPolicyDecisionMetadataWithSecret(identity newAPIIdentity, decisi
 		severity = "medium"
 	}
 	metadata := newAPIPolicyDecisionMetadata{
-		RequestID:      identity.RequestID,
-		DecisionID:     "dec_" + hex.EncodeToString(decisionDigest[:12]),
-		EventID:        eventID,
-		Action:         decision.Action,
-		Profile:        decision.Profile,
-		ReasonCode:     decision.ReasonCode,
-		Severity:       severity,
-		StrikeEligible: decision.StrikeEligible && decision.Action == promptfilter.ActionBlock,
+		RequestID:  identity.RequestID,
+		DecisionID: "dec_" + hex.EncodeToString(decisionDigest[:12]),
+		EventID:    eventID,
+		Action:     decision.Action,
+		Profile:    decision.Profile,
+		ReasonCode: decision.ReasonCode,
+		Severity:   severity,
+		// Only an explicit upstream CYB response may become a NewAPI strike.
+		// Local Guard and external-review decisions remain signed audit events but
+		// can never disable a user account.
+		StrikeEligible: decision.StrikeEligible && decision.Action == promptfilter.ActionBlock && decision.ReasonCode == newAPIUpstreamCyberPolicyReasonCode,
 		RuleVersion:    ruleVersion,
 		EvidenceSHA256: hex.EncodeToString(evidenceDigest[:]),
 	}

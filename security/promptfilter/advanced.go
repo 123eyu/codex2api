@@ -133,7 +133,9 @@ type NewAPIConfig struct {
 }
 
 type EnforcementConfig struct {
-	TerminalCategories []string `json:"terminal_categories"`
+	TerminalCategories      []string `json:"terminal_categories"`
+	TerminalBypassModels    []string `json:"terminal_bypass_models"`
+	ConversationLockEnabled bool     `json:"conversation_lock_enabled"`
 }
 
 type NormalizationConfig struct {
@@ -269,6 +271,7 @@ func DefaultAdvancedConfig() AdvancedConfig {
 		Output:          OutputConfig{BufferBytes: 4096, OverlapBytes: 512, StrictOnly: true},
 		Intelligence:    IntelligenceConfig{IntervalHours: 24, Queries: DefaultIntelligenceQueries(), MaxSearchResults: 20, Model: "gpt-5.4", MaxModelCalls: 1},
 		NewAPI:          NewAPIConfig{MaxClockSkewSeconds: 120},
+		Enforcement:     EnforcementConfig{TerminalBypassModels: []string{"codex-auto-review"}, ConversationLockEnabled: true},
 		Guard:           DefaultGuardConfig(),
 	}
 }
@@ -726,6 +729,20 @@ func NormalizeAdvancedConfig(cfg AdvancedConfig) AdvancedConfig {
 		}
 	}
 	cfg.Enforcement.TerminalCategories = categories
+	bypassModels := cfg.Enforcement.TerminalBypassModels
+	if bypassModels == nil {
+		bypassModels = d.Enforcement.TerminalBypassModels
+	}
+	seenBypassModels := map[string]bool{}
+	normalizedBypassModels := make([]string, 0, len(bypassModels))
+	for _, model := range bypassModels {
+		model = strings.ToLower(strings.TrimSpace(model))
+		if model != "" && !seenBypassModels[model] {
+			seenBypassModels[model] = true
+			normalizedBypassModels = append(normalizedBypassModels, model)
+		}
+	}
+	cfg.Enforcement.TerminalBypassModels = normalizedBypassModels
 	if cfg.Normalization.MaxDecodeRuns <= 0 {
 		cfg.Normalization.MaxDecodeRuns = d.Normalization.MaxDecodeRuns
 	}
