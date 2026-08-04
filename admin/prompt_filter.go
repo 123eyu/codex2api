@@ -81,6 +81,9 @@ type promptReviewKeyTestResult struct {
 	Confidence           float64            `json:"confidence"`
 	Reason               string             `json:"reason,omitempty"`
 	HighestCategory      string             `json:"highest_category,omitempty"`
+	DecisionCategory     string             `json:"decision_category,omitempty"`
+	DecisionScore        float64            `json:"decision_score"`
+	DecisionThreshold    float64            `json:"decision_threshold"`
 	CategoryScores       map[string]float64 `json:"category_scores,omitempty"`
 	ModerationThresholds map[string]float64 `json:"moderation_thresholds,omitempty"`
 	LatencyMS            int64              `json:"latency_ms"`
@@ -96,6 +99,9 @@ type promptReviewTestResponse struct {
 	ConfidenceThreshold  float64                     `json:"confidence_threshold"`
 	Reason               string                      `json:"reason,omitempty"`
 	HighestCategory      string                      `json:"highest_category,omitempty"`
+	DecisionCategory     string                      `json:"decision_category,omitempty"`
+	DecisionScore        float64                     `json:"decision_score"`
+	DecisionThreshold    float64                     `json:"decision_threshold"`
 	CategoryScores       map[string]float64          `json:"category_scores,omitempty"`
 	ModerationThresholds map[string]float64          `json:"moderation_thresholds,omitempty"`
 	LatencyMS            int64                       `json:"latency_ms"`
@@ -515,7 +521,9 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 				KeyIndex: item.index + 1, OK: item.err == nil, Flagged: item.outcome.Flagged,
 				Endpoint: item.outcome.Endpoint, Model: item.outcome.Model, Confidence: item.outcome.Confidence,
 				Reason: item.outcome.Reason, HighestCategory: item.outcome.HighestCategory,
-				CategoryScores: item.outcome.CategoryScores, ModerationThresholds: item.outcome.ModerationThresholds,
+				DecisionCategory: item.outcome.DecisionCategory, DecisionScore: item.outcome.DecisionScore,
+				DecisionThreshold: item.outcome.DecisionThreshold,
+				CategoryScores:    item.outcome.CategoryScores, ModerationThresholds: item.outcome.ModerationThresholds,
 				LatencyMS: item.latency,
 			}
 			if item.err != nil {
@@ -528,7 +536,9 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 			OK: allOK, Endpoint: first.Endpoint, Model: reviewCfg.Model, Flagged: first.Flagged,
 			Confidence: first.Confidence, ConfidenceThreshold: reviewCfg.Adapter.ConfidenceThreshold,
 			Reason: first.Reason, HighestCategory: first.HighestCategory,
-			CategoryScores: first.CategoryScores, ModerationThresholds: first.ModerationThresholds,
+			DecisionCategory: first.DecisionCategory, DecisionScore: first.DecisionScore,
+			DecisionThreshold: first.DecisionThreshold,
+			CategoryScores:    first.CategoryScores, ModerationThresholds: first.ModerationThresholds,
 			LatencyMS: time.Since(started).Milliseconds(), KeyCount: len(keys), Results: results,
 		})
 		return
@@ -548,6 +558,9 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 		ConfidenceThreshold:  reviewCfg.Adapter.ConfidenceThreshold,
 		Reason:               outcome.Reason,
 		HighestCategory:      outcome.HighestCategory,
+		DecisionCategory:     outcome.DecisionCategory,
+		DecisionScore:        outcome.DecisionScore,
+		DecisionThreshold:    outcome.DecisionThreshold,
 		CategoryScores:       outcome.CategoryScores,
 		ModerationThresholds: outcome.ModerationThresholds,
 		LatencyMS:            time.Since(started).Milliseconds(),

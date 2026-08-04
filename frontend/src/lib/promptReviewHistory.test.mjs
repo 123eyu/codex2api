@@ -38,6 +38,8 @@ test('model review history exposes parsed request and response metadata without 
   assert.match(source, /log\.text_preview/)
   assert.match(source, /log\.review_confidence/)
   assert.match(source, /log\.review_reason/)
+  assert.match(source, /moderation decision:\\s\+\(\\S\+\)/)
+  assert.match(source, /moderationCategory \? `\$\{moderationCategory\} `/)
   assert.doesNotMatch(source, /review_api_key.*PromptReviewLogsTable/)
   assert.match(zh.promptFilter.reviewHistoryDesc, /不保存审核 Key、Authorization 或原始 Payload/)
 })

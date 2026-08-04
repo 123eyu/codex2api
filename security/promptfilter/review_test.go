@@ -86,12 +86,15 @@ func TestReviewTextAllowsWhenNotFlagged(t *testing.T) {
 
 func TestModerationReviewUsesCategoryThresholdsInsteadOfProviderFlag(t *testing.T) {
 	tests := []struct {
-		name         string
-		result       map[string]any
-		thresholds   map[string]float64
-		wantFlagged  bool
-		wantScore    float64
-		wantCategory string
+		name                  string
+		result                map[string]any
+		thresholds            map[string]float64
+		wantFlagged           bool
+		wantScore             float64
+		wantCategory          string
+		wantDecision          string
+		wantDecisionScore     float64
+		wantDecisionThreshold float64
 	}{
 		{
 			name: "provider flag does not override scores below configured thresholds",
@@ -100,6 +103,7 @@ func TestModerationReviewUsesCategoryThresholdsInsteadOfProviderFlag(t *testing.
 				"category_scores": map[string]float64{"harassment": 0.97, "hate": 0.64},
 			},
 			wantFlagged: false, wantScore: 0.97, wantCategory: "harassment",
+			wantDecision: "harassment", wantDecisionScore: 0.97, wantDecisionThreshold: 0.98,
 		},
 		{
 			name: "category score at threshold is blocked even when provider flag is false",
@@ -108,6 +112,7 @@ func TestModerationReviewUsesCategoryThresholdsInsteadOfProviderFlag(t *testing.
 				"category_scores": map[string]float64{"hate": 0.65},
 			},
 			wantFlagged: true, wantScore: 0.65, wantCategory: "hate",
+			wantDecision: "hate", wantDecisionScore: 0.65, wantDecisionThreshold: 0.65,
 		},
 		{
 			name: "custom threshold overrides default",
@@ -117,6 +122,16 @@ func TestModerationReviewUsesCategoryThresholdsInsteadOfProviderFlag(t *testing.
 			},
 			thresholds:  map[string]float64{"violence": 0.75},
 			wantFlagged: true, wantScore: 0.80, wantCategory: "violence",
+			wantDecision: "violence", wantDecisionScore: 0.80, wantDecisionThreshold: 0.75,
+		},
+		{
+			name: "matched category is reported when the highest category stays below its threshold",
+			result: map[string]any{
+				"flagged":         false,
+				"category_scores": map[string]float64{"harassment": 0.97, "hate": 0.65},
+			},
+			wantFlagged: true, wantScore: 0.97, wantCategory: "harassment",
+			wantDecision: "hate", wantDecisionScore: 0.65, wantDecisionThreshold: 0.65,
 		},
 	}
 	for _, tt := range tests {
@@ -138,8 +153,11 @@ func TestModerationReviewUsesCategoryThresholdsInsteadOfProviderFlag(t *testing.
 			if outcome.Flagged != tt.wantFlagged || outcome.Confidence != tt.wantScore || outcome.HighestCategory != tt.wantCategory {
 				t.Fatalf("outcome = %+v, want flagged=%t score=%v category=%q", outcome, tt.wantFlagged, tt.wantScore, tt.wantCategory)
 			}
-			if tt.wantFlagged && !strings.Contains(outcome.Reason, tt.wantCategory) {
-				t.Fatalf("flagged reason = %q, want category %q", outcome.Reason, tt.wantCategory)
+			if outcome.DecisionCategory != tt.wantDecision || outcome.DecisionScore != tt.wantDecisionScore || outcome.DecisionThreshold != tt.wantDecisionThreshold {
+				t.Fatalf("decision = %+v, want category=%q score=%v threshold=%v", outcome, tt.wantDecision, tt.wantDecisionScore, tt.wantDecisionThreshold)
+			}
+			if !strings.Contains(outcome.Reason, tt.wantDecision) {
+				t.Fatalf("decision reason = %q, want category %q", outcome.Reason, tt.wantDecision)
 			}
 		})
 	}

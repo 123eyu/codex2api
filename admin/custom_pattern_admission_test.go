@@ -97,6 +97,56 @@ func TestUpdateSettingsAllowsExplicitlyDisabledBroadLegacyRule(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsDeletesQuarantinedLegacyRuleFromRuntimeSnapshot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+	settings := defaultBootstrapSettings()
+	settings.PromptFilterCustomPatterns = `[
+		{"name":"legacy_broad_rule","pattern":"(?i)\\ball\\b","weight":100,"category":"custom","strict":true},
+		{"name":"existing_safe_rule","pattern":"terminal-safe-marker","weight":60,"category":"custom"}
+	]`
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	store := auth.NewStore(db, tc, settings)
+	t.Cleanup(store.Stop)
+	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret")
+
+	runtimeBefore := store.GetPromptFilterConfig().CustomPatterns
+	if len(runtimeBefore) != 2 || runtimeBefore[0].Enabled == nil || *runtimeBefore[0].Enabled {
+		t.Fatalf("legacy rule was not quarantined in runtime snapshot: %#v", runtimeBefore)
+	}
+	expected := promptfilter.MarshalCustomPatterns(runtimeBefore)
+	replacement := []promptfilter.PatternConfig{runtimeBefore[1]}
+	replacementJSON := promptfilter.MarshalCustomPatterns(replacement)
+	body, _ := json.Marshal(map[string]string{
+		"prompt_filter_custom_patterns":          replacementJSON,
+		"prompt_filter_custom_patterns_expected": expected,
+	})
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.UpdateSettings(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 body=%s", recorder.Code, recorder.Body.String())
+	}
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.PromptFilterCustomPatterns != replacementJSON {
+		t.Fatalf("quarantined rule was not deleted from persistence: %s", persisted.PromptFilterCustomPatterns)
+	}
+	runtimeAfter := store.GetPromptFilterConfig().CustomPatterns
+	if len(runtimeAfter) != 1 || runtimeAfter[0].Name != "existing_safe_rule" {
+		t.Fatalf("runtime rules after delete = %#v", runtimeAfter)
+	}
+}
+
 func TestUpdateSettingsRejectsStaleCustomRuleSnapshot(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := newTestAdminDB(t)

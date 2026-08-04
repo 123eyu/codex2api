@@ -288,6 +288,15 @@ test('Prompt Filter exposes explicit review scope and live connection testing', 
   }
 })
 
+test('terminal enforcement exposes clean-review model exemptions', () => {
+  const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
+  const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))
+  assert.match(source, /terminal_bypass_models: \['codex-auto-review'\]/)
+  assert.match(source, /terminalBypassModelsText/)
+  assert.match(source, /update\('enforcement', \{ terminal_bypass_models:/)
+  assert.match(zh.promptFilter.terminalBypassModelsHint, /二审明确通过后可以清除本地终局命中/)
+})
+
 test('Moderations review exposes sub2api-compatible category thresholds', () => {
   const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
   const requiredFragments = [

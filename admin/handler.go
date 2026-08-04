@@ -7968,6 +7968,13 @@ func promptFilterCustomPatternSnapshotsEquivalent(leftRaw, rightRaw string) bool
 	if leftErr != nil || rightErr != nil || len(left) != len(right) {
 		return false
 	}
+	// Settings responses expose the effective runtime snapshot. Unsafe legacy
+	// rules are quarantined there with enabled=false, while the persisted JSON
+	// deliberately remains unchanged until an administrator saves the rule set.
+	// Compare both sides after applying that same quarantine transformation so
+	// deleting or editing a quarantined rule does not fail forever with 409.
+	left, _ = promptfilter.SanitizeCustomPatterns(left)
+	right, _ = promptfilter.SanitizeCustomPatterns(right)
 	// Omitted enabled and explicit true are the same active runtime rule.
 	for index := range left {
 		if left[index].Enabled != nil && *left[index].Enabled {

@@ -91,6 +91,9 @@ type ReviewOutcome struct {
 	Model                string             `json:"model"`
 	Endpoint             string             `json:"endpoint,omitempty"`
 	HighestCategory      string             `json:"highest_category,omitempty"`
+	DecisionCategory     string             `json:"decision_category,omitempty"`
+	DecisionScore        float64            `json:"decision_score"`
+	DecisionThreshold    float64            `json:"decision_threshold"`
 	CategoryScores       map[string]float64 `json:"category_scores,omitempty"`
 	ModerationThresholds map[string]float64 `json:"moderation_thresholds,omitempty"`
 }
@@ -649,9 +652,19 @@ func decodeModerationReviewResponse(body []byte, cfg ReviewConfig) (ReviewOutcom
 		}
 	}
 	flagged, highestCategory, confidence, matchedCategory := evaluateReviewModerationScores(scores, thresholds)
-	reason := ""
+	decisionCategory := highestCategory
 	if matchedCategory != "" {
-		reason = fmt.Sprintf("moderation threshold matched: %s %.4f >= %.4f", matchedCategory, scores[matchedCategory], thresholds[matchedCategory])
+		decisionCategory = matchedCategory
+	}
+	decisionScore := scores[decisionCategory]
+	decisionThreshold := thresholds[decisionCategory]
+	reason := ""
+	if decisionCategory != "" {
+		operator := "<"
+		if flagged {
+			operator = ">="
+		}
+		reason = fmt.Sprintf("moderation decision: %s %.4f %s %.4f", decisionCategory, decisionScore, operator, decisionThreshold)
 	}
 	model := strings.TrimSpace(decoded.Model)
 	if model == "" {
@@ -659,7 +672,9 @@ func decodeModerationReviewResponse(body []byte, cfg ReviewConfig) (ReviewOutcom
 	}
 	return ReviewOutcome{
 		Flagged: flagged, Confidence: confidence, Reason: reason, Model: model,
-		HighestCategory: highestCategory, CategoryScores: scores, ModerationThresholds: thresholds,
+		HighestCategory: highestCategory, DecisionCategory: decisionCategory,
+		DecisionScore: decisionScore, DecisionThreshold: decisionThreshold,
+		CategoryScores: scores, ModerationThresholds: thresholds,
 	}, nil
 }
 
@@ -682,7 +697,10 @@ func normalizeReviewModerationThresholds(overrides map[string]float64) map[strin
 
 func evaluateReviewModerationScores(scores, thresholds map[string]float64) (flagged bool, highestCategory string, highestScore float64, matchedCategory string) {
 	for _, category := range reviewModerationCategoryOrder {
-		score := scores[category]
+		score, exists := scores[category]
+		if !exists {
+			continue
+		}
 		if highestCategory == "" || score > highestScore {
 			highestCategory = category
 			highestScore = score
@@ -692,12 +710,6 @@ func evaluateReviewModerationScores(scores, thresholds map[string]float64) (flag
 			if matchedCategory == "" || score > scores[matchedCategory] {
 				matchedCategory = category
 			}
-		}
-	}
-	for category, score := range scores {
-		if highestCategory == "" || score > highestScore {
-			highestCategory = category
-			highestScore = score
 		}
 	}
 	return flagged, highestCategory, highestScore, matchedCategory

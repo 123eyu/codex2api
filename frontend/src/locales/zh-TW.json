@@ -113,6 +113,7 @@
     "reviewTestEndpoint": "實際請求端點",
     "reviewTestLatency": "耗時",
     "reviewTestConfidence": "信心 / 閾值",
+    "reviewTestDecision": "判定分類分數 / 閾值",
     "reviewTestHighestScore": "最高分類分數",
     "reviewTestHighestCategory": "最高分類",
     "reviewTestReason": "模型原因",
@@ -490,7 +491,10 @@
       "operationalMaxDiscount": "操作意圖最大降分",
       "operationalMaxDiscountHint": "已包含執行、投遞、竊取或繞過動作時仍允許的最大降分。建議設為 0，防止用「僅供研究」抵消明確惡意意圖。"
     },
-    "terminalCategoriesCollapsedDesc": "僅在需要將特定高風險分類設為終局證據時調整。",
+    "terminalPolicyTitle": "終局攔截策略",
+    "terminalCategoriesCollapsedDesc": "設定終局分類，以及二審通過後可放行的專用審計模型。",
+    "terminalBypassModels": "終局二審豁免模型",
+    "terminalBypassModelsHint": "以逗號分隔精確的請求模型 ID。僅對這些模型，二審明確通過後可以清除本地終局命中；二審錯誤或判定違規時仍會攔截。",
     "riskSimplifiedDesc": "依使用者、IP 與會話累計週期風險；預設關閉。",
     "outputSimplifiedDesc": "掃描串流輸出中的嚴格高風險訊號；預設關閉。",
     "extensions": {
@@ -575,6 +579,7 @@
       }
     },
     "help": {
+      "terminalBypassModels": "僅用於提示詞必然包含違規樣本的專用審計模型。依客戶端請求模型 ID 比對，不依映射後的上游模型比對。",
       "normalizationPanel": "對常見編碼和壓縮片段進行有界還原；位元組、片段和輪數上限可避免解碼炸彈拖垮服務。",
       "maxDecodedBytes": "單次請求所有還原結果允許占用的最大位元組數，達到上限後停止繼續解碼。",
       "maxEncodedBlocks": "單次請求最多嘗試還原的獨立編碼片段數，限制惡意批量小片段消耗。",

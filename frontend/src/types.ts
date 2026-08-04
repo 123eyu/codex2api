@@ -1374,6 +1374,9 @@ export interface PromptReviewKeyTestResult {
   confidence: number
   reason?: string
   highest_category?: string
+  decision_category?: string
+  decision_score?: number
+  decision_threshold?: number
   category_scores?: Record<string, number>
   moderation_thresholds?: Record<string, number>
   latency_ms: number
@@ -1389,6 +1392,9 @@ export interface PromptReviewTestResponse {
   confidence_threshold: number
   reason?: string
   highest_category?: string
+  decision_category?: string
+  decision_score?: number
+  decision_threshold?: number
   category_scores?: Record<string, number>
   moderation_thresholds?: Record<string, number>
   latency_ms: number

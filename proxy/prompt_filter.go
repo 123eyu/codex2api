@@ -515,16 +515,23 @@ func (h *Handler) reviewPromptFilterVerdict(ctx context.Context, text string, ve
 	outcome, err := promptfilter.DefaultReviewClient.ReviewTextDetailed(ctx, text, cfg.Review)
 	reviewed := promptfilter.ApplyReviewOutcome(verdict, outcome, err, cfg.Review)
 	normalized := promptfilter.NormalizeReviewConfig(cfg.Review)
-	threshold := normalized.Adapter.ConfidenceThreshold
 	latencyMS := time.Since(startedAt).Milliseconds()
-	reviewed.ReviewThreshold = &threshold
 	reviewed.ReviewLatencyMS = &latencyMS
 	reviewed.ReviewReason = strings.TrimSpace(outcome.Reason)
 	reviewed.ReviewEndpoint = strings.TrimSpace(outcome.Endpoint)
 	reviewed.ReviewRequestMode = normalized.Adapter.RequestMode
 	if err == nil {
-		confidence := outcome.Confidence
-		reviewed.ReviewConfidence = &confidence
+		if normalized.Adapter.RequestMode == promptfilter.ReviewRequestModeModerations && outcome.DecisionCategory != "" {
+			score := outcome.DecisionScore
+			threshold := outcome.DecisionThreshold
+			reviewed.ReviewConfidence = &score
+			reviewed.ReviewThreshold = &threshold
+		} else if normalized.Adapter.RequestMode == promptfilter.ReviewRequestModeChatCompletions {
+			confidence := outcome.Confidence
+			threshold := normalized.Adapter.ConfidenceThreshold
+			reviewed.ReviewConfidence = &confidence
+			reviewed.ReviewThreshold = &threshold
+		}
 	}
 	return reviewed
 }

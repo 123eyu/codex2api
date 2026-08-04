@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,6 +56,42 @@ func TestReviewPromptFilterVerdictCapturesModelAuditMetadata(t *testing.T) {
 	}
 	if got.ReviewLatencyMS == nil || *got.ReviewLatencyMS < 0 {
 		t.Fatalf("review latency = %+v", got.ReviewLatencyMS)
+	}
+}
+
+func TestReviewPromptFilterVerdictCapturesModerationDecisionThreshold(t *testing.T) {
+	reviewServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/moderations" {
+			t.Errorf("review path = %s, want /v1/moderations", r.URL.Path)
+			http.Error(w, "unexpected review path", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"omni-moderation-latest","results":[{"flagged":false,"category_scores":{"harassment":0.97,"hate":0.65}}]}`))
+	}))
+	defer reviewServer.Close()
+
+	previousClient := promptfilter.DefaultReviewClient
+	promptfilter.DefaultReviewClient = promptfilter.ReviewClient{HTTPClient: reviewServer.Client()}
+	t.Cleanup(func() { promptfilter.DefaultReviewClient = previousClient })
+
+	cfg := promptfilter.DefaultConfig()
+	cfg.Enabled = true
+	cfg.Review.Enabled = true
+	cfg.Review.APIKey = "review-key"
+	cfg.Review.BaseURL = reviewServer.URL
+	cfg.Review.Model = "omni-moderation-latest"
+	cfg.Review.Adapter.RequestMode = promptfilter.ReviewRequestModeModerations
+
+	got := (&Handler{}).reviewPromptFilterVerdict(context.Background(), "test moderation decision", promptfilter.Verdict{Enabled: true, Action: promptfilter.ActionAllow}, cfg)
+	if !got.Reviewed || !got.ReviewFlagged || got.Action != promptfilter.ActionBlock {
+		t.Fatalf("review decision = %+v", got)
+	}
+	if got.ReviewConfidence == nil || *got.ReviewConfidence != 0.65 || got.ReviewThreshold == nil || *got.ReviewThreshold != 0.65 {
+		t.Fatalf("moderation decision metadata = %+v", got)
+	}
+	if !strings.Contains(got.ReviewReason, "hate 0.6500 >= 0.6500") {
+		t.Fatalf("review reason = %q, want matched category decision", got.ReviewReason)
 	}
 }
 

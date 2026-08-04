@@ -189,7 +189,7 @@ type PromptGuardEditorConfig = Omit<PromptGuardConfig, 'performance'>
 
 type AdvancedProtectionConfig = {
   guard: PromptGuardEditorConfig
-  enforcement: { terminal_categories: string[] }
+  enforcement: { terminal_categories: string[]; terminal_bypass_models: string[] }
   normalization: {
     enabled: boolean
     decode_url: boolean
@@ -280,7 +280,7 @@ const defaultPromptGuard: PromptGuardEditorConfig = {
 
 const defaultAdvancedProtection: AdvancedProtectionConfig = {
   guard: defaultPromptGuard,
-  enforcement: { terminal_categories: [] },
+  enforcement: { terminal_categories: [], terminal_bypass_models: ['codex-auto-review'] },
   normalization: {
     enabled: true,
     decode_url: true,
@@ -373,6 +373,9 @@ function parseAdvancedProtection(value: AdvancedConfigObject): AdvancedProtectio
       terminal_categories: Array.isArray(enforcement.terminal_categories)
         ? enforcement.terminal_categories.filter((category: unknown): category is string => typeof category === 'string')
         : [],
+      terminal_bypass_models: Array.isArray(enforcement.terminal_bypass_models)
+        ? enforcement.terminal_bypass_models.filter((model: unknown): model is string => typeof model === 'string')
+        : [...defaultAdvancedProtection.enforcement.terminal_bypass_models],
     },
     normalization: { ...defaultAdvancedProtection.normalization, ...(value.normalization || {}) },
     context_discount: { ...defaultAdvancedProtection.context_discount, ...(value.context_discount || {}) },
@@ -830,6 +833,7 @@ function AdvancedProtectionEditor({
     update(section, { [key]: next } as never)
   }
   const terminalCategoriesText = config.enforcement.terminal_categories.join(', ')
+  const terminalBypassModelsText = config.enforcement.terminal_bypass_models.join(', ')
   const queryCount = config.intelligence.queries.length
   const enabledExtensionCount = [config.sidecar.enabled, config.session.enabled, config.attachment.enabled, config.intelligence.enabled].filter(Boolean).length
   const guardModeOptions = promptGuardModes.map((mode) => ({
@@ -1128,10 +1132,12 @@ function AdvancedProtectionEditor({
         </AdvancedPanel>
 
         <details className="group rounded-lg border border-foreground/15 bg-background shadow-sm dark:border-foreground/20">
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3.5 marker:content-none [&::-webkit-details-marker]:hidden"><div><div className="text-sm font-semibold">{t('promptFilter.terminalCategories')}</div><p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.terminalCategoriesCollapsedDesc')}</p></div><ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" /></summary>
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3.5 marker:content-none [&::-webkit-details-marker]:hidden"><div><div className="text-sm font-semibold">{t('promptFilter.terminalPolicyTitle')}</div><p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.terminalCategoriesCollapsedDesc')}</p></div><ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" /></summary>
           <div className="space-y-2 border-t p-4">
             <CompactField label={t('promptFilter.terminalCategories')} hint={t('promptFilter.help.terminalCategories')}><Input value={terminalCategoriesText} placeholder="malware, credential_attack" onChange={(e) => update('enforcement', { terminal_categories: e.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} /></CompactField>
             <p className="text-[11px] leading-relaxed text-muted-foreground">{t('promptFilter.terminalCategoriesHint')}</p>
+            <CompactField label={t('promptFilter.terminalBypassModels')} hint={t('promptFilter.help.terminalBypassModels')}><Input value={terminalBypassModelsText} placeholder="codex-auto-review" onChange={(e) => update('enforcement', { terminal_bypass_models: e.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} /></CompactField>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">{t('promptFilter.terminalBypassModelsHint')}</p>
           </div>
         </details>
 
@@ -3091,7 +3097,12 @@ function OverviewView({
                       <div className="grid gap-2 rounded-md bg-background p-3 text-xs sm:grid-cols-2">
                         <div>{t('promptFilter.reviewTestEndpoint')}: <span className="font-mono break-all">{reviewTestResult.endpoint}</span></div>
                         <div>{t('promptFilter.reviewTestLatency')}: {reviewTestResult.latency_ms} ms</div>
-                        <div>{reviewAdapter.request_mode === 'moderations' ? t('promptFilter.reviewTestHighestScore') : t('promptFilter.reviewTestConfidence')}: {reviewTestResult.confidence.toFixed(2)}{reviewAdapter.request_mode === 'chat_completions' ? ` / ${reviewTestResult.confidence_threshold.toFixed(2)}` : ''}</div>
+                        <div>
+                          {reviewAdapter.request_mode === 'moderations' ? t('promptFilter.reviewTestDecision') : t('promptFilter.reviewTestConfidence')}:{' '}
+                          {reviewAdapter.request_mode === 'moderations' ? (
+                            <><span className="font-mono">{reviewTestResult.decision_category || '-'}</span>{' '}{(reviewTestResult.decision_score ?? reviewTestResult.confidence).toFixed(2)} / {typeof reviewTestResult.decision_threshold === 'number' ? reviewTestResult.decision_threshold.toFixed(2) : '-'}</>
+                          ) : `${reviewTestResult.confidence.toFixed(2)} / ${reviewTestResult.confidence_threshold.toFixed(2)}`}
+                        </div>
                         <div>{t('promptFilter.reviewModel')}: <span className="font-mono">{reviewTestResult.model}</span></div>
                         {reviewTestResult.highest_category ? <div>{t('promptFilter.reviewTestHighestCategory')}: <span className="font-mono">{reviewTestResult.highest_category}</span></div> : null}
                         {reviewTestResult.reason ? <div className="sm:col-span-2">{t('promptFilter.reviewTestReason')}: {reviewTestResult.reason}</div> : null}
@@ -4620,6 +4631,9 @@ function PromptReviewLogsTable({ logs }: { logs: PromptFilterLog[] }) {
             const reviewFailed = Boolean(log.review_error)
             const confidence = typeof log.review_confidence === 'number' ? log.review_confidence.toFixed(2) : t('promptFilter.notScored')
             const threshold = typeof log.review_threshold === 'number' ? log.review_threshold.toFixed(2) : '-'
+            const moderationCategory = log.review_request_mode === 'moderations'
+              ? log.review_reason?.match(/^moderation decision:\s+(\S+)/)?.[1]
+              : undefined
             return (
               <TableRow key={`review-${log.id}`}>
                 <TableCell className="align-top">
@@ -4644,7 +4658,7 @@ function PromptReviewLogsTable({ logs }: { logs: PromptFilterLog[] }) {
                     <Badge variant={reviewFailed || log.review_flagged ? 'destructive' : 'default'}>
                       {reviewFailed ? t('promptFilter.reviewResultError') : log.review_flagged ? t('promptFilter.labels.reviewFlagged') : t('promptFilter.labels.reviewCleared')}
                     </Badge>
-                    <span className="font-mono text-xs">{confidence} / {threshold}</span>
+                    <span className="font-mono text-xs">{moderationCategory ? `${moderationCategory} ` : ''}{confidence} / {threshold}</span>
                   </div>
                   {log.review_reason ? <p className="mt-2 text-xs leading-5">{log.review_reason}</p> : null}
                   {log.review_error ? <p className="mt-2 break-words text-xs leading-5 text-destructive">{log.review_error}</p> : null}

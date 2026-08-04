@@ -116,8 +116,27 @@ func TestRecommendedAdvancedConfigUsesExplicitCurrentPromptLayers(t *testing.T) 
 	if len(cfg.Enforcement.TerminalCategories) != 0 {
 		t.Fatalf("terminal categories = %v, want empty", cfg.Enforcement.TerminalCategories)
 	}
+	if len(cfg.Enforcement.TerminalBypassModels) != 1 || cfg.Enforcement.TerminalBypassModels[0] != "codex-auto-review" {
+		t.Fatalf("terminal bypass models = %v, want codex-auto-review", cfg.Enforcement.TerminalBypassModels)
+	}
 	if len(cfg.Intelligence.Queries) == 0 {
 		t.Fatal("recommended intelligence queries must be a non-nil audit seed")
+	}
+}
+
+func TestNormalizeAdvancedConfigNormalizesTerminalBypassModels(t *testing.T) {
+	cfg := NormalizeAdvancedConfig(AdvancedConfig{
+		Enforcement: EnforcementConfig{TerminalBypassModels: []string{" CODEX-AUTO-REVIEW ", "audit-model", "Audit-Model", ""}},
+	})
+	if got := cfg.Enforcement.TerminalBypassModels; len(got) != 2 || got[0] != "codex-auto-review" || got[1] != "audit-model" {
+		t.Fatalf("terminal bypass models = %v", got)
+	}
+
+	empty := NormalizeAdvancedConfig(AdvancedConfig{
+		Enforcement: EnforcementConfig{TerminalBypassModels: []string{}},
+	})
+	if len(empty.Enforcement.TerminalBypassModels) != 0 {
+		t.Fatalf("explicit empty terminal bypass models = %v, want empty", empty.Enforcement.TerminalBypassModels)
 	}
 }
 
