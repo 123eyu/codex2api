@@ -839,6 +839,7 @@
     "detailBaseUrl": "Base URL",
     "detailProxy": "代理",
     "modelCooldown": "模型 {{model}}",
+    "detailCopyEmail": "复制邮箱",
     "detailPrev": "上一个账号",
     "detailNext": "下一个账号",
     "openDetail": "查看详情",
