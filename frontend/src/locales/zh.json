@@ -2312,7 +2312,7 @@
     "reviewApiKeyHint": "每行一个 key。配置多个可轮询分摊额度，遇到限流、无效 key 或服务端错误时自动切换。",
     "reviewRequestMode": "请求适配模式",
     "reviewModeChat": "Chat Completions 兼容接口",
-    "reviewModeModerations": "Moderations（兼容旧配置）",
+    "reviewModeModerations": "Moderations 兼容接口",
     "reviewScope": "审核范围",
     "reviewScopeOptions": {
       "all_requests": "所有可提取输入的请求",
@@ -2320,6 +2320,10 @@
       "local_blocks": "仅本地拦截判定"
     },
     "reviewConfidenceThreshold": "违规置信度阈值",
+    "moderationThresholds": "风险阈值",
+    "moderationThresholdsHint": "按 OpenAI Moderations 分类调整命中阈值，分数达到或超过阈值即视为命中；不再使用上游 flagged 布尔值决定拦截。",
+    "moderationThresholdsReset": "恢复默认阈值",
+    "moderationThresholdDefault": "默认 {{percent}}%",
     "reviewMaxConcurrent": "最大并发审核数",
     "reviewMaxTextLength": "单次审核最大字符数",
     "reviewSystemPrompt": "Agent / System Prompt",
@@ -2339,6 +2343,8 @@
     "reviewTestEndpoint": "实际请求端点",
     "reviewTestLatency": "耗时",
     "reviewTestConfidence": "置信度 / 阈值",
+    "reviewTestHighestScore": "最高分类分数",
+    "reviewTestHighestCategory": "最高分类",
     "reviewTestReason": "模型原因",
     "testerTitle": "规则测试",
     "testEndpoint": "端点",

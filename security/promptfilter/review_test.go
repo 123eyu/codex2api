@@ -59,7 +59,7 @@ func TestReviewTextAllowsWhenNotFlagged(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"model": "omni-moderation-latest",
 			"results": []map[string]any{
-				{"flagged": false},
+				{"flagged": false, "category_scores": map[string]float64{"harassment": 0.12}},
 			},
 		})
 	}))
@@ -81,6 +81,87 @@ func TestReviewTextAllowsWhenNotFlagged(t *testing.T) {
 	}
 	if model != "omni-moderation-latest" {
 		t.Fatalf("model = %q, want omni-moderation-latest", model)
+	}
+}
+
+func TestModerationReviewUsesCategoryThresholdsInsteadOfProviderFlag(t *testing.T) {
+	tests := []struct {
+		name         string
+		result       map[string]any
+		thresholds   map[string]float64
+		wantFlagged  bool
+		wantScore    float64
+		wantCategory string
+	}{
+		{
+			name: "provider flag does not override scores below configured thresholds",
+			result: map[string]any{
+				"flagged":         true,
+				"category_scores": map[string]float64{"harassment": 0.97, "hate": 0.64},
+			},
+			wantFlagged: false, wantScore: 0.97, wantCategory: "harassment",
+		},
+		{
+			name: "category score at threshold is blocked even when provider flag is false",
+			result: map[string]any{
+				"flagged":         false,
+				"category_scores": map[string]float64{"hate": 0.65},
+			},
+			wantFlagged: true, wantScore: 0.65, wantCategory: "hate",
+		},
+		{
+			name: "custom threshold overrides default",
+			result: map[string]any{
+				"flagged":         false,
+				"category_scores": map[string]float64{"violence": 0.80},
+			},
+			thresholds:  map[string]float64{"violence": 0.75},
+			wantFlagged: true, wantScore: 0.80, wantCategory: "violence",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"model":   "omni-moderation-latest",
+				"results": []map[string]any{tt.result},
+			})
+			if err != nil {
+				t.Fatalf("marshal moderation response: %v", err)
+			}
+			outcome, err := decodeModerationReviewResponse(body, ReviewConfig{
+				Model:   "omni-moderation-latest",
+				Adapter: ReviewAdapterConfig{ModerationThresholds: tt.thresholds},
+			})
+			if err != nil {
+				t.Fatalf("decodeModerationReviewResponse: %v", err)
+			}
+			if outcome.Flagged != tt.wantFlagged || outcome.Confidence != tt.wantScore || outcome.HighestCategory != tt.wantCategory {
+				t.Fatalf("outcome = %+v, want flagged=%t score=%v category=%q", outcome, tt.wantFlagged, tt.wantScore, tt.wantCategory)
+			}
+			if tt.wantFlagged && !strings.Contains(outcome.Reason, tt.wantCategory) {
+				t.Fatalf("flagged reason = %q, want category %q", outcome.Reason, tt.wantCategory)
+			}
+		})
+	}
+}
+
+func TestDefaultReviewModerationThresholdsMatchSub2API(t *testing.T) {
+	want := map[string]float64{
+		"harassment": 0.98, "harassment/threatening": 0.90,
+		"hate": 0.65, "hate/threatening": 0.65,
+		"illicit": 0.95, "illicit/violent": 0.95,
+		"self-harm": 0.65, "self-harm/intent": 0.85, "self-harm/instructions": 0.65,
+		"sexual": 0.65, "sexual/minors": 0.65,
+		"violence": 0.95, "violence/graphic": 0.95,
+	}
+	got := DefaultReviewModerationThresholds()
+	if len(got) != len(want) {
+		t.Fatalf("threshold count = %d, want %d", len(got), len(want))
+	}
+	for category, threshold := range want {
+		if got[category] != threshold {
+			t.Fatalf("threshold[%q] = %v, want %v", category, got[category], threshold)
+		}
 	}
 }
 

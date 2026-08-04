@@ -82,7 +82,7 @@
     "reviewApiKeyHint": "多個 Key 會輪詢分攤額度，遇到限流、無效 Key 或伺服器錯誤時自動切換。",
     "reviewRequestMode": "請求適配模式",
     "reviewModeChat": "Chat Completions 相容介面",
-    "reviewModeModerations": "Moderations（相容舊設定）",
+    "reviewModeModerations": "Moderations 相容介面",
     "reviewScope": "審核範圍",
     "reviewScopeOptions": {
       "all_requests": "所有可擷取輸入的請求",
@@ -90,6 +90,10 @@
       "local_blocks": "僅本機攔截判定"
     },
     "reviewConfidenceThreshold": "違規信心閾值",
+    "moderationThresholds": "風險閾值",
+    "moderationThresholdsHint": "依 OpenAI Moderations 分類調整命中閾值，分數達到或超過閾值即視為命中；不再使用上游 flagged 布林值決定攔截。",
+    "moderationThresholdsReset": "恢復預設閾值",
+    "moderationThresholdDefault": "預設 {{percent}}%",
     "reviewMaxConcurrent": "最大並行複核數",
     "reviewMaxTextLength": "單次複核最大字元數",
     "reviewSystemPrompt": "Agent / System Prompt",
@@ -109,6 +113,8 @@
     "reviewTestEndpoint": "實際請求端點",
     "reviewTestLatency": "耗時",
     "reviewTestConfidence": "信心 / 閾值",
+    "reviewTestHighestScore": "最高分類分數",
+    "reviewTestHighestCategory": "最高分類",
     "reviewTestReason": "模型原因",
     "intelligence": {
       "aiAnalyze": "AI 歸因",

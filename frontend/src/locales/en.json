@@ -2312,7 +2312,7 @@
     "reviewApiKeyHint": "One key per line. Multiple keys are round-robin balanced and failed over on rate limits, invalid keys, or server errors.",
     "reviewRequestMode": "Request Adapter",
     "reviewModeChat": "Chat Completions compatible",
-    "reviewModeModerations": "Moderations (legacy compatible)",
+    "reviewModeModerations": "Moderations compatible",
     "reviewScope": "Review Scope",
     "reviewScopeOptions": {
       "all_requests": "All extractable requests",
@@ -2320,6 +2320,10 @@
       "local_blocks": "Local block decisions only"
     },
     "reviewConfidenceThreshold": "Violation Confidence Threshold",
+    "moderationThresholds": "Risk thresholds",
+    "moderationThresholdsHint": "A Moderations category is matched when its score is greater than or equal to the configured threshold. The provider's flagged boolean is not used for enforcement.",
+    "moderationThresholdsReset": "Restore default thresholds",
+    "moderationThresholdDefault": "Default {{percent}}%",
     "reviewMaxConcurrent": "Maximum Concurrent Reviews",
     "reviewMaxTextLength": "Maximum Review Characters",
     "reviewSystemPrompt": "Agent / System Prompt",
@@ -2339,6 +2343,8 @@
     "reviewTestEndpoint": "Resolved endpoint",
     "reviewTestLatency": "Latency",
     "reviewTestConfidence": "Confidence / threshold",
+    "reviewTestHighestScore": "Highest category score",
+    "reviewTestHighestCategory": "Highest category",
     "reviewTestReason": "Model reason",
     "testerTitle": "Rule Tester",
     "testEndpoint": "Endpoint",

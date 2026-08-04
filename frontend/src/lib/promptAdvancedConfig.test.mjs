@@ -288,6 +288,21 @@ test('Prompt Filter exposes explicit review scope and live connection testing', 
   }
 })
 
+test('Moderations review exposes sub2api-compatible category thresholds', () => {
+  const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
+  const requiredFragments = [
+    'moderation_thresholds',
+    "'harassment/threatening': 0.90",
+    "'self-harm/intent': 0.85",
+    "'sexual/minors': 0.65",
+    'resetModerationThresholds',
+    'reviewTestResult.highest_category',
+  ]
+  for (const fragment of requiredFragments) {
+    assert.equal(source.includes(fragment), true, `Moderations threshold control is missing: ${fragment}`)
+  }
+})
+
 test('adaptive model review is a single operator switch with backend-owned safety defaults', () => {
   const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
   const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))

@@ -1358,6 +1358,7 @@ export interface PromptReviewTestRequest {
   user_prompt_template: string
   payload_template: string
   confidence_threshold: number
+  moderation_thresholds: Record<string, number>
   timeout_seconds: number
   max_concurrent: number
   max_text_length: number
@@ -1372,6 +1373,9 @@ export interface PromptReviewKeyTestResult {
   flagged: boolean
   confidence: number
   reason?: string
+  highest_category?: string
+  category_scores?: Record<string, number>
+  moderation_thresholds?: Record<string, number>
   latency_ms: number
   error?: string
 }
@@ -1384,6 +1388,9 @@ export interface PromptReviewTestResponse {
   confidence: number
   confidence_threshold: number
   reason?: string
+  highest_category?: string
+  category_scores?: Record<string, number>
+  moderation_thresholds?: Record<string, number>
   latency_ms: number
   key_count?: number
   results?: PromptReviewKeyTestResult[]

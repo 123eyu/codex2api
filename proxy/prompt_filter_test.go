@@ -173,7 +173,7 @@ func TestPromptFilterReviewFlaggedKeepsBlock(t *testing.T) {
 
 	reviewServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"model":"omni-moderation-latest","results":[{"flagged":true}]}`))
+		_, _ = w.Write([]byte(`{"model":"omni-moderation-latest","results":[{"flagged":true,"category_scores":{"illicit":0.99}}]}`))
 	}))
 	defer reviewServer.Close()
 
@@ -224,7 +224,7 @@ func TestPromptFilterReviewsAndBlocksLocallyCleanRequest(t *testing.T) {
 	reviewServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reviewCalls++
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"model":"omni-moderation-latest","results":[{"flagged":true}]}`))
+		_, _ = w.Write([]byte(`{"model":"omni-moderation-latest","results":[{"flagged":true,"category_scores":{"illicit":0.99}}]}`))
 	}))
 	defer reviewServer.Close()
 

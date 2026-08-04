@@ -112,6 +112,7 @@ type ReviewAdapterFormConfig = {
   user_prompt_template: string
   payload_template: string
   confidence_threshold: number
+  moderation_thresholds: Record<string, number>
   max_concurrent: number
   max_text_length: number
 }
@@ -129,14 +130,41 @@ const defaultReviewAdapter: ReviewAdapterFormConfig = {
   user_prompt_template: '',
   payload_template: '',
   confidence_threshold: 0.7,
+  moderation_thresholds: {
+    harassment: 0.98,
+    'harassment/threatening': 0.90,
+    hate: 0.65,
+    'hate/threatening': 0.65,
+    illicit: 0.95,
+    'illicit/violent': 0.95,
+    'self-harm': 0.65,
+    'self-harm/intent': 0.85,
+    'self-harm/instructions': 0.65,
+    sexual: 0.65,
+    'sexual/minors': 0.65,
+    violence: 0.95,
+    'violence/graphic': 0.95,
+  },
   max_concurrent: 32,
   max_text_length: 32768,
 }
+
+const moderationThresholdCategories = Object.keys(defaultReviewAdapter.moderation_thresholds)
 
 function parseReviewAdapter(value: AdvancedConfigObject): ReviewAdapterFormConfig {
   const raw = value.review_adapter && typeof value.review_adapter === 'object'
     ? value.review_adapter as Record<string, unknown>
     : {}
+  const rawThresholds = raw.moderation_thresholds && typeof raw.moderation_thresholds === 'object'
+    ? raw.moderation_thresholds as Record<string, unknown>
+    : {}
+  const moderationThresholds = Object.fromEntries(moderationThresholdCategories.map((category) => {
+    const configured = rawThresholds[category]
+    const threshold = typeof configured === 'number' && Number.isFinite(configured)
+      ? Math.min(1, Math.max(0, configured))
+      : defaultReviewAdapter.moderation_thresholds[category]
+    return [category, threshold]
+  }))
   return {
     request_mode: raw.request_mode === 'chat_completions' ? 'chat_completions' : 'moderations',
     scope: raw.scope === 'local_candidates' || raw.scope === 'local_blocks' ? raw.scope : 'all_requests',
@@ -144,6 +172,7 @@ function parseReviewAdapter(value: AdvancedConfigObject): ReviewAdapterFormConfi
     user_prompt_template: typeof raw.user_prompt_template === 'string' && raw.user_prompt_template.trim() ? raw.user_prompt_template : defaultReviewAdapter.user_prompt_template,
     payload_template: typeof raw.payload_template === 'string' ? raw.payload_template : '',
     confidence_threshold: typeof raw.confidence_threshold === 'number' && raw.confidence_threshold > 0 && raw.confidence_threshold <= 1 ? raw.confidence_threshold : defaultReviewAdapter.confidence_threshold,
+    moderation_thresholds: moderationThresholds,
     max_concurrent: typeof raw.max_concurrent === 'number' && raw.max_concurrent > 0 ? raw.max_concurrent : defaultReviewAdapter.max_concurrent,
     max_text_length: typeof raw.max_text_length === 'number' && raw.max_text_length > 0 ? raw.max_text_length : defaultReviewAdapter.max_text_length,
   }
@@ -2755,6 +2784,15 @@ function OverviewView({
     setReviewTestResult(null)
     setForm((current) => ({ ...current, prompt_filter_advanced_config: patched.serialized }))
   }
+  const updateModerationThreshold = (category: string, percent: number) => {
+    updateReviewAdapter('moderation_thresholds', {
+      ...reviewAdapter.moderation_thresholds,
+      [category]: Math.min(1, Math.max(0, percent / 100)),
+    })
+  }
+  const resetModerationThresholds = () => {
+    updateReviewAdapter('moderation_thresholds', { ...defaultReviewAdapter.moderation_thresholds })
+  }
   const updateAdaptiveReview = (enabled: boolean) => {
     const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, [{ path: ['adaptive_review', 'enabled'], value: enabled }])
     if (!patched.ok) {
@@ -2782,6 +2820,7 @@ function OverviewView({
         user_prompt_template: reviewAdapter.user_prompt_template,
         payload_template: reviewAdapter.payload_template,
         confidence_threshold: reviewAdapter.confidence_threshold,
+        moderation_thresholds: reviewAdapter.moderation_thresholds,
         timeout_seconds: form.prompt_filter_review_timeout_seconds,
         max_concurrent: reviewAdapter.max_concurrent,
         max_text_length: reviewAdapter.max_text_length,
@@ -2996,10 +3035,31 @@ function OverviewView({
                   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
                     <Field label={t('promptFilter.reviewRequestMode')}><Select value={reviewAdapter.request_mode} onValueChange={(value) => updateReviewAdapter('request_mode', value as ReviewAdapterFormConfig['request_mode'])} options={[{ label: t('promptFilter.reviewModeChat'), value: 'chat_completions' }, { label: t('promptFilter.reviewModeModerations'), value: 'moderations' }]} /></Field>
                     <Field label={t('promptFilter.reviewScope')}><Select value={reviewAdapter.scope} onValueChange={(value) => updateReviewAdapter('scope', value as ReviewAdapterFormConfig['scope'])} options={(['all_requests', 'local_candidates', 'local_blocks'] as ReviewAdapterFormConfig['scope'][]).map((scope) => ({ label: t(`promptFilter.reviewScopeOptions.${scope}`), value: scope }))} /></Field>
-                    <Field label={t('promptFilter.reviewConfidenceThreshold')}><DraftNumberInput integer={false} step="0.01" min={0.01} max={1} value={reviewAdapter.confidence_threshold} onValueChange={(value) => updateReviewAdapter('confidence_threshold', value)} /></Field>
+                    {reviewAdapter.request_mode === 'chat_completions' ? <Field label={t('promptFilter.reviewConfidenceThreshold')}><DraftNumberInput integer={false} step="0.01" min={0.01} max={1} value={reviewAdapter.confidence_threshold} onValueChange={(value) => updateReviewAdapter('confidence_threshold', value)} /></Field> : null}
                     <Field label={t('promptFilter.reviewMaxConcurrent')}><DraftNumberInput min={1} max={256} value={reviewAdapter.max_concurrent} onValueChange={(value) => updateReviewAdapter('max_concurrent', value)} /></Field>
                     <Field label={t('promptFilter.reviewMaxTextLength')}><DraftNumberInput min={1024} max={262144} value={reviewAdapter.max_text_length} onValueChange={(value) => updateReviewAdapter('max_text_length', value)} /></Field>
                   </div>
+                  {reviewAdapter.request_mode === 'moderations' ? (
+                    <div className="space-y-3 rounded-lg border bg-muted/20 p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold">{t('promptFilter.moderationThresholds')}</div>
+                          <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.moderationThresholdsHint')}</p>
+                        </div>
+                        <Button type="button" variant="outline" size="sm" onClick={resetModerationThresholds}>{t('promptFilter.moderationThresholdsReset')}</Button>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                        {moderationThresholdCategories.map((category) => (
+                          <Field key={category} label={category} hint={t('promptFilter.moderationThresholdDefault', { percent: defaultReviewAdapter.moderation_thresholds[category] * 100 })}>
+                            <div className="flex items-center gap-2">
+                              <DraftNumberInput integer={false} step="0.1" min={0} max={100} value={reviewAdapter.moderation_thresholds[category] * 100} onValueChange={(value) => updateModerationThreshold(category, value)} />
+                              <span className="text-sm text-muted-foreground">%</span>
+                            </div>
+                          </Field>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   <details className="group rounded-lg border border-foreground/10 bg-muted/10 open:bg-muted/20">
                     <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 marker:content-none [&::-webkit-details-marker]:hidden">
                       <div className="min-w-0">
@@ -3031,8 +3091,9 @@ function OverviewView({
                       <div className="grid gap-2 rounded-md bg-background p-3 text-xs sm:grid-cols-2">
                         <div>{t('promptFilter.reviewTestEndpoint')}: <span className="font-mono break-all">{reviewTestResult.endpoint}</span></div>
                         <div>{t('promptFilter.reviewTestLatency')}: {reviewTestResult.latency_ms} ms</div>
-                        <div>{t('promptFilter.reviewTestConfidence')}: {reviewTestResult.confidence.toFixed(2)} / {reviewTestResult.confidence_threshold.toFixed(2)}</div>
+                        <div>{reviewAdapter.request_mode === 'moderations' ? t('promptFilter.reviewTestHighestScore') : t('promptFilter.reviewTestConfidence')}: {reviewTestResult.confidence.toFixed(2)}{reviewAdapter.request_mode === 'chat_completions' ? ` / ${reviewTestResult.confidence_threshold.toFixed(2)}` : ''}</div>
                         <div>{t('promptFilter.reviewModel')}: <span className="font-mono">{reviewTestResult.model}</span></div>
+                        {reviewTestResult.highest_category ? <div>{t('promptFilter.reviewTestHighestCategory')}: <span className="font-mono">{reviewTestResult.highest_category}</span></div> : null}
                         {reviewTestResult.reason ? <div className="sm:col-span-2">{t('promptFilter.reviewTestReason')}: {reviewTestResult.reason}</div> : null}
                         {reviewTestResult.results?.length ? <div className="sm:col-span-2 mt-1 grid gap-2 md:grid-cols-3">{reviewTestResult.results.map((item) => <div key={item.key_index} className="rounded border bg-background p-2"><div className="flex items-center justify-between gap-2"><span className="font-medium">Key #{item.key_index}</span><Badge variant={item.ok ? 'default' : 'destructive'}>{item.ok ? t('common.success') : t('common.failed')}</Badge></div><div className="mt-1 text-muted-foreground">{item.latency_ms} ms · {item.ok ? item.confidence.toFixed(2) : item.error || '-'}</div></div>)}</div> : null}
                       </div>
