@@ -458,6 +458,59 @@ func TestPromptRiskLegacyLocalBlocksUseConservativeDeduplicatedScoring(t *testin
 	}
 }
 
+func TestPromptRiskProfileAggregationStaysBoundedWithManyClearedEvents(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	tx, err := db.conn.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO prompt_risk_events (
+		created_at, source_type, source_id, subject_type, subject_key, subject_display, platform,
+		is_person, identity_confidence, event_kind, request_risk_score, evidence_confidence,
+		action, prompt_fingerprint, prompt_preview
+	) VALUES (CURRENT_TIMESTAMP,'prompt_filter_log',$1,'newapi_user',$2,$3,'prod',true,100,$4,$5,100,$6,$7,$8)`)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	for index := 0; index < 30_000; index++ {
+		subject := fmt.Sprintf("bulk-user-%03d", index%100)
+		eventKind, score, action := promptRiskEventReviewCleared, 0, "allow"
+		fingerprint := promptRiskHash("cleared", fmt.Sprintf("%d", index))
+		preview := "cleared review"
+		if index < 1_000 {
+			eventKind, score, action = promptRiskEventLocalBlock, 38, "block"
+			fingerprint = promptRiskHash("blocked", fmt.Sprintf("%d", index%100))
+			preview = "repeated unverified block"
+		}
+		if _, err := stmt.Exec(fmt.Sprintf("bulk-%d", index), PromptRiskNewAPIUserSubjectKey("prod", subject), subject,
+			eventKind, score, action, fingerprint, preview); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			t.Fatalf("insert event %d: %v", index, err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	profiles, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{
+		Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser,
+	})
+	if err != nil {
+		t.Fatalf("bounded aggregation failed: %v", err)
+	}
+	if total != 100 || len(profiles) != 20 {
+		t.Fatalf("profiles total=%d len=%d, want 100/20", total, len(profiles))
+	}
+}
+
 func TestPromptRiskDefensiveSecurityContextIsObservedAndRepeated(t *testing.T) {
 	db := newPromptPolicySQLiteTestDB(t)
 	ctx := context.Background()

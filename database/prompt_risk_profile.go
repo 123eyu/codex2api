@@ -947,37 +947,46 @@ func (db *DB) ListPromptRiskProfiles(ctx context.Context, query PromptRiskProfil
 			AND (LOWER(pri.external_user_id) LIKE $%d OR LOWER(pri.user_name) LIKE $%d OR LOWER(pri.user_email) LIKE $%d OR LOWER(pri.user_group) LIKE $%d)
 		))`, i, i, i, i, i, i, i, i, i, i))
 	}
-	rows, err := db.conn.QueryContext(ctx, `WITH filtered_events AS (
+	rows, err := db.conn.QueryContext(ctx, `WITH filtered_events AS MATERIALIZED (
 		SELECT * FROM prompt_risk_events WHERE `+strings.Join(clauses, " AND ")+`
+	), profile_aggregates AS (
+		SELECT subject_type, subject_key,
+			MAX(subject_display) AS subject_display, MAX(platform) AS platform, MAX(CASE WHEN is_person THEN 1 ELSE 0 END) AS is_person,
+			MAX(identity_confidence) AS identity_confidence, MAX(created_at) AS latest_at,
+			COUNT(*) AS event_count, SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END) AS events_10m,
+			SUM(CASE WHEN created_at >= $3 THEN 1 ELSE 0 END) AS events_24h,
+			SUM(CASE WHEN created_at >= $4 THEN 1 ELSE 0 END) AS events_7d,
+			SUM(CASE WHEN request_risk_score>0 AND event_kind NOT IN ('local_audit_hit', 'review_cleared', 'local_security_context_observed', 'local_block', 'local_block_unverified', 'local_block_cleared') AND created_at >= $3 THEN 1 ELSE 0 END) AS positive_events_24h,
+			SUM(CASE WHEN event_kind LIKE 'upstream_cy_%' THEN 1 ELSE 0 END) AS upstream_cy_count,
+			SUM(CASE WHEN event_kind='upstream_cy_confirmed_miss' THEN 1 ELSE 0 END) AS confirmed_miss_count,
+			SUM(CASE WHEN event_kind LIKE 'local_block%' THEN 1 ELSE 0 END) AS local_block_count,
+			SUM(CASE WHEN event_kind='local_warn' THEN 1 ELSE 0 END) AS local_warn_count,
+			SUM(CASE WHEN prompt_fingerprint<>'' AND event_kind NOT IN ('local_audit_hit', 'review_cleared', 'local_block', 'local_block_unverified', 'local_block_cleared') THEN 1 ELSE 0 END) AS fingerprint_events,
+			COUNT(DISTINCT CASE WHEN prompt_fingerprint<>'' AND event_kind NOT IN ('local_audit_hit', 'review_cleared', 'local_block', 'local_block_unverified', 'local_block_cleared') THEN prompt_fingerprint END) AS distinct_fingerprints,
+			MAX(api_key_id) AS api_key_id, MAX(api_key_name) AS api_key_name, MAX(api_key_masked) AS api_key_masked,
+			MAX(account_id) AS account_id, MAX(account_name) AS account_name,
+			SUM(CASE WHEN event_kind IN ('local_audit_hit', 'review_cleared', 'local_block', 'local_block_unverified', 'local_block_cleared') THEN 0 ELSE request_risk_score * evidence_confidence * identity_confidence * CASE WHEN created_at >= $2 THEN 100 WHEN created_at >= $3 THEN 75 WHEN created_at >= $4 THEN 40 ELSE 15 END END) AS weighted_total,
+			SUM(CASE WHEN event_kind LIKE 'local_%' AND event_kind NOT IN ('local_audit_hit', 'local_block', 'local_block_unverified', 'local_block_cleared') THEN request_risk_score * evidence_confidence * identity_confidence * CASE WHEN created_at >= $2 THEN 100 WHEN created_at >= $3 THEN 75 WHEN created_at >= $4 THEN 40 ELSE 15 END ELSE 0 END) AS weighted_local,
+			SUM(CASE WHEN event_kind LIKE 'upstream_cy_%' THEN request_risk_score * evidence_confidence * identity_confidence * CASE WHEN created_at >= $2 THEN 100 WHEN created_at >= $3 THEN 75 WHEN created_at >= $4 THEN 40 ELSE 15 END ELSE 0 END) AS weighted_upstream
+		FROM filtered_events
+		GROUP BY subject_type, subject_key
 	), ranked_unverified AS (
-		SELECT id, ROW_NUMBER() OVER (
+		SELECT subject_type, subject_key, identity_confidence, created_at, ROW_NUMBER() OVER (
 			PARTITION BY subject_type, subject_key,
 			CASE WHEN prompt_fingerprint<>'' THEN prompt_fingerprint WHEN prompt_preview<>'' THEN prompt_preview ELSE source_type || ':' || source_id END
 			ORDER BY created_at, id
 		) AS unverified_rank
 		FROM filtered_events WHERE event_kind IN ('local_block','local_block_unverified')
-	), ranked_events AS (
-		SELECT filtered_events.*, COALESCE(ranked_unverified.unverified_rank, 1) AS unverified_rank
-		FROM filtered_events LEFT JOIN ranked_unverified ON ranked_unverified.id=filtered_events.id
+	), unverified_aggregates AS (
+		SELECT subject_type, subject_key,
+			SUM(CASE WHEN unverified_rank=1 THEN 8 * 35 * identity_confidence * CASE WHEN created_at >= $2 THEN 100 WHEN created_at >= $3 THEN 75 WHEN created_at >= $4 THEN 40 ELSE 15 END ELSE 0 END) AS weighted_unverified
+		FROM ranked_unverified
+		GROUP BY subject_type, subject_key
 	)
-	SELECT subject_type, subject_key,
-		MAX(subject_display), MAX(platform), MAX(CASE WHEN is_person THEN 1 ELSE 0 END), MAX(identity_confidence), MAX(created_at),
-		COUNT(*), SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), SUM(CASE WHEN created_at >= $3 THEN 1 ELSE 0 END),
-		SUM(CASE WHEN created_at >= $4 THEN 1 ELSE 0 END),
-		SUM(CASE WHEN request_risk_score>0 AND event_kind NOT IN ('local_audit_hit', 'review_cleared', 'local_security_context_observed', 'local_block', 'local_block_unverified', 'local_block_cleared') AND created_at >= $3 THEN 1 ELSE 0 END),
-		SUM(CASE WHEN event_kind LIKE 'upstream_cy_%' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN event_kind='upstream_cy_confirmed_miss' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN event_kind LIKE 'local_block%' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN event_kind='local_warn' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN prompt_fingerprint<>'' AND event_kind NOT IN ('local_audit_hit', 'review_cleared', 'local_block', 'local_block_unverified', 'local_block_cleared') THEN 1 ELSE 0 END),
-		COUNT(DISTINCT CASE WHEN prompt_fingerprint<>'' AND event_kind NOT IN ('local_audit_hit', 'review_cleared', 'local_block', 'local_block_unverified', 'local_block_cleared') THEN prompt_fingerprint END),
-		MAX(api_key_id), MAX(api_key_name), MAX(api_key_masked), MAX(account_id), MAX(account_name),
-		SUM(CASE WHEN event_kind IN ('local_audit_hit', 'review_cleared', 'local_block', 'local_block_unverified', 'local_block_cleared') THEN 0 ELSE request_risk_score * evidence_confidence * identity_confidence * CASE WHEN created_at >= $2 THEN 100 WHEN created_at >= $3 THEN 75 WHEN created_at >= $4 THEN 40 ELSE 15 END END),
-		SUM(CASE WHEN event_kind LIKE 'local_%' AND event_kind NOT IN ('local_audit_hit', 'local_block', 'local_block_unverified', 'local_block_cleared') THEN request_risk_score * evidence_confidence * identity_confidence * CASE WHEN created_at >= $2 THEN 100 WHEN created_at >= $3 THEN 75 WHEN created_at >= $4 THEN 40 ELSE 15 END ELSE 0 END),
-		SUM(CASE WHEN event_kind LIKE 'upstream_cy_%' THEN request_risk_score * evidence_confidence * identity_confidence * CASE WHEN created_at >= $2 THEN 100 WHEN created_at >= $3 THEN 75 WHEN created_at >= $4 THEN 40 ELSE 15 END ELSE 0 END),
-		SUM(CASE WHEN event_kind IN ('local_block','local_block_unverified') AND unverified_rank=1 THEN 8 * 35 * identity_confidence * CASE WHEN created_at >= $2 THEN 100 WHEN created_at >= $3 THEN 75 WHEN created_at >= $4 THEN 40 ELSE 15 END ELSE 0 END)
-	FROM ranked_events
-	GROUP BY subject_type, subject_key`, args...)
+	SELECT profile_aggregates.*, COALESCE(unverified_aggregates.weighted_unverified, 0)
+	FROM profile_aggregates
+	LEFT JOIN unverified_aggregates ON unverified_aggregates.subject_type=profile_aggregates.subject_type
+		AND unverified_aggregates.subject_key=profile_aggregates.subject_key`, args...)
 	if err != nil {
 		return nil, 0, err
 	}
