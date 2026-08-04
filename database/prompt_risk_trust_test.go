@@ -197,7 +197,7 @@ func TestPromptRiskAdaptiveReviewBasisCountsDistinctCleanRequestsAndPositiveEvid
 		{sourceID: "clean-1-duplicate", requestID: "request-clean-1", eventKind: "review_cleared", createdAt: now.Add(-2 * time.Hour)},
 		{sourceID: "clean-2", requestID: "request-clean-2", eventKind: "review_cleared", createdAt: now.Add(-time.Hour)},
 		{sourceID: "audit-only", requestID: "request-audit", eventKind: "local_audit_hit", riskScore: 20, createdAt: now.Add(-45 * time.Minute)},
-		{sourceID: "positive", requestID: "request-positive", eventKind: "local_block", riskScore: 80, createdAt: now.Add(-30 * time.Minute)},
+		{sourceID: "positive", requestID: "request-positive", eventKind: "local_block_strike", riskScore: 80, createdAt: now.Add(-30 * time.Minute)},
 	}
 	for _, row := range rows {
 		if _, err := db.conn.ExecContext(ctx, `INSERT INTO prompt_risk_events (

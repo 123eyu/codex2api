@@ -110,6 +110,51 @@ func TestPromptRiskIdentityDirectoryEnrichesHistoricalProfiles(t *testing.T) {
 	}
 }
 
+func TestPromptRiskIdentityDirectoryListsPeopleBeforeFirstRiskEvent(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	if err := db.UpsertPromptRiskIdentities(ctx, []PromptRiskIdentityInput{
+		{Platform: "gateway-a", ExternalUserID: "101", UserName: "new-user", UserEmail: "new@example.com", UserGroup: "standard", Source: "admin_import"},
+		{Platform: "gateway-a", ExternalUserID: "102", UserName: "active-user", Source: "admin_import"},
+	}); err != nil {
+		t.Fatalf("UpsertPromptRiskIdentities: %v", err)
+	}
+	if err := db.InsertPromptFilterLog(ctx, &PromptFilterLogInput{
+		Source: "local_filter", Action: "warn", Score: 40, MatchedPatterns: `[{"name":"x"}]`,
+		NewAPIPolicyStatus: "verified", NewAPIPlatform: "gateway-a", NewAPIUserID: "102",
+	}); err != nil {
+		t.Fatalf("InsertPromptFilterLog: %v", err)
+	}
+
+	profiles, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser})
+	if err != nil || total != 2 || len(profiles) != 2 {
+		t.Fatalf("profiles total=%d items=%#v err=%v", total, profiles, err)
+	}
+	var identityOnly, active *PromptRiskProfile
+	for _, profile := range profiles {
+		switch profile.NewAPIUserID {
+		case "101":
+			identityOnly = profile
+		case "102":
+			active = profile
+		}
+	}
+	if identityOnly == nil || identityOnly.HasActivity || identityOnly.EventCount != 0 || identityOnly.RiskScore != 0 || identityOnly.IdentitySource != "admin_import" || identityOnly.IdentityUpdatedAt == nil {
+		t.Fatalf("identity-only profile = %#v", identityOnly)
+	}
+	if active == nil || !active.HasActivity || active.EventCount != 1 {
+		t.Fatalf("active profile = %#v", active)
+	}
+	filtered, filteredTotal, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser, Query: "new@example.com"})
+	if err != nil || filteredTotal != 1 || len(filtered) != 1 || filtered[0].NewAPIUserID != "101" {
+		t.Fatalf("identity-only search total=%d items=%#v err=%v", filteredTotal, filtered, err)
+	}
+	minimumRisk, minimumRiskTotal, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser, MinScore: 1})
+	if err != nil || minimumRiskTotal != 1 || len(minimumRisk) != 1 || minimumRisk[0].NewAPIUserID != "102" {
+		t.Fatalf("min-risk profiles total=%d items=%#v err=%v", minimumRiskTotal, minimumRisk, err)
+	}
+}
+
 func TestPromptRiskUnsignedIdentityNeverCreatesPersonProfile(t *testing.T) {
 	db := newPromptPolicySQLiteTestDB(t)
 	input := &PromptFilterLogInput{
@@ -165,7 +210,7 @@ func TestPromptRiskBackfillLearnsExistingCYWithoutInventingPerson(t *testing.T) 
 	}
 }
 
-func TestPromptRiskProfilesPaginateFilterAndClearWithAuditHistory(t *testing.T) {
+func TestPromptRiskProfilesPaginateFilterAndSurviveLogClear(t *testing.T) {
 	db := newPromptPolicySQLiteTestDB(t)
 	ctx := context.Background()
 	for _, userID := range []string{"user-a", "user-b", "user-c"} {
@@ -188,8 +233,32 @@ func TestPromptRiskProfilesPaginateFilterAndClearWithAuditHistory(t *testing.T) 
 		t.Fatalf("ClearPromptFilterLogs: %v", err)
 	}
 	_, total, err = db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20})
-	if err != nil || total != 0 {
-		t.Fatalf("profiles survived clear total=%d err=%v", total, err)
+	if err != nil || total != 3 {
+		t.Fatalf("profiles changed after log clear total=%d err=%v", total, err)
+	}
+}
+
+func TestPromptRiskProfilesSurviveIncidentClear(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	incident, candidate, evidence := promptPolicyTestInputs("risk-clear-incident")
+	incident.LocalComparison = PromptPolicyComparisonConfirmedMiss
+	incident.NewAPIPolicyStatus = "verified"
+	incident.NewAPIPlatform = "prod"
+	incident.NewAPIUserID = "incident-user"
+	if err := db.PersistPromptPolicyIncident(ctx, incident, candidate, evidence); err != nil {
+		t.Fatalf("PersistPromptPolicyIncident: %v", err)
+	}
+	_, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20})
+	if err != nil || total == 0 {
+		t.Fatalf("profiles before incident clear total=%d err=%v", total, err)
+	}
+	if err := db.ClearPromptPolicyIncidents(ctx); err != nil {
+		t.Fatalf("ClearPromptPolicyIncidents: %v", err)
+	}
+	_, totalAfter, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20})
+	if err != nil || totalAfter != total {
+		t.Fatalf("profiles changed after incident clear before=%d after=%d err=%v", total, totalAfter, err)
 	}
 }
 
@@ -260,6 +329,229 @@ func TestPromptRiskClearedReviewDoesNotIncreaseRiskOrRecurrence(t *testing.T) {
 	}
 	if profiles[0].RiskScore != 0 || profiles[0].ScoreBreakdown.Recurrence != 0 || profiles[0].RiskLevel != PromptRiskLevelLow {
 		t.Fatalf("cleared reviews increased risk: %#v", profiles[0])
+	}
+}
+
+func TestPromptRiskUnverifiedBlocksAreDeduplicatedAndCapped(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	for index := 0; index < 20; index++ {
+		if err := db.InsertPromptFilterLog(ctx, &PromptFilterLogInput{
+			Source: "local_filter", Action: "block", ReviewModel: "review-model", ReviewError: "context deadline exceeded",
+			TextPreview: "benign repeated development request", RequestCorrelationID: fmt.Sprintf("unverified-%d", index),
+			NewAPIPolicyStatus: "verified", NewAPIPlatform: "prod", NewAPIUserID: "unverified-user",
+		}); err != nil {
+			t.Fatalf("InsertPromptFilterLog(%d): %v", index, err)
+		}
+	}
+	for index := 0; index < 20; index++ {
+		if err := db.InsertPromptFilterLog(ctx, &PromptFilterLogInput{
+			Source: "local_filter", Action: "block", ReviewModel: "review-model", ReviewError: "context deadline exceeded",
+			TextPreview: fmt.Sprintf("distinct unverified development request %d", index), RequestCorrelationID: fmt.Sprintf("distinct-unverified-%d", index),
+			NewAPIPolicyStatus: "verified", NewAPIPlatform: "prod", NewAPIUserID: "unverified-user",
+		}); err != nil {
+			t.Fatalf("InsertPromptFilterLog(distinct %d): %v", index, err)
+		}
+	}
+	profiles, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser})
+	if err != nil || total != 1 || len(profiles) != 1 {
+		t.Fatalf("profiles total=%d items=%#v err=%v", total, profiles, err)
+	}
+	profile := profiles[0]
+	if profile.RiskScore != 14 || profile.RiskLevel != PromptRiskLevelLow || profile.LocalBlockCount != 40 {
+		t.Fatalf("unverified repeats inflated profile: %#v", profile)
+	}
+	basis, err := db.GetPromptRiskAdaptiveReviewBasis(ctx, profile.SubjectType, profile.SubjectKey, time.Now().UTC().Add(-time.Hour))
+	if err != nil || basis.PositiveEvidenceCount != 0 {
+		t.Fatalf("unverified blocks became confirmed trust evidence: basis=%#v err=%v", basis, err)
+	}
+	events, eventTotal, err := db.ListPromptRiskEvents(ctx, profile.SubjectType, profile.SubjectKey, PromptRiskEventQuery{Page: 1, PageSize: 1})
+	if err != nil || eventTotal != 40 || len(events) != 1 || events[0].EventKind != promptRiskEventLocalBlockUnverified || events[0].PromptFingerprint == "" {
+		t.Fatalf("unverified event total=%d items=%#v err=%v", eventTotal, events, err)
+	}
+}
+
+func TestPromptRiskUnverifiedBlockReconcilesWhenClearArrivesFirst(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	common := PromptFilterLogInput{
+		Source: "local_filter", TextPreview: "normal application maintenance", RequestCorrelationID: "review-correction-reversed",
+		NewAPIPolicyStatus: "verified", NewAPIPlatform: "prod", NewAPIUserID: "reverse-corrected-user",
+	}
+	cleared := common
+	cleared.Action = "allow"
+	cleared.ReviewModel = "review-model"
+	cleared.Reviewed = true
+	if err := db.InsertPromptFilterLog(ctx, &cleared); err != nil {
+		t.Fatalf("InsertPromptFilterLog(clear): %v", err)
+	}
+	blocked := common
+	blocked.Action = "block"
+	blocked.ReviewModel = "review-model"
+	blocked.ReviewError = "context deadline exceeded"
+	if err := db.InsertPromptFilterLog(ctx, &blocked); err != nil {
+		t.Fatalf("InsertPromptFilterLog(block): %v", err)
+	}
+	profiles, _, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser})
+	if err != nil || len(profiles) != 1 || profiles[0].RiskScore != 0 {
+		t.Fatalf("reverse-order correction profile=%#v err=%v", profiles, err)
+	}
+	events, _, err := db.ListPromptRiskEvents(ctx, profiles[0].SubjectType, profiles[0].SubjectKey, PromptRiskEventQuery{Page: 1, PageSize: 10})
+	if err != nil || len(events) != 2 || events[0].EventKind != promptRiskEventLocalBlockCleared || events[1].EventKind != promptRiskEventReviewCleared {
+		t.Fatalf("reverse-order correction events=%#v err=%v", events, err)
+	}
+}
+
+func TestPromptRiskClearedReviewReconcilesPriorUnverifiedBlock(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	common := PromptFilterLogInput{
+		Source: "local_filter", TextPreview: "normal application maintenance", RequestCorrelationID: "review-correction-request",
+		NewAPIPolicyStatus: "verified", NewAPIPlatform: "prod", NewAPIUserID: "corrected-user",
+	}
+	blocked := common
+	blocked.Action = "block"
+	blocked.ReviewModel = "review-model"
+	blocked.ReviewError = "context deadline exceeded"
+	if err := db.InsertPromptFilterLog(ctx, &blocked); err != nil {
+		t.Fatalf("InsertPromptFilterLog(block): %v", err)
+	}
+	cleared := common
+	cleared.Action = "allow"
+	cleared.ReviewModel = "review-model"
+	cleared.Reviewed = true
+	if err := db.InsertPromptFilterLog(ctx, &cleared); err != nil {
+		t.Fatalf("InsertPromptFilterLog(clear): %v", err)
+	}
+	profiles, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser})
+	if err != nil || total != 1 || len(profiles) != 1 || profiles[0].RiskScore != 0 {
+		t.Fatalf("corrected profile total=%d items=%#v err=%v", total, profiles, err)
+	}
+	events, eventTotal, err := db.ListPromptRiskEvents(ctx, profiles[0].SubjectType, profiles[0].SubjectKey, PromptRiskEventQuery{Page: 1, PageSize: 10})
+	if err != nil || eventTotal != 2 || len(events) != 2 {
+		t.Fatalf("corrected events total=%d items=%#v err=%v", eventTotal, events, err)
+	}
+	if events[0].EventKind != promptRiskEventReviewCleared || events[1].EventKind != promptRiskEventLocalBlockCleared || events[1].RequestRiskScore != 0 {
+		t.Fatalf("review correction was not durable: %#v", events)
+	}
+}
+
+func TestPromptRiskLegacyLocalBlocksUseConservativeDeduplicatedScoring(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	subjectKey := PromptRiskNewAPIUserSubjectKey("prod", "legacy-unverified-user")
+	for index := 0; index < 20; index++ {
+		if _, err := db.conn.ExecContext(ctx, `INSERT INTO prompt_risk_events (
+			created_at, source_type, source_id, subject_type, subject_key, subject_display, platform,
+			is_person, identity_confidence, event_kind, request_risk_score, evidence_confidence, action, prompt_preview
+		) VALUES (CURRENT_TIMESTAMP,'prompt_filter_log',$1,'newapi_user',$2,'legacy-user','prod',true,100,'local_block',38,85,'block','same benign preview')`,
+			fmt.Sprintf("legacy-unverified-%d", index), subjectKey); err != nil {
+			t.Fatalf("insert legacy event: %v", err)
+		}
+	}
+	profiles, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser})
+	if err != nil || total != 1 || len(profiles) != 1 {
+		t.Fatalf("legacy profiles total=%d items=%#v err=%v", total, profiles, err)
+	}
+	if profiles[0].RiskScore > 14 || profiles[0].RiskLevel != PromptRiskLevelLow || profiles[0].LocalBlockCount != 20 {
+		t.Fatalf("legacy local blocks were not conservatively reinterpreted: %#v", profiles[0])
+	}
+}
+
+func TestPromptRiskProfileAggregationStaysBoundedWithManyClearedEvents(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	tx, err := db.conn.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO prompt_risk_events (
+		created_at, source_type, source_id, subject_type, subject_key, subject_display, platform,
+		is_person, identity_confidence, event_kind, request_risk_score, evidence_confidence,
+		action, prompt_fingerprint, prompt_preview
+	) VALUES (CURRENT_TIMESTAMP,'prompt_filter_log',$1,'newapi_user',$2,$3,'prod',true,100,$4,$5,100,$6,$7,$8)`)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	for index := 0; index < 30_000; index++ {
+		subject := fmt.Sprintf("bulk-user-%03d", index%100)
+		eventKind, score, action := promptRiskEventReviewCleared, 0, "allow"
+		fingerprint := promptRiskHash("cleared", fmt.Sprintf("%d", index))
+		preview := "cleared review"
+		if index < 1_000 {
+			eventKind, score, action = promptRiskEventLocalBlock, 38, "block"
+			fingerprint = promptRiskHash("blocked", fmt.Sprintf("%d", index%100))
+			preview = "repeated unverified block"
+		}
+		if _, err := stmt.Exec(fmt.Sprintf("bulk-%d", index), PromptRiskNewAPIUserSubjectKey("prod", subject), subject,
+			eventKind, score, action, fingerprint, preview); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			t.Fatalf("insert event %d: %v", index, err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	profiles, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{
+		Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser,
+	})
+	if err != nil {
+		t.Fatalf("bounded aggregation failed: %v", err)
+	}
+	if total != 100 || len(profiles) != 20 {
+		t.Fatalf("profiles total=%d len=%d, want 100/20", total, len(profiles))
+	}
+}
+
+func TestPromptRiskDefensiveSecurityContextIsObservedAndRepeated(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	confidence := 0.04
+	for index := 0; index < 5; index++ {
+		if err := db.InsertPromptFilterLog(ctx, &PromptFilterLogInput{
+			Source: "local_filter", Action: "allow", AuditScore: 20,
+			MatchedPatterns: `[{"name":"malware_family","weight":20,"category":"malware","signal_only":true}]`,
+			TextPreview:     "Write a YARA rule to detect ransomware encryptors.", Reviewed: true,
+			ReviewModel: "review-model", ReviewConfidence: &confidence,
+			NewAPIPolicyStatus: "verified", NewAPIPlatform: "prod", NewAPIUserID: "defensive-user",
+		}); err != nil {
+			t.Fatalf("InsertPromptFilterLog(%d): %v", index, err)
+		}
+	}
+	profiles, total, err := db.ListPromptRiskProfiles(ctx, PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser})
+	if err != nil || total != 1 || len(profiles) != 1 {
+		t.Fatalf("profiles total=%d items=%#v err=%v", total, profiles, err)
+	}
+	profile := profiles[0]
+	if profile.EventCount != 5 || profile.RepeatedFingerprints != 4 || profile.RiskScore <= 0 || profile.RiskScore >= 35 {
+		t.Fatalf("defensive observation profile=%#v", profile)
+	}
+	events, eventTotal, err := db.ListPromptRiskEvents(ctx, profile.SubjectType, profile.SubjectKey, PromptRiskEventQuery{Page: 1, PageSize: 10})
+	if err != nil || eventTotal != 5 || len(events) != 5 || events[0].EventKind != "local_security_context_observed" || events[0].PromptFingerprint == "" {
+		t.Fatalf("events total=%d items=%#v err=%v", eventTotal, events, err)
+	}
+}
+
+func TestPromptRiskTerminalBlockCannotBeErasedByClearedReview(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	if err := db.InsertPromptFilterLog(context.Background(), &PromptFilterLogInput{
+		Source: "local_filter", Action: "block", StrikeEligible: true, ReviewModel: "review-model",
+		Reviewed: true, ReviewFlagged: false, MatchedPatterns: `[{"name":"terminal","category":"malware"}]`,
+		NewAPIPolicyStatus: "verified", NewAPIPlatform: "prod", NewAPIUserID: "terminal-user",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	profiles, _, err := db.ListPromptRiskProfiles(context.Background(), PromptRiskProfileQuery{Page: 1, PageSize: 20, SubjectType: PromptRiskSubjectNewAPIUser})
+	if err != nil || len(profiles) != 1 || profiles[0].LocalBlockCount != 1 || profiles[0].RiskScore == 0 {
+		t.Fatalf("terminal block profile=%#v err=%v", profiles, err)
 	}
 }
 

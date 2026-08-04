@@ -41,3 +41,17 @@ test('model review history exposes parsed request and response metadata without 
   assert.doesNotMatch(source, /review_api_key.*PromptReviewLogsTable/)
   assert.match(zh.promptFilter.reviewHistoryDesc, /不保存审核 Key、Authorization 或原始 Payload/)
 })
+
+test('each audit section clears independently and explains that risk profiles are retained', () => {
+  assert.match(source, /clearLogSection\('incidents'\)/)
+  assert.match(source, /clearLogSection\('review'\)/)
+  assert.match(source, /clearLogSection\('local'\)/)
+  assert.match(source, /clearPromptFilterLogs\(\{ reviewed: section === 'review' \}\)/)
+  assert.match(source, /clearPromptPolicyIncidents\(\)/)
+  assert.doesNotMatch(source, /clearLogs\(\)\.then\(refreshAll\)/)
+  assert.match(api, /clearPromptFilterLogs: \(params: \{ reviewed\?: boolean \} = \{\}\)/)
+  assert.match(api, /clearPromptPolicyIncidents: \(\)/)
+  assert.match(zh.promptFilter.cyberIncidentsCleared, /风险画像已保留/)
+  assert.match(zh.promptFilter.reviewLogsCleared, /风险画像已保留/)
+  assert.match(zh.promptFilter.localLogsCleared, /风险画像已保留/)
+})

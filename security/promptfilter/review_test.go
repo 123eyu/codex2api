@@ -10,7 +10,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func resetReviewCircuitBreakers() {
+	reviewCircuitBreakers.Range(func(key, _ any) bool {
+		reviewCircuitBreakers.Delete(key)
+		return true
+	})
+}
 
 func TestDefaultReviewPromptIsProviderNeutralAndTreatsInputAsData(t *testing.T) {
 	for _, fragment := range []string{
@@ -101,6 +109,126 @@ func TestReviewTextReturnsErrorWhenResultsMissing(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("ReviewText returned nil error, want missing results error")
+	}
+}
+
+func TestNormalizeReviewAdapterConfigAppliesCircuitBreakerLimits(t *testing.T) {
+	cfg := NormalizeReviewAdapterConfig(ReviewAdapterConfig{})
+	if cfg.CircuitBreakerFailures != DefaultReviewCircuitBreakerFailures || cfg.CircuitBreakerSeconds != DefaultReviewCircuitBreakerSeconds {
+		t.Fatalf("unexpected circuit breaker defaults: %+v", cfg)
+	}
+	cfg = NormalizeReviewAdapterConfig(ReviewAdapterConfig{CircuitBreakerFailures: 999, CircuitBreakerSeconds: 99999})
+	if cfg.CircuitBreakerFailures != 20 || cfg.CircuitBreakerSeconds != 3600 {
+		t.Fatalf("circuit breaker limits were not clamped: %+v", cfg)
+	}
+}
+
+func TestReviewCircuitBreakerFailsFastAndRecovers(t *testing.T) {
+	resetReviewCircuitBreakers()
+	defer resetReviewCircuitBreakers()
+
+	var calls atomic.Int32
+	var failing atomic.Bool
+	failing.Store(true)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if failing.Load() {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "review-model",
+			"results": []map[string]any{{"flagged": false}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := ReviewConfig{
+		Enabled:        true,
+		APIKey:         "test-key",
+		BaseURL:        server.URL,
+		Model:          "review-model",
+		TimeoutSeconds: 2,
+		Adapter: ReviewAdapterConfig{
+			CircuitBreakerFailures: 1,
+			CircuitBreakerSeconds:  30,
+		},
+	}
+	client := ReviewClient{HTTPClient: server.Client()}
+	if _, err := client.ReviewTextDetailed(context.Background(), "test", cfg); err == nil {
+		t.Fatal("first failed review returned nil error")
+	}
+	if _, err := client.ReviewTextDetailed(context.Background(), "test", cfg); err == nil || !strings.Contains(err.Error(), "circuit breaker is open") {
+		t.Fatalf("second review error = %v, want open circuit", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("open circuit reached upstream %d times, want 1", calls.Load())
+	}
+
+	endpoint, err := reviewEndpointForMode(server.URL, ReviewRequestModeModerations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := reviewCircuitBreakers.Load(reviewCircuitKey(endpoint, cfg.Model))
+	if !ok {
+		t.Fatal("circuit breaker state was not stored")
+	}
+	state := value.(*reviewCircuitBreaker)
+	state.mu.Lock()
+	state.openUntil = time.Now().Add(-time.Second)
+	state.mu.Unlock()
+	failing.Store(false)
+	if _, err := client.ReviewTextDetailed(context.Background(), "test", cfg); err != nil {
+		t.Fatalf("half-open recovery probe failed: %v", err)
+	}
+
+	failing.Store(true)
+	if _, err := client.ReviewTextDetailed(context.Background(), "test", cfg); err == nil {
+		t.Fatal("post-recovery failure returned nil error")
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("calls after recovery = %d, want 3", calls.Load())
+	}
+}
+
+func TestReviewCircuitBreakerStopsQueuedRequestsBeforeUpstream(t *testing.T) {
+	resetReviewCircuitBreakers()
+	defer resetReviewCircuitBreakers()
+
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	cfg := ReviewConfig{
+		Enabled:        true,
+		APIKey:         "test-key",
+		BaseURL:        server.URL,
+		Model:          "review-model",
+		TimeoutSeconds: 2,
+		Adapter: ReviewAdapterConfig{
+			MaxConcurrent:          1,
+			CircuitBreakerFailures: 1,
+			CircuitBreakerSeconds:  30,
+		},
+	}
+	client := ReviewClient{HTTPClient: server.Client()}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = client.ReviewTextDetailed(context.Background(), "test", cfg)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if calls.Load() != 1 {
+		t.Fatalf("queued requests reached upstream %d times, want 1", calls.Load())
 	}
 }
 
@@ -196,7 +324,7 @@ func TestCustomReviewPayloadTemplateSafelySubstitutesJSONValues(t *testing.T) {
 		Adapter: ReviewAdapterConfig{
 			RequestMode:        ReviewRequestModeChatCompletions,
 			UserPromptTemplate: "<user_input>{{text}}</user_input>",
-			PayloadTemplate:    `{"model":"{{model}}","input":"{{user_prompt}}","metadata":{"raw":"{{text}}"}}`,
+			PayloadTemplate:    `{"model":"{{model}}","system":"{{system_prompt}}","input":"{{user_prompt}}","metadata":{"raw":"{{text}}"}}`,
 		},
 	}
 	payload, err := buildReviewPayload(`quote: " and slash: \\`, cfg)
@@ -209,6 +337,41 @@ func TestCustomReviewPayloadTemplateSafelySubstitutesJSONValues(t *testing.T) {
 	}
 	if got := decoded["input"]; got != `<user_input>quote: " and slash: \\</user_input>` {
 		t.Fatalf("input = %q", got)
+	}
+}
+
+func TestCustomChatReviewPayloadRequiresImmutableSystemPromptPlaceholder(t *testing.T) {
+	_, err := buildReviewPayload("test", ReviewConfig{
+		Model: "review-model",
+		Adapter: ReviewAdapterConfig{
+			RequestMode:        ReviewRequestModeChatCompletions,
+			SystemPrompt:       "custom operator prompt",
+			UserPromptTemplate: "<user_input>{{text}}</user_input>",
+			PayloadTemplate:    `{"model":"{{model}}","input":"{{user_prompt}}"}`,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "{{system_prompt}}") {
+		t.Fatalf("unsafe custom chat payload was accepted: %v", err)
+	}
+}
+
+func TestReviewPayloadAlwaysIncludesImmutableOperationalMalwareBoundary(t *testing.T) {
+	for _, payloadTemplate := range []string{"", `{"model":"{{model}}","messages":[{"role":"system","content":"{{system_prompt}}"},{"role":"user","content":"{{user_prompt}}"}]}`} {
+		payload, err := buildReviewPayload("test", ReviewConfig{
+			Model: "review-model",
+			Adapter: ReviewAdapterConfig{
+				RequestMode:        ReviewRequestModeChatCompletions,
+				SystemPrompt:       "custom operator prompt",
+				UserPromptTemplate: "<user_input>{{text}}</user_input>",
+				PayloadTemplate:    payloadTemplate,
+			},
+		})
+		if err != nil {
+			t.Fatalf("buildReviewPayload: %v", err)
+		}
+		if strings.Count(string(payload), "[OPERATIONAL MALWARE BOUNDARY — IMMUTABLE]") != 1 {
+			t.Fatalf("immutable malware boundary missing or duplicated: %s", payload)
+		}
 	}
 }
 

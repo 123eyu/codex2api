@@ -232,7 +232,7 @@ func TestPromptPolicyIncidentReconcilesAsyncShadowEvidenceInEitherWriteOrder(t *
 	})
 }
 
-func TestClearPromptFilterLogsClearsIncidentsButKeepsCandidateEvidence(t *testing.T) {
+func TestClearPromptFilterLogsKeepsIncidentsAndCandidateEvidence(t *testing.T) {
 	db := newPromptPolicySQLiteTestDB(t)
 	ctx := context.Background()
 	incident, candidate, evidence := promptPolicyTestInputs("incident-clear")
@@ -243,14 +243,46 @@ func TestClearPromptFilterLogsClearsIncidentsButKeepsCandidateEvidence(t *testin
 		t.Fatalf("ClearPromptFilterLogs: %v", err)
 	}
 	var count int
-	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_policy_incidents`).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("incidents not cleared count=%d err=%v", count, err)
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_policy_incidents`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("incident unexpectedly cleared count=%d err=%v", count, err)
 	}
 	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_rule_candidates`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("candidate unexpectedly cleared count=%d err=%v", count, err)
 	}
 	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_rule_candidate_evidence`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("evidence unexpectedly cleared count=%d err=%v", count, err)
+	}
+}
+
+func TestClearPromptFilterLogsByReviewStatusKeepsOtherLogSection(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	for _, input := range []*PromptFilterLogInput{
+		{Source: "local_filter", Action: "block", Reviewed: false},
+		{Source: "local_filter", Action: "allow", Reviewed: true, ReviewModel: "review-model"},
+	} {
+		if err := db.InsertPromptFilterLog(ctx, input); err != nil {
+			t.Fatalf("InsertPromptFilterLog: %v", err)
+		}
+	}
+	if err := db.ClearPromptFilterLogsByReviewStatus(ctx, true); err != nil {
+		t.Fatalf("clear reviewed logs: %v", err)
+	}
+	var localCount, reviewCount int
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_filter_logs WHERE reviewed = false`).Scan(&localCount); err != nil {
+		t.Fatalf("count local logs: %v", err)
+	}
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_filter_logs WHERE reviewed = true`).Scan(&reviewCount); err != nil {
+		t.Fatalf("count review logs: %v", err)
+	}
+	if localCount != 1 || reviewCount != 0 {
+		t.Fatalf("review clear crossed sections: local=%d review=%d", localCount, reviewCount)
+	}
+	if err := db.ClearPromptFilterLogsByReviewStatus(ctx, false); err != nil {
+		t.Fatalf("clear local logs: %v", err)
+	}
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_filter_logs`).Scan(&localCount); err != nil || localCount != 0 {
+		t.Fatalf("local logs not cleared count=%d err=%v", localCount, err)
 	}
 }
 

@@ -774,139 +774,76 @@ func (db *DB) getTrafficSnapshotSQLite(ctx context.Context) (*TrafficSnapshot, e
 
 func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Time, bucketMinutes int, channel string) (*ChartAggregation, error) {
 	startArg, endArg := db.timeRangeArgs(start, end)
+	if bucketMinutes < 1 {
+		bucketMinutes = 5
+	}
 	query := `
-		SELECT created_at, duration_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, model, status_code
+		SELECT
+			datetime((CAST(strftime('%s', created_at) AS INTEGER) / ($3 * 60)) * ($3 * 60), 'unixepoch') AS bucket,
+			COUNT(*), COALESCE(AVG(duration_ms), 0),
+			COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+			COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cached_tokens), 0),
+			COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0)
 		FROM usage_logs
-		WHERE created_at >= $1 AND created_at <= $2
+		WHERE created_at >= $1 AND created_at < $2
 		  AND status_code <> 499
 	`
-	args := []interface{}{startArg, endArg}
+	args := []interface{}{startArg, endArg, bucketMinutes}
 	if channel != "" {
-		query += " AND channel = $3"
+		query += " AND channel = $4"
 		args = append(args, channel)
 	}
+	query += " GROUP BY 1 ORDER BY 1"
 	rows, err := db.conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	type bucketAgg struct {
-		requests        int64
-		totalLatency    float64
-		inputTokens     int64
-		outputTokens    int64
-		reasoningTokens int64
-		cachedTokens    int64
-		errors4xx       int64
-		errors5xx       int64
-	}
-
 	result := &ChartAggregation{}
-	timelineMap := make(map[string]*bucketAgg)
-	modelMap := make(map[string]int64)
-
 	for rows.Next() {
-		var createdRaw interface{}
-		var durationMs int
-		var inputTokens int64
-		var outputTokens int64
-		var reasoningTokens int64
-		var cachedTokens int64
-		var model sql.NullString
-		var statusCode int
-		if err := rows.Scan(&createdRaw, &durationMs, &inputTokens, &outputTokens, &reasoningTokens, &cachedTokens, &model, &statusCode); err != nil {
+		var point ChartTimelinePoint
+		if err := rows.Scan(&point.Bucket, &point.Requests, &point.AvgLatency, &point.InputTokens,
+			&point.OutputTokens, &point.ReasoningTokens, &point.CachedTokens, &point.Errors4xx, &point.Errors5xx); err != nil {
 			return nil, err
 		}
-		createdAt, err := parseDBTimeValue(createdRaw)
-		if err != nil || createdAt.IsZero() {
-			continue
-		}
-
-		bucket := createdAt.Truncate(time.Duration(bucketMinutes) * time.Minute).Format("2006-01-02T15:04:05")
-		agg, ok := timelineMap[bucket]
-		if !ok {
-			agg = &bucketAgg{}
-			timelineMap[bucket] = agg
-		}
-		agg.requests++
-		agg.totalLatency += float64(durationMs)
-		agg.inputTokens += inputTokens
-		agg.outputTokens += outputTokens
-		agg.reasoningTokens += reasoningTokens
-		agg.cachedTokens += cachedTokens
-		if statusCode >= 400 && statusCode < 500 {
-			agg.errors4xx++
-		}
-		if statusCode >= 500 && statusCode < 600 {
-			agg.errors5xx++
-		}
-
-		modelName := "unknown"
-		if model.Valid && model.String != "" {
-			modelName = model.String
-		}
-		modelMap[modelName]++
+		point.Bucket = strings.Replace(point.Bucket, " ", "T", 1) + "Z"
+		result.Timeline = append(result.Timeline, point)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	keys := make([]string, 0, len(timelineMap))
-	for key := range timelineMap {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		agg := timelineMap[key]
-		avgLatency := 0.0
-		if agg.requests > 0 {
-			avgLatency = agg.totalLatency / float64(agg.requests)
-		}
-		result.Timeline = append(result.Timeline, ChartTimelinePoint{
-			Bucket:          key,
-			Requests:        agg.requests,
-			AvgLatency:      avgLatency,
-			InputTokens:     agg.inputTokens,
-			OutputTokens:    agg.outputTokens,
-			ReasoningTokens: agg.reasoningTokens,
-			CachedTokens:    agg.cachedTokens,
-			Errors4xx:       agg.errors4xx,
-			Errors5xx:       agg.errors5xx,
-		})
-	}
 	if result.Timeline == nil {
 		result.Timeline = []ChartTimelinePoint{}
 	}
 
-	type modelAgg struct {
-		model    string
-		requests int64
+	modelQuery := `SELECT COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown'), COUNT(*)
+		FROM usage_logs WHERE created_at >= $1 AND created_at < $2 AND status_code <> 499`
+	modelArgs := []interface{}{startArg, endArg}
+	if channel != "" {
+		modelQuery += " AND channel = $3"
+		modelArgs = append(modelArgs, channel)
 	}
-	models := make([]modelAgg, 0, len(modelMap))
-	for model, requests := range modelMap {
-		models = append(models, modelAgg{model: model, requests: requests})
+	modelQuery += " GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 10"
+	modelRows, err := db.conn.QueryContext(ctx, modelQuery, modelArgs...)
+	if err != nil {
+		return nil, err
 	}
-	sort.Slice(models, func(i, j int) bool {
-		if models[i].requests == models[j].requests {
-			return models[i].model < models[j].model
+	defer modelRows.Close()
+	for modelRows.Next() {
+		var point ChartModelPoint
+		if err := modelRows.Scan(&point.Model, &point.Requests); err != nil {
+			return nil, err
 		}
-		return models[i].requests > models[j].requests
-	})
-	if len(models) > 10 {
-		models = models[:10]
-	}
-	for _, model := range models {
-		result.Models = append(result.Models, ChartModelPoint{
-			Model:    model.model,
-			Requests: model.requests,
-		})
+		result.Models = append(result.Models, point)
 	}
 	if result.Models == nil {
 		result.Models = []ChartModelPoint{}
 	}
 
-	return result, nil
+	return result, modelRows.Err()
 }
 
 // getAccountEventTrendSQLite SQLite 版账号事件趋势聚合（内存分桶）
@@ -987,20 +924,26 @@ func (db *DB) getAccountEventTrendSQLite(ctx context.Context, start, end time.Ti
 
 // getUsageStatsSQLite SQLite 版使用统计（内存聚合，避免 PG 特有语法）。
 // rangeStart 为零值时回落到"今日"(本地 0 点起);rangeEnd 为零值表示至今。
-func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time.Time, channel string) (*UsageStats, error) {
+func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time.Time, channel string, includeBreakdowns bool) (*UsageStats, error) {
 	now := time.Now()
+	explicitRange := !rangeStart.IsZero()
 	if rangeStart.IsZero() {
 		rangeStart = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	}
 	minuteAgo := now.Add(-1 * time.Minute)
 
-	query := `
-			SELECT created_at, total_tokens, prompt_tokens, completion_tokens,
-			       cached_tokens, first_token_ms, duration_ms, status_code, account_billed, user_billed
-			FROM usage_logs
-			WHERE created_at >= $1 AND status_code <> 499
-		`
-	args := []interface{}{db.timeArg(rangeStart)}
+	query := `SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(prompt_tokens), 0),
+		COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(cached_tokens), 0),
+		COALESCE(SUM(account_billed), 0), COALESCE(SUM(user_billed), 0),
+		COALESCE(AVG(duration_ms), 0),
+		COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN created_at >= $2 THEN total_tokens ELSE 0 END), 0)
+	FROM usage_logs WHERE created_at >= $1 AND status_code <> 499`
+	args := []interface{}{db.timeArg(rangeStart), db.timeArg(minuteAgo)}
 	if !rangeEnd.IsZero() {
 		query += fmt.Sprintf(" AND created_at < $%d", len(args)+1)
 		args = append(args, db.timeArg(rangeEnd))
@@ -1010,66 +953,22 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 		args = append(args, channel)
 	}
 
-	rows, err := db.conn.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	stats := &UsageStats{}
+	var err error
 	var todayErrors int64
-	var totalDuration float64
 	var totalFirstTokenMs float64
 	var totalFirstTokenSamples int64
 	var todayCacheHitRequests int64
-
-	for rows.Next() {
-		var createdRaw interface{}
-		var totalTokens, promptTokens, completionTokens, cachedTokens int64
-		var firstTokenMs, durationMs int
-		var statusCode int
-		var accountBilled, userBilled float64
-		if err := rows.Scan(&createdRaw, &totalTokens, &promptTokens, &completionTokens,
-			&cachedTokens, &firstTokenMs, &durationMs, &statusCode, &accountBilled, &userBilled); err != nil {
-			return nil, err
-		}
-		createdAt, err := parseDBTimeValue(createdRaw)
-		if err != nil || createdAt.IsZero() {
-			continue
-		}
-
-		stats.TodayRequests++
-		stats.TodayTokens += totalTokens
-		stats.TodayPrompt += promptTokens
-		stats.TodayCompletion += completionTokens
-		stats.TotalCachedTokens += cachedTokens
-		stats.TodayCachedTokens += cachedTokens
-		stats.TodayAccountBilled += accountBilled
-		stats.TodayUserBilled += userBilled
-		totalDuration += float64(durationMs)
-		if firstTokenMs > 0 {
-			totalFirstTokenMs += float64(firstTokenMs)
-			totalFirstTokenSamples++
-		}
-		if cachedTokens > 0 {
-			todayCacheHitRequests++
-		}
-
-		if statusCode >= 400 {
-			todayErrors++
-		}
-		// 最近 1 分钟窗口：RPM / TPM
-		if !createdAt.Before(minuteAgo) {
-			stats.RPM++
-			stats.TPM += float64(totalTokens)
-		}
-	}
-	if err := rows.Err(); err != nil {
+	if err := db.conn.QueryRowContext(ctx, query, args...).Scan(
+		&stats.TodayRequests, &stats.TodayTokens, &stats.TodayPrompt, &stats.TodayCompletion,
+		&stats.TodayCachedTokens, &stats.TodayAccountBilled, &stats.TodayUserBilled,
+		&stats.AvgDurationMs, &totalFirstTokenMs, &totalFirstTokenSamples,
+		&todayCacheHitRequests, &todayErrors, &stats.RPM, &stats.TPM,
+	); err != nil {
 		return nil, err
 	}
 
 	if stats.TodayRequests > 0 {
-		stats.AvgDurationMs = totalDuration / float64(stats.TodayRequests)
 		stats.ErrorRate = float64(todayErrors) / float64(stats.TodayRequests) * 100
 		stats.TodayCacheRate = float64(todayCacheHitRequests) / float64(stats.TodayRequests) * 100
 	}
@@ -1077,66 +976,39 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 		stats.AvgFirstTokenMs = totalFirstTokenMs / float64(totalFirstTokenSamples)
 	}
 
-	// 可见请求总数（排除 499）
-	var visibleTotal, visibleCacheHitRequests, visibleFirstTokenSamples int64
-	var currentTokens, currentPrompt, currentCompletion, currentCached int64
-	var currentFirstTokenMsSum float64
-	var currentAccountBilled, currentUserBilled float64
-	totalWhere := "status_code <> 499"
-	totalArgs := []interface{}{}
-	if channel != "" {
-		totalWhere += " AND channel = $1"
-		totalArgs = append(totalArgs, channel)
+	rollup, err := db.loadUsageStatsRollup(ctx, channel)
+	if err != nil {
+		return nil, fmt.Errorf("读取用量累计汇总: %w", err)
 	}
-	_ = db.conn.QueryRowContext(ctx, `
-		SELECT
-			COUNT(*),
-			COALESCE(SUM(total_tokens), 0),
-			COALESCE(SUM(prompt_tokens), 0),
-			COALESCE(SUM(completion_tokens), 0),
-			COALESCE(SUM(cached_tokens), 0),
-			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(account_billed), 0),
-			COALESCE(SUM(user_billed), 0)
-		FROM usage_logs
-		WHERE `+totalWhere, totalArgs...).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheHitRequests, &currentFirstTokenMsSum, &visibleFirstTokenSamples, &currentAccountBilled, &currentUserBilled)
-
-	// 基线值；渠道过滤时 baseline 无渠道维度，跳过（口径与 Postgres 侧一致）。
-	var bReq, bTok, bPrompt, bComp, bCached, bCacheHitRequests, bFirstTokenSamples int64
-	var bFirstTokenMsSum float64
-	var bAccountBilled, bUserBilled float64
-	if channel == "" {
-		_ = db.conn.QueryRowContext(ctx, `
-		SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, cache_hit_requests, first_token_ms_sum, first_token_samples, account_billed, user_billed
-		FROM usage_stats_baseline WHERE id = 1
-	`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bCacheHitRequests, &bFirstTokenMsSum, &bFirstTokenSamples, &bAccountBilled, &bUserBilled)
-	}
-
-	stats.TotalRequests = visibleTotal + bReq
-	stats.TotalTokens = currentTokens + bTok
-	stats.TotalPrompt = currentPrompt + bPrompt
-	stats.TotalCompletion = currentCompletion + bComp
-	stats.TotalCachedTokens = currentCached + bCached
-	stats.TotalAccountBilled = currentAccountBilled + bAccountBilled
-	stats.TotalUserBilled = currentUserBilled + bUserBilled
+	stats.TotalRequests = rollup.TotalRequests
+	stats.TotalTokens = rollup.TotalTokens
+	stats.TotalPrompt = rollup.PromptTokens
+	stats.TotalCompletion = rollup.CompletionTokens
+	stats.TotalCachedTokens = rollup.CachedTokens
+	stats.TotalAccountBilled = rollup.TotalAccountBilled
+	stats.TotalUserBilled = rollup.TotalUserBilled
 	if stats.TotalRequests > 0 {
-		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(stats.TotalRequests) * 100
+		stats.TotalCacheRate = float64(rollup.CacheHitRequests) / float64(stats.TotalRequests) * 100
 	}
-	if visibleFirstTokenSamples+bFirstTokenSamples > 0 {
-		stats.AvgFirstTokenMs = (currentFirstTokenMsSum + bFirstTokenMsSum) / float64(visibleFirstTokenSamples+bFirstTokenSamples)
+	if !explicitRange && rollup.FirstTokenSamples > 0 {
+		stats.AvgFirstTokenMs = rollup.FirstTokenMsSum / float64(rollup.FirstTokenSamples)
 	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)
 		stats.AvgUserBilled = stats.TotalUserBilled / float64(stats.TotalRequests)
 	}
-	stats.ModelStats, err = db.getUsageModelStats(ctx, 10, rangeStart, rangeEnd, channel)
-	if err != nil {
-		return nil, err
-	}
-	if err := db.populateUsageBreakdownStats(ctx, stats, rangeStart, rangeEnd, channel); err != nil {
-		return nil, err
+	if includeBreakdowns {
+		stats.ModelStats, err = db.getUsageModelStats(ctx, 10, rangeStart, rangeEnd, channel)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.populateUsageBreakdownStats(ctx, stats, rangeStart, rangeEnd, channel); err != nil {
+			return nil, err
+		}
+	} else {
+		stats.ModelStats = []UsageModelStat{}
+		stats.EndpointStats = []UsageEndpointStat{}
+		stats.APIKeyStats = []UsageAPIKeyStat{}
 	}
 
 	return stats, nil

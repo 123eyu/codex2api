@@ -288,11 +288,13 @@ test('Prompt Filter exposes explicit review scope and live connection testing', 
   }
 })
 
-test('adaptive model review is a single operator switch with backend-owned safety defaults', () => {
+test('adaptive model review is a single switch with an explicit low-latency safety policy', () => {
   const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
   const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))
   assert.match(source, /\['adaptive_review', 'enabled'\]/)
   assert.match(source, /adaptiveReview\.enabled/)
+  assert.match(source, /\['adaptive_review', 'min_clean_reviews'\], value: 3/)
+  assert.match(source, /\['adaptive_review', 'min_observation_hours'\], value: 1/)
   assert.match(zh.promptFilter.adaptiveReview.description, /新用户先完整复核/)
-  assert.match(zh.promptFilter.adaptiveReview.defaults, /10 次.*24 小时.*5%.*6 小时/)
+  assert.match(zh.promptFilter.adaptiveReview.defaults, /\{\{minClean\}\} 次.*\{\{hours\}\} 小时.*\{\{sample\}\}%.*\{\{forceHours\}\} 小时/)
 })

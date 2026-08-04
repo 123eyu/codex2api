@@ -222,11 +222,36 @@ func (h *Handler) ListPromptFilterLogs(c *gin.Context) {
 func (h *Handler) ClearPromptFilterLogs(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
-	if err := h.db.ClearPromptFilterLogs(ctx); err != nil {
+	var err error
+	message := "Prompt 检查日志已清空；风险画像和上游 CY 事件已保留"
+	switch strings.ToLower(strings.TrimSpace(c.Query("reviewed"))) {
+	case "":
+		err = h.db.ClearPromptFilterLogs(ctx)
+	case "true", "reviewed":
+		err = h.db.ClearPromptFilterLogsByReviewStatus(ctx, true)
+		message = "外部模型复核历史已清空；风险画像已保留"
+	case "false", "not_reviewed":
+		err = h.db.ClearPromptFilterLogsByReviewStatus(ctx, false)
+		message = "本地过滤与异步审计日志已清空；风险画像已保留"
+	default:
+		writeError(c, http.StatusBadRequest, "reviewed 必须为 true 或 false")
+		return
+	}
+	if err != nil {
 		writeInternalError(c, err)
 		return
 	}
-	writeMessage(c, http.StatusOK, "Prompt 检查日志和上游 CY 事件已清空")
+	writeMessage(c, http.StatusOK, message)
+}
+
+func (h *Handler) ClearPromptPolicyIncidents(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+	if err := h.db.ClearPromptPolicyIncidents(ctx); err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	writeMessage(c, http.StatusOK, "上游 CY 事件已清空；风险画像已保留")
 }
 
 func (h *Handler) ListPromptPolicyIncidents(c *gin.Context) {

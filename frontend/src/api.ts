@@ -25,7 +25,7 @@ import type {
   AdminErrorResponse,
   APIKeysResponse,
   APIKeyTokenStat,
-  APIKeyAccountStat,
+  APIKeyAccountStatsResponse,
   APIKeyScopeUsageItem,
   APIKeyScopeSummaryItem,
   AccountsResponse,
@@ -709,30 +709,41 @@ export const api = {
     const search = buildOpsErrorSearchParams(params)
     return requestBlob(`/ops/errors/export?${search.toString()}`)
   },
-  getUsageStats: (params: { start?: string; end?: string; channel?: string } = {}) => {
+  getUsageStats: (params: {
+    start?: string
+    end?: string
+    channel?: string
+    detail?: 'summary'
+    signal?: AbortSignal
+  } = {}) => {
     const searchParams = new URLSearchParams()
     if (params.start) searchParams.set('start', params.start)
     if (params.end) searchParams.set('end', params.end)
     if (params.channel) searchParams.set('channel', params.channel)
+    if (params.detail) searchParams.set('detail', params.detail)
     const qs = searchParams.toString()
-    return request<UsageStats>(qs ? `/usage/stats?${qs}` : '/usage/stats')
+    return request<UsageStats>(qs ? `/usage/stats?${qs}` : '/usage/stats', {
+      signal: params.signal,
+    })
   },
-  getAPIKeyTokenStats: (params: { start?: string; end?: string } = {}) => {
+  getAPIKeyTokenStats: (params: { start?: string; end?: string; signal?: AbortSignal } = {}) => {
     const searchParams = new URLSearchParams()
     if (params.start) searchParams.set('start', params.start)
     if (params.end) searchParams.set('end', params.end)
     const qs = searchParams.toString()
     return request<{ items: APIKeyTokenStat[] }>(
       qs ? `/usage/api-keys?${qs}` : '/usage/api-keys',
+      { signal: params.signal },
     )
   },
-  getAPIKeyAccountStats: (id: number, params: { start?: string; end?: string } = {}) => {
+  getAPIKeyAccountStats: (id: number, params: { start?: string; end?: string; signal?: AbortSignal } = {}) => {
     const searchParams = new URLSearchParams()
     if (params.start) searchParams.set('start', params.start)
     if (params.end) searchParams.set('end', params.end)
     const qs = searchParams.toString()
-    return request<{ items: APIKeyAccountStat[] }>(
+    return request<APIKeyAccountStatsResponse>(
       qs ? `/usage/api-keys/${id}/accounts?${qs}` : `/usage/api-keys/${id}/accounts`,
+      { signal: params.signal },
     )
   },
   getUsageLogs: (params: { start?: string; end?: string; limit?: number } = {}) => {
@@ -763,13 +774,21 @@ export const api = {
     if (params.channel) searchParams.set('channel', params.channel)
     return request<UsageLogsPagedResponse>(`/usage/logs?${searchParams.toString()}`)
   },
-  getChartData: (params: { start: string; end: string; bucketMinutes: number; channel?: string }) => {
+  getChartData: (params: {
+    start: string
+    end: string
+    bucketMinutes: number
+    channel?: string
+    signal?: AbortSignal
+  }) => {
     const searchParams = new URLSearchParams()
     searchParams.set('start', params.start)
     searchParams.set('end', params.end)
     searchParams.set('bucket_minutes', String(params.bucketMinutes))
     if (params.channel) searchParams.set('channel', params.channel)
-    return request<ChartAggregation>(`/usage/chart-data?${searchParams.toString()}`)
+    return request<ChartAggregation>(`/usage/chart-data?${searchParams.toString()}`, {
+      signal: params.signal,
+    })
   },
   getAccountEventTrend: (params: { start: string; end: string; bucketMinutes: number }) => {
     const sp = new URLSearchParams()
@@ -895,8 +914,12 @@ export const api = {
     }
     return request<PromptFilterLogsResponse>(`/prompt-filter/logs?${search.toString()}`)
   },
-  clearPromptFilterLogs: () =>
-    request<MessageResponse>('/prompt-filter/logs', { method: 'DELETE' }),
+  clearPromptFilterLogs: (params: { reviewed?: boolean } = {}) => {
+    const search = new URLSearchParams()
+    if (typeof params.reviewed === 'boolean') search.set('reviewed', String(params.reviewed))
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<MessageResponse>(`/prompt-filter/logs${suffix}`, { method: 'DELETE' })
+  },
   matchPromptFilterLog: (params: { at: string; endpoint?: string; apiKeyId?: number; source?: string }) => {
     const search = new URLSearchParams()
     search.set('at', params.at)
@@ -922,6 +945,8 @@ export const api = {
 	},
 	getPromptPolicyIncident: (incidentId: string) =>
 		request<PromptPolicyIncidentDetailResponse>(`/prompt-policy/incidents/${encodeURIComponent(incidentId)}`),
+	clearPromptPolicyIncidents: () =>
+		request<MessageResponse>('/prompt-policy/incidents', { method: 'DELETE' }),
 	getPromptRiskProfiles: (params: { page?: number; pageSize?: number; subjectType?: string; platform?: string; riskLevel?: string; apiKeyId?: string; accountId?: string; minScore?: string; q?: string } = {}) => {
 		const search = new URLSearchParams()
 		search.set('page', String(params.page || 1))

@@ -114,10 +114,16 @@ type ReviewAdapterFormConfig = {
   confidence_threshold: number
   max_concurrent: number
   max_text_length: number
+  circuit_breaker_failures: number
+  circuit_breaker_seconds: number
 }
 
 type AdaptiveReviewFormConfig = {
   enabled: boolean
+  min_clean_reviews: number
+  min_observation_hours: number
+  sample_percent: number
+  force_review_interval_minutes: number
 }
 
 type RecommendedProtectionStrength = 'monitor' | 'block'
@@ -131,6 +137,8 @@ const defaultReviewAdapter: ReviewAdapterFormConfig = {
   confidence_threshold: 0.7,
   max_concurrent: 32,
   max_text_length: 32768,
+  circuit_breaker_failures: 3,
+  circuit_breaker_seconds: 30,
 }
 
 function parseReviewAdapter(value: AdvancedConfigObject): ReviewAdapterFormConfig {
@@ -146,6 +154,8 @@ function parseReviewAdapter(value: AdvancedConfigObject): ReviewAdapterFormConfi
     confidence_threshold: typeof raw.confidence_threshold === 'number' && raw.confidence_threshold > 0 && raw.confidence_threshold <= 1 ? raw.confidence_threshold : defaultReviewAdapter.confidence_threshold,
     max_concurrent: typeof raw.max_concurrent === 'number' && raw.max_concurrent > 0 ? raw.max_concurrent : defaultReviewAdapter.max_concurrent,
     max_text_length: typeof raw.max_text_length === 'number' && raw.max_text_length > 0 ? raw.max_text_length : defaultReviewAdapter.max_text_length,
+    circuit_breaker_failures: typeof raw.circuit_breaker_failures === 'number' && raw.circuit_breaker_failures > 0 ? raw.circuit_breaker_failures : defaultReviewAdapter.circuit_breaker_failures,
+    circuit_breaker_seconds: typeof raw.circuit_breaker_seconds === 'number' && raw.circuit_breaker_seconds > 0 ? raw.circuit_breaker_seconds : defaultReviewAdapter.circuit_breaker_seconds,
   }
 }
 
@@ -153,7 +163,13 @@ function parseAdaptiveReview(value: AdvancedConfigObject): AdaptiveReviewFormCon
   const raw = value.adaptive_review && typeof value.adaptive_review === 'object'
     ? value.adaptive_review as Record<string, unknown>
     : {}
-  return { enabled: raw.enabled === true }
+  return {
+    enabled: raw.enabled === true,
+    min_clean_reviews: typeof raw.min_clean_reviews === 'number' && raw.min_clean_reviews > 0 ? raw.min_clean_reviews : 10,
+    min_observation_hours: typeof raw.min_observation_hours === 'number' && raw.min_observation_hours > 0 ? raw.min_observation_hours : 24,
+    sample_percent: typeof raw.sample_percent === 'number' && raw.sample_percent >= 0 ? raw.sample_percent : 5,
+    force_review_interval_minutes: typeof raw.force_review_interval_minutes === 'number' && raw.force_review_interval_minutes > 0 ? raw.force_review_interval_minutes : 360,
+  }
 }
 
 type PromptGuardEditorConfig = Omit<PromptGuardConfig, 'performance'>
@@ -492,7 +508,6 @@ export default function PromptFilter() {
     () => parseAdvancedConfigDocument(form.prompt_filter_advanced_config).error,
     [form.prompt_filter_advanced_config],
   )
-  const [clearing, setClearing] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testText, setTestText] = useState('')
   const [testEndpoint, setTestEndpoint] = useState('/v1/responses')
@@ -616,17 +631,13 @@ export default function PromptFilter() {
     }
   }
 
-  const clearLogs = async () => {
-    setClearing(true)
-    try {
-      await api.clearPromptFilterLogs()
-      setData((current) => ({ ...current, recentLogs: [], totalLogs: 0 }))
-      showToast(t('promptFilter.logsCleared'))
-    } catch (err) {
-      showToast(`${t('promptFilter.clearFailed')}: ${getErrorMessage(err)}`, 'error')
-    } finally {
-      setClearing(false)
-    }
+  const refreshRecentLogs = async () => {
+    const result = await api.getPromptFilterLogs({ limit: 5 })
+    setData((current) => ({
+      ...current,
+      recentLogs: result.logs ?? [],
+      totalLogs: result.total ?? 0,
+    }))
   }
 
   return (
@@ -694,16 +705,12 @@ export default function PromptFilter() {
             testing={testing}
             testResult={testResult}
             runTest={runTest}
-            clearLogs={clearLogs}
-            clearing={clearing}
             advancedConfigError={advancedConfigError}
             onSave={() => void saveSettings()}
           />
         ) : null}
 
-        {activeView === 'logs' ? (
-          <LogsView clearLogs={clearLogs} clearing={clearing} />
-        ) : null}
+        {activeView === 'logs' ? <LogsView onPromptLogsChanged={refreshRecentLogs} /> : null}
 
         {activeView === 'profiles' ? <RiskProfilesView /> : null}
 
@@ -2655,8 +2662,6 @@ function OverviewView({
   testing,
   testResult,
   runTest,
-  clearLogs,
-  clearing,
   advancedConfigError,
   onSave,
 }: {
@@ -2677,8 +2682,6 @@ function OverviewView({
   testing: boolean
   testResult: PromptFilterTestResponse | null
   runTest: () => void
-  clearLogs: () => Promise<void>
-  clearing: boolean
   advancedConfigError: string | null
   onSave: () => void
 }) {
@@ -2756,7 +2759,19 @@ function OverviewView({
     setForm((current) => ({ ...current, prompt_filter_advanced_config: patched.serialized }))
   }
   const updateAdaptiveReview = (enabled: boolean) => {
-    const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, [{ path: ['adaptive_review', 'enabled'], value: enabled }])
+    const patches = enabled
+      ? [
+          { path: ['adaptive_review', 'enabled'], value: true },
+          { path: ['adaptive_review', 'min_clean_reviews'], value: 3 },
+          { path: ['adaptive_review', 'min_observation_hours'], value: 1 },
+          { path: ['adaptive_review', 'sample_percent'], value: 5 },
+          { path: ['adaptive_review', 'force_review_interval_minutes'], value: 360 },
+          { path: ['adaptive_review', 'trust_duration_hours'], value: 168 },
+          { path: ['adaptive_review', 'reactivation_clean_reviews'], value: 3 },
+          { path: ['adaptive_review', 'reactivation_cooldown_hours'], value: 24 },
+        ]
+      : [{ path: ['adaptive_review', 'enabled'], value: false }]
+    const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, patches)
     if (!patched.ok) {
       showToast(t('promptFilter.advancedConfigInvalidSave'), 'error')
       return
@@ -2796,13 +2811,29 @@ function OverviewView({
     }
   }
   const applyRecommendedProtection = () => {
-    setForm((current) => ({
-      ...current,
-      prompt_filter_enabled: true,
-      prompt_filter_mode: recommendedStrength === 'monitor' ? 'monitor' : 'block',
-      prompt_filter_strict_terminal_enabled: recommendedStrength !== 'monitor',
-      prompt_filter_log_matches: true,
-    }))
+    setForm((current) => {
+      const patched = patchAdvancedConfigDocument(current.prompt_filter_advanced_config, [
+        { path: ['adaptive_review', 'enabled'], value: true },
+        { path: ['adaptive_review', 'min_clean_reviews'], value: 3 },
+        { path: ['adaptive_review', 'min_observation_hours'], value: 1 },
+        { path: ['adaptive_review', 'sample_percent'], value: 5 },
+        { path: ['adaptive_review', 'force_review_interval_minutes'], value: 360 },
+        { path: ['adaptive_review', 'trust_duration_hours'], value: 168 },
+        { path: ['adaptive_review', 'reactivation_clean_reviews'], value: 3 },
+        { path: ['adaptive_review', 'reactivation_cooldown_hours'], value: 24 },
+        { path: ['review_adapter', 'circuit_breaker_failures'], value: 3 },
+        { path: ['review_adapter', 'circuit_breaker_seconds'], value: 30 },
+      ])
+      return {
+        ...current,
+        prompt_filter_enabled: true,
+        prompt_filter_mode: recommendedStrength === 'monitor' ? 'monitor' : 'block',
+        prompt_filter_strict_terminal_enabled: recommendedStrength !== 'monitor',
+        prompt_filter_log_matches: true,
+        prompt_filter_review_timeout_seconds: Math.min(current.prompt_filter_review_timeout_seconds || 8, 8),
+        prompt_filter_advanced_config: patched.ok ? patched.serialized : current.prompt_filter_advanced_config,
+      }
+    })
     showToast(t('promptFilter.recommendedAppliedWithStrength', { strength: t(`promptFilter.recommendedStrength.${recommendedStrength}.label`) }))
   }
 
@@ -2968,7 +2999,7 @@ function OverviewView({
                     <div className="min-w-0">
                       <div className="text-sm font-semibold">{t('promptFilter.adaptiveReview.title')}</div>
                       <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.adaptiveReview.description')}</p>
-                      <p className="mt-1 text-[11px] leading-5 text-muted-foreground">{t('promptFilter.adaptiveReview.defaults')}</p>
+                      <p className="mt-1 text-[11px] leading-5 text-muted-foreground">{t('promptFilter.adaptiveReview.defaults', { minClean: adaptiveReview.min_clean_reviews, hours: adaptiveReview.min_observation_hours, sample: adaptiveReview.sample_percent, forceHours: Math.ceil(adaptiveReview.force_review_interval_minutes / 60) })}</p>
                     </div>
                     <Switch checked={adaptiveReview.enabled} disabled={!form.prompt_filter_review_enabled} onCheckedChange={updateAdaptiveReview} />
                   </div>
@@ -2993,13 +3024,26 @@ function OverviewView({
                     />
                     <span className="block text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewApiKeyHint')}</span>
                   </Field>
-                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+                  <div className="grid gap-4 sm:grid-cols-3">
                     <Field label={t('promptFilter.reviewRequestMode')}><Select value={reviewAdapter.request_mode} onValueChange={(value) => updateReviewAdapter('request_mode', value as ReviewAdapterFormConfig['request_mode'])} options={[{ label: t('promptFilter.reviewModeChat'), value: 'chat_completions' }, { label: t('promptFilter.reviewModeModerations'), value: 'moderations' }]} /></Field>
                     <Field label={t('promptFilter.reviewScope')}><Select value={reviewAdapter.scope} onValueChange={(value) => updateReviewAdapter('scope', value as ReviewAdapterFormConfig['scope'])} options={(['all_requests', 'local_candidates', 'local_blocks'] as ReviewAdapterFormConfig['scope'][]).map((scope) => ({ label: t(`promptFilter.reviewScopeOptions.${scope}`), value: scope }))} /></Field>
                     <Field label={t('promptFilter.reviewConfidenceThreshold')}><DraftNumberInput integer={false} step="0.01" min={0.01} max={1} value={reviewAdapter.confidence_threshold} onValueChange={(value) => updateReviewAdapter('confidence_threshold', value)} /></Field>
-                    <Field label={t('promptFilter.reviewMaxConcurrent')}><DraftNumberInput min={1} max={256} value={reviewAdapter.max_concurrent} onValueChange={(value) => updateReviewAdapter('max_concurrent', value)} /></Field>
-                    <Field label={t('promptFilter.reviewMaxTextLength')}><DraftNumberInput min={1024} max={262144} value={reviewAdapter.max_text_length} onValueChange={(value) => updateReviewAdapter('max_text_length', value)} /></Field>
                   </div>
+                  <details className="group rounded-lg border border-foreground/10 bg-muted/10 open:bg-muted/20">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 marker:content-none [&::-webkit-details-marker]:hidden">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold">{t('promptFilter.reviewResilienceTitle')}</div>
+                        <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewResilienceDesc')}</p>
+                      </div>
+                      <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                    </summary>
+                    <div className="grid gap-4 border-t px-4 py-4 sm:grid-cols-2 lg:grid-cols-4">
+                      <Field label={t('promptFilter.reviewMaxConcurrent')}><DraftNumberInput min={1} max={256} value={reviewAdapter.max_concurrent} onValueChange={(value) => updateReviewAdapter('max_concurrent', value)} /></Field>
+                      <Field label={t('promptFilter.reviewMaxTextLength')}><DraftNumberInput min={1024} max={262144} value={reviewAdapter.max_text_length} onValueChange={(value) => updateReviewAdapter('max_text_length', value)} /></Field>
+                      <Field label={t('promptFilter.reviewCircuitBreakerFailures')}><DraftNumberInput min={1} max={20} value={reviewAdapter.circuit_breaker_failures} onValueChange={(value) => updateReviewAdapter('circuit_breaker_failures', value)} /></Field>
+                      <Field label={t('promptFilter.reviewCircuitBreakerSeconds')}><DraftNumberInput min={1} max={3600} value={reviewAdapter.circuit_breaker_seconds} onValueChange={(value) => updateReviewAdapter('circuit_breaker_seconds', value)} /></Field>
+                    </div>
+                  </details>
                   <details className="group rounded-lg border border-foreground/10 bg-muted/10 open:bg-muted/20">
                     <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 marker:content-none [&::-webkit-details-marker]:hidden">
                       <div className="min-w-0">
@@ -3115,15 +3159,9 @@ function OverviewView({
         <CardContent>
           <div className="mb-4 flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
             <SectionTitle title={t('promptFilter.recentLogsTitle')} />
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" asChild>
-                <NavLink to="/prompt-filter/logs">{t('promptFilter.viewAllLogs')}</NavLink>
-              </Button>
-              <Button variant="outline" onClick={() => void clearLogs()} disabled={clearing || recentLogs.length === 0}>
-                <Trash2 className="size-3.5" />
-                {clearing ? t('promptFilter.clearing') : t('promptFilter.clearLogs')}
-              </Button>
-            </div>
+            <Button variant="outline" asChild>
+              <NavLink to="/prompt-filter/logs">{t('promptFilter.viewAllLogs')}</NavLink>
+            </Button>
           </div>
           <PromptFilterLogsTable logs={recentLogs} compact />
         </CardContent>
@@ -3224,8 +3262,11 @@ function PromptLogFilterControls({
   )
 }
 
-function LogsView({ clearLogs, clearing }: { clearLogs: () => Promise<void>; clearing: boolean }) {
+type PromptLogClearSection = 'incidents' | 'review' | 'local'
+
+function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<void> }) {
   const { t } = useTranslation()
+  const { showToast } = useToast()
   const [incidentDraftFilters, setIncidentDraftFilters] = useState<LogFilters>(emptyFilters)
   const [incidentFilters, setIncidentFilters] = useState<LogFilters>(emptyFilters)
   const [reviewDraftFilters, setReviewDraftFilters] = useState<LogFilters>(emptyFilters)
@@ -3250,6 +3291,7 @@ function LogsView({ clearLogs, clearing }: { clearLogs: () => Promise<void>; cle
   const [localError, setLocalError] = useState<string | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
   const [incidentError, setIncidentError] = useState<string | null>(null)
+  const [clearingSection, setClearingSection] = useState<PromptLogClearSection | null>(null)
 
   const loadLocalLogs = useCallback(async () => {
     setLocalLoading(true)
@@ -3336,7 +3378,44 @@ function LogsView({ clearLogs, clearing }: { clearLogs: () => Promise<void>; cle
     await Promise.all([loadIncidents(), loadReviewLogs(), loadLocalLogs()])
   }, [loadIncidents, loadLocalLogs, loadReviewLogs])
 
-  const anyLoading = localLoading || reviewLoading || incidentLoading
+  const clearLogSection = async (section: PromptLogClearSection) => {
+    setClearingSection(section)
+    try {
+      if (section === 'incidents') {
+        await api.clearPromptPolicyIncidents()
+        setIncidents([])
+        setIncidentTotal(0)
+        setIncidentPage(1)
+        showToast(t('promptFilter.cyberIncidentsCleared'))
+        return
+      }
+
+      await api.clearPromptFilterLogs({ reviewed: section === 'review' })
+      if (section === 'review') {
+        setReviewLogs([])
+        setReviewTotal(0)
+        setReviewPage(1)
+        showToast(t('promptFilter.reviewLogsCleared'))
+      } else {
+        setLogs([])
+        setTotal(0)
+        setLogPage(1)
+        showToast(t('promptFilter.localLogsCleared'))
+      }
+
+      try {
+        await onPromptLogsChanged()
+      } catch {
+        showToast(t('promptFilter.logSummaryRefreshFailed'), 'warning')
+      }
+    } catch (err) {
+      showToast(`${t('promptFilter.clearFailed')}: ${getErrorMessage(err)}`, 'error')
+    } finally {
+      setClearingSection(null)
+    }
+  }
+
+  const anyLoading = localLoading || reviewLoading || incidentLoading || clearingSection !== null
   const logTotalPages = Math.max(1, Math.ceil(total / logPageSize))
   const reviewTotalPages = Math.max(1, Math.ceil(reviewTotal / reviewPageSize))
   const incidentTotalPages = Math.max(1, Math.ceil(incidentTotal / incidentPageSize))
@@ -3354,10 +3433,6 @@ function LogsView({ clearLogs, clearing }: { clearLogs: () => Promise<void>; cle
               <RefreshCw className="size-3.5" />
               {t('promptFilter.refreshAllLogs')}
             </Button>
-            <Button variant="outline" onClick={() => void clearLogs().then(refreshAll)} disabled={clearing || (logs.length === 0 && reviewLogs.length === 0 && incidents.length === 0)}>
-              <Trash2 className="size-3.5" />
-              {clearing ? t('promptFilter.clearing') : t('promptFilter.clearLogs')}
-            </Button>
           </div>
         </div>
 
@@ -3368,10 +3443,16 @@ function LogsView({ clearLogs, clearing }: { clearLogs: () => Promise<void>; cle
                 <div className="text-sm font-semibold">{t('promptFilter.cyberIncidentsTitle')} · {incidentTotal}</div>
                 <p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.sectionRefreshHint')}</p>
               </div>
-              <Button size="sm" variant="outline" onClick={() => void loadIncidents()} disabled={incidentLoading}>
-                <RefreshCw className="size-3.5" />
-                {t('common.refresh')}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={() => void loadIncidents()} disabled={incidentLoading || clearingSection !== null}>
+                  <RefreshCw className="size-3.5" />
+                  {t('common.refresh')}
+                </Button>
+                <Button size="sm" variant="outline" className="text-destructive hover:text-destructive" onClick={() => void clearLogSection('incidents')} disabled={clearingSection !== null}>
+                  <Trash2 className="size-3.5" />
+                  {clearingSection === 'incidents' ? t('promptFilter.clearing') : t('promptFilter.clearCyberIncidents')}
+                </Button>
+              </div>
             </div>
             <PromptLogFilterControls
               draftFilters={incidentDraftFilters}
@@ -3392,10 +3473,16 @@ function LogsView({ clearLogs, clearing }: { clearLogs: () => Promise<void>; cle
                 <div className="text-sm font-semibold">{t('promptFilter.reviewHistoryTitle')} · {reviewTotal}</div>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewHistoryDesc')}</p>
               </div>
-              <Button size="sm" variant="outline" onClick={() => void loadReviewLogs()} disabled={reviewLoading}>
-                <RefreshCw className="size-3.5" />
-                {t('common.refresh')}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={() => void loadReviewLogs()} disabled={reviewLoading || clearingSection !== null}>
+                  <RefreshCw className="size-3.5" />
+                  {t('common.refresh')}
+                </Button>
+                <Button size="sm" variant="outline" className="text-destructive hover:text-destructive" onClick={() => void clearLogSection('review')} disabled={clearingSection !== null}>
+                  <Trash2 className="size-3.5" />
+                  {clearingSection === 'review' ? t('promptFilter.clearing') : t('promptFilter.clearReviewLogs')}
+                </Button>
+              </div>
             </div>
             <PromptLogFilterControls
               draftFilters={reviewDraftFilters}
@@ -3418,10 +3505,16 @@ function LogsView({ clearLogs, clearing }: { clearLogs: () => Promise<void>; cle
                 <div className="text-sm font-semibold">{t('promptFilter.localAuditLogsTitle')} · {total}</div>
                 <p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.sectionRefreshHint')}</p>
               </div>
-              <Button size="sm" variant="outline" onClick={() => void loadLocalLogs()} disabled={localLoading}>
-                <RefreshCw className="size-3.5" />
-                {t('common.refresh')}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={() => void loadLocalLogs()} disabled={localLoading || clearingSection !== null}>
+                  <RefreshCw className="size-3.5" />
+                  {t('common.refresh')}
+                </Button>
+                <Button size="sm" variant="outline" className="text-destructive hover:text-destructive" onClick={() => void clearLogSection('local')} disabled={clearingSection !== null}>
+                  <Trash2 className="size-3.5" />
+                  {clearingSection === 'local' ? t('promptFilter.clearing') : t('promptFilter.clearLocalLogs')}
+                </Button>
+              </div>
             </div>
             <PromptLogFilterControls
               draftFilters={localDraftFilters}
@@ -3593,11 +3686,11 @@ function RiskProfilesTable({ profiles }: { profiles: PromptRiskProfile[] }) {
             <TableCell>
               <div className="flex items-center gap-2"><Users className="size-4 text-muted-foreground" /><span className="font-medium">{promptRiskIdentityPrimary(profile)}</span></div>
               {profile.newapi_user_id || profile.newapi_user_email ? <div className="mt-1 text-xs text-muted-foreground">{profile.newapi_user_id ? `${t('promptFilter.risk.userId')} #${profile.newapi_user_id}` : ''}{profile.newapi_user_id && profile.newapi_user_email ? ' · ' : ''}{profile.newapi_user_email || ''}</div> : null}
-              <div className="mt-1 flex flex-wrap gap-1"><Badge variant={profile.is_person ? 'default' : 'outline'}>{profile.is_person ? t('promptFilter.risk.person') : t('promptFilter.risk.nonPerson')}</Badge><Badge variant="outline">{t(`promptFilter.risk.subjects.${profile.subject_type}`)}</Badge>{profile.platform ? <Badge variant="secondary">{profile.platform}</Badge> : null}{profile.newapi_user_group ? <Badge variant="secondary">{t('promptFilter.risk.userGroup')}: {profile.newapi_user_group}</Badge> : null}{profile.trust_policy ? <Badge variant={profile.trust_policy.status === 'active' ? 'default' : 'outline'}>{t(`promptFilter.risk.trust.status.${profile.trust_policy.status}`, { defaultValue: profile.trust_policy.status })}</Badge> : null}</div>
+              <div className="mt-1 flex flex-wrap gap-1"><Badge variant={profile.is_person ? 'default' : 'outline'}>{profile.is_person ? t('promptFilter.risk.person') : t('promptFilter.risk.nonPerson')}</Badge><Badge variant={profile.has_activity ? 'secondary' : 'outline'}>{t(profile.has_activity ? 'promptFilter.risk.activeProfile' : 'promptFilter.risk.identityOnly')}</Badge><Badge variant="outline">{t(`promptFilter.risk.subjects.${profile.subject_type}`)}</Badge>{profile.platform ? <Badge variant="secondary">{profile.platform}</Badge> : null}{profile.newapi_user_group ? <Badge variant="secondary">{t('promptFilter.risk.userGroup')}: {profile.newapi_user_group}</Badge> : null}{profile.trust_policy ? <Badge variant={profile.trust_policy.status === 'active' ? 'default' : 'outline'}>{t(`promptFilter.risk.trust.status.${profile.trust_policy.status}`, { defaultValue: profile.trust_policy.status })}</Badge> : null}</div>
               <div className="mt-1 font-mono text-[11px] text-muted-foreground">{profile.subject_key.slice(0, 18)}</div>
             </TableCell>
             <TableCell><div className="flex items-center gap-2"><span className="font-mono text-lg font-semibold">{profile.risk_score}</span><Badge className={promptRiskBadgeClass(profile.risk_level)}>{t(`promptFilter.risk.levels.${profile.risk_level}`)}</Badge></div><div className="text-xs text-muted-foreground">{t('promptFilter.risk.identityConfidence')} {profile.identity_confidence}%</div></TableCell>
-            <TableCell className="font-mono text-xs"><div>10m {profile.events_10m} · 24h {profile.events_24h}</div><div className="mt-1 text-muted-foreground">7d {profile.events_7d} · 30d {profile.events_30d}</div></TableCell>
+            <TableCell className="font-mono text-xs">{profile.has_activity ? <><div>10m {profile.events_10m} · 24h {profile.events_24h}</div><div className="mt-1 text-muted-foreground">7d {profile.events_7d} · 30d {profile.events_30d}</div></> : <><div className="font-sans text-muted-foreground">{t('promptFilter.risk.noAttributedRequests')}</div>{profile.identity_updated_at ? <div className="mt-1 text-muted-foreground">{formatBeijingTime(profile.identity_updated_at)}</div> : null}</>}</TableCell>
             <TableCell className="text-xs"><div>CY {profile.upstream_cy_count} · {t('promptFilter.risk.miss')} {profile.confirmed_miss_count}</div><div className="mt-1 text-muted-foreground">{t('promptFilter.risk.block')} {profile.local_block_count} · {t('promptFilter.risk.repeat')} {profile.repeated_fingerprints}</div></TableCell>
             <TableCell className="text-xs"><div>{profile.api_key_name || profile.api_key_masked || (profile.api_key_id ? `Key #${profile.api_key_id}` : '-')}</div><div className="mt-1 max-w-[180px] truncate text-muted-foreground" title={profile.account_name}>{profile.account_name || (profile.account_id ? `Account #${profile.account_id}` : '-')}</div></TableCell>
             <TableCell><div className="flex max-w-[240px] flex-wrap gap-1">{profile.recommended_actions.map((action) => <Badge key={action} variant="outline">{t(`promptFilter.risk.actions.${action}`)}</Badge>)}</div></TableCell>
@@ -3719,6 +3812,8 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
             <PromptPolicyDetailField label={t('promptFilter.risk.userName')} value={item.newapi_user_name || '-'} />
             <PromptPolicyDetailField label={t('promptFilter.risk.userEmail')} value={item.newapi_user_email || '-'} />
             <PromptPolicyDetailField label={t('promptFilter.risk.userGroup')} value={item.newapi_user_group || '-'} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.profileState')} value={t(item.has_activity ? 'promptFilter.risk.activeProfile' : 'promptFilter.risk.identityOnly')} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.identitySource')} value={item.identity_source || '-'} />
           </div>
           <div><div className="mb-2 text-sm font-semibold">{t('promptFilter.risk.eventHistory')} · {detail?.event_total ?? 0}</div>
             <div className="overflow-x-auto rounded-lg border border-border"><Table><TableHeader><TableRow><TableHead>{t('promptFilter.colTime')}</TableHead><TableHead>{t('promptFilter.risk.eventKind')}</TableHead><TableHead>{t('promptFilter.risk.requestEvidence')}</TableHead><TableHead>{t('promptFilter.colEndpoint')}</TableHead><TableHead>{t('promptFilter.risk.scope')}</TableHead></TableRow></TableHeader><TableBody>

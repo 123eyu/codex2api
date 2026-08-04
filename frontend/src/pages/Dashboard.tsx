@@ -29,6 +29,7 @@ import PoolRunwayCard from '../components/PoolRunwayCard'
 const DashboardUsageCharts = lazy(() => import('../components/DashboardUsageCharts'))
 
 const DASHBOARD_REFRESH_INTERVAL_MS = 15_000
+const DASHBOARD_POOL_REFRESH_INTERVAL_MS = 60_000
 const DASHBOARD_POOL_RUNWAY_VISIBILITY_KEY = 'codex2api:dashboard:pool-runway-visible'
 
 function getInitialPoolRunwayVisibility(): boolean {
@@ -85,32 +86,37 @@ export default function Dashboard() {
   const [chartData, setChartData] = useState<ChartAggregation | null>(null)
   const [chartRefreshedAt, setChartRefreshedAt] = useState<number | null>(null)
   const [chartLoading, setChartLoading] = useState(true)
+  const [chartError, setChartError] = useState<string | null>(null)
   const chartAbort = useRef<AbortController | null>(null)
+  const statsAbort = useRef<AbortController | null>(null)
   const timeRangeRef = useRef<TimeRangeKey>(timeRange)
   const usageStatsRangeInitialized = useRef(false)
   const showPoolRunwayRef = useRef(showPoolRunway)
+  const poolDataRef = useRef<{ accounts: AccountRow[]; opsOverview: OpsOverviewResponse | null }>({ accounts: [], opsOverview: null })
 
-  // 统计始终加载；号池分析仅在开启时拉账号列表 + ops RPM（隐藏时省流量）
+  // 核心统计与号池分析解耦：百万级日志下账号聚合变慢时，不能阻塞整个仪表盘首屏。
   const loadDashboardStats = useCallback(async () => {
+    statsAbort.current?.abort()
+    const controller = new AbortController()
+    statsAbort.current = controller
     const { start, end } = getTimeRangeISO(timeRangeRef.current)
-    const includePoolRunway = showPoolRunwayRef.current
-    const [stats, usageStats, settings, accountsRes, opsOverview] = await Promise.all([
+    const [stats, usageStats, settings] = await Promise.all([
       api.getStats(),
-      api.getUsageStats({ start, end, channel: channelRef.current || undefined }),
+      api.getUsageStats({
+        start,
+        end,
+        channel: channelRef.current || undefined,
+        detail: 'summary',
+        signal: controller.signal,
+      }),
       api.getSettings().catch((): SystemSettings | null => null),
-      includePoolRunway
-        ? api.getAccounts().catch(() => ({ accounts: [] as AccountRow[] }))
-        : Promise.resolve({ accounts: [] as AccountRow[] }),
-      includePoolRunway
-        ? api.getOpsOverview().catch((): OpsOverviewResponse | null => null)
-        : Promise.resolve(null),
     ])
     return {
       stats,
       usageStats,
       settings,
-      accounts: accountsRes.accounts ?? [],
-      opsOverview,
+      accounts: poolDataRef.current.accounts,
+      opsOverview: poolDataRef.current.opsOverview,
     }
   }, [])
 
@@ -131,21 +137,37 @@ export default function Dashboard() {
     load: loadDashboardStats,
   })
 
-  // 偏好持久化 + 开关切换时补拉/清空（跳过首屏，避免与 useDataLoader 首拉重复）
-  const poolRunwayToggleReady = useRef(false)
+  const loadPoolRunwayData = useCallback(async () => {
+    if (!showPoolRunwayRef.current) return
+    const [accountsRes, opsOverview] = await Promise.all([
+      api.getAccounts().catch(() => ({ accounts: [] as AccountRow[] })),
+      api.getOpsOverview().catch((): OpsOverviewResponse | null => null),
+    ])
+    if (!showPoolRunwayRef.current) return
+    const next = { accounts: accountsRes.accounts ?? [], opsOverview }
+    poolDataRef.current = next
+    setData((prev) => ({ ...prev, ...next }))
+  }, [setData])
+
+  // 偏好持久化 + 号池独立加载。号池失败只影响号池卡片，不拖死核心统计。
   useEffect(() => {
     showPoolRunwayRef.current = showPoolRunway
     persistPoolRunwayVisibility(showPoolRunway)
-    if (!poolRunwayToggleReady.current) {
-      poolRunwayToggleReady.current = true
-      return
-    }
     if (!showPoolRunway) {
+      poolDataRef.current = { accounts: [], opsOverview: null }
       setData((prev) => ({ ...prev, accounts: [], opsOverview: null }))
       return
     }
-    void reloadSilently()
-  }, [showPoolRunway, reloadSilently, setData])
+    void loadPoolRunwayData()
+  }, [showPoolRunway, loadPoolRunwayData, setData])
+
+  useEffect(() => {
+    if (!showPoolRunway) return
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void loadPoolRunwayData()
+    }, DASHBOARD_POOL_REFRESH_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+  }, [loadPoolRunwayData, showPoolRunway])
 
   useEffect(() => {
     timeRangeRef.current = timeRange
@@ -163,22 +185,36 @@ export default function Dashboard() {
     const controller = new AbortController()
     chartAbort.current = controller
     setChartLoading(true)
+    setChartError(null)
     try {
       const { start, end } = getTimeRangeISO(timeRange)
       const { bucketMinutes } = getBucketConfig(timeRange)
-      const res = await api.getChartData({ start, end, bucketMinutes, channel: channel || undefined })
+      const res = await api.getChartData({
+        start,
+        end,
+        bucketMinutes,
+        channel: channel || undefined,
+        signal: controller.signal,
+      })
       if (!controller.signal.aborted) {
         setChartData(res)
         setChartRefreshedAt(Date.now())
       }
-    } catch {
-      // 静默容错
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setChartError(err instanceof Error ? err.message : t('common.loadFailed'))
+      }
     } finally {
       if (!controller.signal.aborted) {
         setChartLoading(false)
       }
     }
-  }, [timeRange, channel])
+  }, [timeRange, channel, t])
+
+  useEffect(() => () => {
+    chartAbort.current?.abort()
+    statsAbort.current?.abort()
+  }, [])
 
   // 首次加载 + timeRange 变更时重新拉取图表数据
   useEffect(() => {
@@ -381,6 +417,14 @@ export default function Dashboard() {
             />
           ) : null}
           <SystemHealthBar chartData={chartData} timeRange={timeRange} loading={chartLoading} />
+          {chartError ? (
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <span>{chartError}</span>
+              <Button variant="outline" size="sm" onClick={() => void loadChartData()}>
+                {t('common.retry')}
+              </Button>
+            </div>
+          ) : null}
         </div>
 
         {/* Usage stats */}

@@ -54,6 +54,38 @@ func TestPromptIdentityManagedSectionRejectsContractChanges(t *testing.T) {
 	}
 }
 
+func TestPromptIntelligenceCoverageRejectsNoChangeForLocallyAllowedCY(t *testing.T) {
+	evidence := []*database.PromptRuleCandidateEvidence{{
+		SourceKind:   database.PromptRuleCandidateSourceUpstreamCyberPolicy,
+		MetadataJSON: `{"local_action":"allow","local_outcome":"audit_hit","local_matches":[{"name":"malware_family","signal_only":true}]}`,
+	}}
+	coverage := summarizePromptIntelligenceCoverage(evidence)
+	if coverage.EffectiveCoverage != "uncovered" || coverage.LocalAllowCount != 1 || coverage.SignalOnlyMatchCount != 1 {
+		t.Fatalf("coverage=%+v", coverage)
+	}
+	if err := validatePromptIntelligenceAICoverageDecision(promptIntelligenceAIDecision{Decision: "no_change"}, coverage); err == nil {
+		t.Fatal("locally allowed upstream CY evidence accepted no_change")
+	}
+	input := buildPromptIntelligenceAIEvidenceInput(&database.PromptRuleCandidate{}, evidence)
+	if !strings.Contains(input, `"effective_coverage":"uncovered"`) {
+		t.Fatalf("coverage summary missing from AI evidence input: %s", input)
+	}
+}
+
+func TestPromptIntelligenceCoverageAllowsNoChangeWhenEveryCYWasBlocked(t *testing.T) {
+	evidence := []*database.PromptRuleCandidateEvidence{
+		{MetadataJSON: `{"local_action":"block"}`},
+		{MetadataJSON: `{"local_action":"block"}`},
+	}
+	coverage := summarizePromptIntelligenceCoverage(evidence)
+	if coverage.EffectiveCoverage != "covered" || coverage.LocalBlockCount != 2 {
+		t.Fatalf("coverage=%+v", coverage)
+	}
+	if err := validatePromptIntelligenceAICoverageDecision(promptIntelligenceAIDecision{Decision: "no_change"}, coverage); err != nil {
+		t.Fatalf("effectively covered evidence rejected no_change: %v", err)
+	}
+}
+
 func TestPromptIntelligenceReviewProviderUsesBoundedParallelKeys(t *testing.T) {
 	var active atomic.Int32
 	var maximum atomic.Int32

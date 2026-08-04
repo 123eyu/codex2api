@@ -506,7 +506,7 @@ func (db *DB) GetPromptRiskAdaptiveReviewBasis(ctx context.Context, subjectType,
 	var firstClean, lastClean any
 	err := db.conn.QueryRowContext(ctx, `SELECT
 		COUNT(DISTINCT CASE WHEN event_kind='review_cleared' THEN CASE WHEN request_correlation_id<>'' THEN request_correlation_id ELSE source_type || ':' || source_id END END),
-		COALESCE(SUM(CASE WHEN request_risk_score>0 AND event_kind NOT IN ('local_audit_hit', 'review_cleared') THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN request_risk_score>0 AND event_kind IN ('review_flagged_monitor','local_block_strike','upstream_cy_confirmed_miss','upstream_cy_local_detected','upstream_cy_upstream_only') THEN 1 ELSE 0 END), 0),
 		MIN(CASE WHEN event_kind='review_cleared' THEN created_at ELSE NULL END),
 		MAX(CASE WHEN event_kind='review_cleared' THEN created_at ELSE NULL END)
 	FROM prompt_risk_events
@@ -561,7 +561,7 @@ func (db *DB) promptRiskTrustEvidenceSummaries(ctx context.Context, since time.T
 	}
 	rows, err := db.conn.QueryContext(ctx, `SELECT subject_type, subject_key,
 		COUNT(DISTINCT CASE WHEN event_kind='review_cleared' THEN CASE WHEN request_correlation_id<>'' THEN request_correlation_id ELSE source_type || ':' || source_id END END),
-		COALESCE(SUM(CASE WHEN request_risk_score>0 AND event_kind NOT IN ('local_audit_hit', 'review_cleared') THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN request_risk_score>0 AND event_kind IN ('review_flagged_monitor','local_block_strike','upstream_cy_confirmed_miss','upstream_cy_local_detected','upstream_cy_upstream_only') THEN 1 ELSE 0 END), 0),
 		MIN(CASE WHEN event_kind='review_cleared' THEN created_at ELSE NULL END),
 		MAX(CASE WHEN event_kind='review_cleared' THEN created_at ELSE NULL END)
 	FROM prompt_risk_events
@@ -605,7 +605,7 @@ func (db *DB) promptRiskTrustEvidenceSummarySince(ctx context.Context, subjectKe
 	var firstClean, lastClean any
 	err := db.conn.QueryRowContext(ctx, `SELECT
 		COUNT(DISTINCT CASE WHEN event_kind='review_cleared' THEN CASE WHEN request_correlation_id<>'' THEN request_correlation_id ELSE source_type || ':' || source_id END END),
-		COALESCE(SUM(CASE WHEN request_risk_score>0 AND event_kind NOT IN ('local_audit_hit', 'review_cleared') THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN request_risk_score>0 AND event_kind IN ('review_flagged_monitor','local_block_strike','upstream_cy_confirmed_miss','upstream_cy_local_detected','upstream_cy_upstream_only') THEN 1 ELSE 0 END), 0),
 		MIN(CASE WHEN event_kind='review_cleared' THEN created_at ELSE NULL END),
 		MAX(CASE WHEN event_kind='review_cleared' THEN created_at ELSE NULL END)
 	FROM prompt_risk_events WHERE subject_type=$1 AND subject_key=$2 AND is_person=TRUE AND created_at >= $3`,
