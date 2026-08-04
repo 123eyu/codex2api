@@ -1965,6 +1965,7 @@ export interface APIKeyAccountStat {
   account_id: number
   account_name: string
   account_email: string
+  account_deleted?: boolean
   groups?: APIKeyAccountGroup[]
   requests: number
   input_tokens: number
@@ -1974,6 +1975,33 @@ export interface APIKeyAccountStat {
   error_count: number
   account_billed: number
   user_billed: number
+}
+
+export interface APIKeyAccountGroupUsage {
+  id: number
+  name: string
+  color: string
+  accounts: number
+  requests: number
+  total_tokens: number
+  account_billed: number
+  user_billed: number
+}
+
+export interface APIKeyAccountUsageSummary {
+  accounts: number
+  requests: number
+  total_tokens: number
+  account_billed: number
+  user_billed: number
+}
+
+export interface APIKeyAccountStatsResponse {
+  items: APIKeyAccountStat[]
+  groups: APIKeyAccountGroupUsage[]
+  summary: APIKeyAccountUsageSummary
+  /** Active accounts use current memberships; deleted accounts use their last retained membership. */
+  membership_basis: 'current_and_deleted_last_membership'
 }
 
 export interface UsageLog {

@@ -169,6 +169,8 @@ type chartCacheEntry struct {
 const (
 	adminUsageStatsCacheNamespace  = "admin:usage-stats"
 	adminChartCacheNamespace       = "admin:chart-data"
+	adminAPIKeyAccountsNamespace   = "admin:api-key-accounts"
+	adminAPIKeyStatsNamespace      = "admin:api-key-stats"
 	adminAccountWindowsNamespace   = "admin:account-usage-windows"
 	adminAPIKeyCacheNamespace      = "api-key"
 	adminAPIKeyCountNamespace      = "api-key-count"
@@ -449,6 +451,27 @@ func (h *Handler) getUsageStatsCached(ctx context.Context, rangeStart, rangeEnd 
 	if cacheKey != "" {
 		h.setRuntimeJSON(ctx, adminUsageStatsCacheNamespace, cacheKey, stats, cacheTTL)
 	}
+	return stats, nil
+}
+
+func (h *Handler) getUsageStatsSummaryCached(ctx context.Context, rangeStart, rangeEnd time.Time, channel string) (*database.UsageStats, error) {
+	cacheKey := "summary:global"
+	cacheTTL := adminUsageStatsCacheTTL
+	if !rangeStart.IsZero() && !rangeEnd.IsZero() {
+		cacheKey = fmt.Sprintf("summary:range:%d:%d:%s", rangeStart.Unix()/30, rangeEnd.Unix()/30, channel)
+		cacheTTL = adminUsageRangeCacheTTL
+	} else if channel != "" {
+		cacheKey += ":" + channel
+	}
+	var cached database.UsageStats
+	if h.getRuntimeJSON(ctx, adminUsageStatsCacheNamespace, cacheKey, &cached) {
+		return &cached, nil
+	}
+	stats, err := h.db.GetUsageStatsSummary(ctx, rangeStart, rangeEnd, channel)
+	if err != nil {
+		return nil, err
+	}
+	h.setRuntimeJSON(ctx, adminUsageStatsCacheNamespace, cacheKey, stats, cacheTTL)
 	return stats, nil
 }
 
@@ -5612,7 +5635,7 @@ func (h *Handler) GetHealth(c *gin.Context) {
 // GetUsageStats 获取使用统计。
 // 支持可选 query 参数 start/end (RFC3339);未传时回落"今日"行为。
 func (h *Handler) GetUsageStats(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 
 	rangeStart, rangeEnd, err := parseUsageStatsRange(c.Query("start"), c.Query("end"))
@@ -5621,7 +5644,12 @@ func (h *Handler) GetUsageStats(c *gin.Context) {
 		return
 	}
 
-	stats, err := h.getUsageStatsCached(ctx, rangeStart, rangeEnd, parseUsageChannel(c))
+	var stats *database.UsageStats
+	if strings.EqualFold(strings.TrimSpace(c.Query("detail")), "summary") {
+		stats, err = h.getUsageStatsSummaryCached(ctx, rangeStart, rangeEnd, parseUsageChannel(c))
+	} else {
+		stats, err = h.getUsageStatsCached(ctx, rangeStart, rangeEnd, parseUsageChannel(c))
+	}
 	if err != nil {
 		writeInternalError(c, err)
 		return
@@ -5659,12 +5687,26 @@ func parseUsageStatsRange(startStr, endStr string) (time.Time, time.Time, error)
 // 支持可选 query 参数 start/end (RFC3339)；缺省回落到"今日"。
 // 不分页/不限条数：前端做排序、搜索、分页。
 func (h *Handler) GetAPIKeyTokenStats(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
-	defer cancel()
-
 	rangeStart, rangeEnd, err := parseUsageStatsRange(c.Query("start"), c.Query("end"))
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !rangeStart.IsZero() && !rangeEnd.IsZero() && rangeEnd.Sub(rangeStart) > 366*24*time.Hour {
+		writeError(c, http.StatusBadRequest, "时间范围不能超过 366 天")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+
+	cacheKey := fmt.Sprintf("%d:%d", rangeStart.Unix()/30, rangeEnd.Unix()/30)
+	type cachedResponse struct {
+		Items []database.APIKeyTokenStat `json:"items"`
+	}
+	var response cachedResponse
+	if h.getRuntimeJSON(ctx, adminAPIKeyStatsNamespace, cacheKey, &response) {
+		c.JSON(http.StatusOK, response)
 		return
 	}
 
@@ -5676,7 +5718,9 @@ func (h *Handler) GetAPIKeyTokenStats(c *gin.Context) {
 	if items == nil {
 		items = []database.APIKeyTokenStat{}
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	response.Items = items
+	h.setRuntimeJSON(ctx, adminAPIKeyStatsNamespace, cacheKey, response, adminUsageRangeCacheTTL)
+	c.JSON(http.StatusOK, response)
 }
 
 // GetAPIKeyAccountStats 返回单个 API Key 按上游账号拆分的用量（账号明细"按 Key 分解"的转置视图）。
@@ -5695,8 +5739,26 @@ func (h *Handler) GetAPIKeyAccountStats(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	if !rangeStart.IsZero() && !rangeEnd.IsZero() && rangeEnd.Sub(rangeStart) > 366*24*time.Hour {
+		writeError(c, http.StatusBadRequest, "时间范围不能超过 366 天")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
+
+	cacheKey := fmt.Sprintf("%d:%d:%d", id, rangeStart.Unix()/30, rangeEnd.Unix()/30)
+	type cachedResponse struct {
+		Items           []database.APIKeyAccountStat `json:"items"`
+		Groups          []apiKeyAccountGroupUsage    `json:"groups"`
+		Summary         apiKeyAccountUsageSummary    `json:"summary"`
+		MembershipBasis string                       `json:"membership_basis"`
+	}
+	var response cachedResponse
+	if h.getRuntimeJSON(ctx, adminAPIKeyAccountsNamespace, cacheKey, &response) {
+		c.JSON(http.StatusOK, response)
+		return
+	}
 
 	items, err := h.db.ListAPIKeyAccountStats(ctx, id, rangeStart, rangeEnd)
 	if err != nil {
@@ -5706,7 +5768,68 @@ func (h *Handler) GetAPIKeyAccountStats(c *gin.Context) {
 	if items == nil {
 		items = []database.APIKeyAccountStat{}
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	response.Items = items
+	response.Groups, response.Summary = aggregateAPIKeyAccountGroups(items)
+	response.MembershipBasis = "current_and_deleted_last_membership"
+	h.setRuntimeJSON(ctx, adminAPIKeyAccountsNamespace, cacheKey, response, adminUsageRangeCacheTTL)
+	c.JSON(http.StatusOK, response)
+}
+
+type apiKeyAccountUsageSummary struct {
+	Accounts      int     `json:"accounts"`
+	Requests      int64   `json:"requests"`
+	TotalTokens   int64   `json:"total_tokens"`
+	AccountBilled float64 `json:"account_billed"`
+	UserBilled    float64 `json:"user_billed"`
+}
+
+type apiKeyAccountGroupUsage struct {
+	ID            int64   `json:"id"`
+	Name          string  `json:"name"`
+	Color         string  `json:"color"`
+	Accounts      int     `json:"accounts"`
+	Requests      int64   `json:"requests"`
+	TotalTokens   int64   `json:"total_tokens"`
+	AccountBilled float64 `json:"account_billed"`
+	UserBilled    float64 `json:"user_billed"`
+}
+
+// aggregateAPIKeyAccountGroups uses current memberships for active accounts and
+// the retained last membership for recycle-bin accounts. If an account belongs
+// to multiple groups, its usage is intentionally included in each group; the
+// overall summary remains de-duplicated.
+func aggregateAPIKeyAccountGroups(items []database.APIKeyAccountStat) ([]apiKeyAccountGroupUsage, apiKeyAccountUsageSummary) {
+	groupMap := make(map[int64]*apiKeyAccountGroupUsage)
+	summary := apiKeyAccountUsageSummary{Accounts: len(items)}
+	for _, item := range items {
+		summary.Requests += item.Requests
+		summary.TotalTokens += item.TotalTokens
+		summary.AccountBilled += item.AccountBilled
+		summary.UserBilled += item.UserBilled
+		for _, group := range item.Groups {
+			total := groupMap[group.ID]
+			if total == nil {
+				total = &apiKeyAccountGroupUsage{ID: group.ID, Name: group.Name, Color: group.Color}
+				groupMap[group.ID] = total
+			}
+			total.Accounts++
+			total.Requests += item.Requests
+			total.TotalTokens += item.TotalTokens
+			total.AccountBilled += item.AccountBilled
+			total.UserBilled += item.UserBilled
+		}
+	}
+	groups := make([]apiKeyAccountGroupUsage, 0, len(groupMap))
+	for _, group := range groupMap {
+		groups = append(groups, *group)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].UserBilled == groups[j].UserBilled {
+			return groups[i].TotalTokens > groups[j].TotalTokens
+		}
+		return groups[i].UserBilled > groups[j].UserBilled
+	})
+	return groups, summary
 }
 
 // GetChartData 返回图表聚合数据（服务端分桶 + 内存缓存）
@@ -5728,8 +5851,10 @@ func (h *Handler) GetChartData(c *gin.Context) {
 
 	channel := parseUsageChannel(c)
 
-	// 检查内存缓存（10秒 TTL）
-	cacheKey := fmt.Sprintf("%s|%s|%d|%s", startStr, endStr, bucketMinutes, channel)
+	// Canonicalize moving ranges so periodic refreshes reuse the same result.
+	// The bucket width itself is the natural cache window for chart data.
+	cacheWindow := int64(bucketMinutes * 60)
+	cacheKey := fmt.Sprintf("%d|%d|%d|%s", startTime.Unix()/cacheWindow, endTime.Unix()/cacheWindow, bucketMinutes, channel)
 	h.chartCacheMu.RLock()
 	if entry, ok := h.chartCacheData[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
 		h.chartCacheMu.RUnlock()

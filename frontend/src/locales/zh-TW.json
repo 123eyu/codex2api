@@ -20,7 +20,7 @@
     "adaptiveReview": {
       "title": "自適應模型審核",
       "description": "新使用者先完整複核；已簽名人員在持續低風險後自動減少同步 DS 請求。本地規則與會話關聯始終執行，命中、CY 或風險上升會立即恢復完整複核。",
-      "defaults": "安全預設：10 次乾淨複核且觀察滿 24 小時後生效；5% 週期抽檢，最長 6 小時強制複核一次。",
+      "defaults": "目前策略：{{minClean}} 次乾淨複核且觀察滿 {{hours}} 小時後生效；{{sample}}% 週期抽檢，最長 {{forceHours}} 小時強制複核一次。",
       "activeBadge": "低風險人員自適應降頻"
     },
     "expertSettingsSummary": "底層與相容設定",
@@ -92,6 +92,10 @@
     "reviewConfidenceThreshold": "違規信心閾值",
     "reviewMaxConcurrent": "最大並行複核數",
     "reviewMaxTextLength": "單次複核最大字元數",
+    "reviewCircuitBreakerFailures": "連續失敗熔斷閾值",
+    "reviewCircuitBreakerSeconds": "熔斷恢復等待（秒）",
+    "reviewResilienceTitle": "審核效能與故障隔離",
+    "reviewResilienceDesc": "通常無需調整。連續失敗後快速停止等待外部模型，恢復視窗結束後僅允許一個探針請求。",
     "reviewSystemPrompt": "Agent / System Prompt",
     "reviewSystemPromptHint": "模型不可變的審核指令，只應輸出 confidence 與 reason JSON。",
     "reviewSystemPromptPlaceholder": "留空使用服務端維護的預設審核提示詞",
@@ -211,7 +215,7 @@
       "subjects": {"newapi_user":"NewAPI 使用者","session":"工作階段","api_key":"API Key","client_ip":"客戶端網路","upstream_account":"上游帳號"},
       "levels": {"low":"低","observed":"觀察","elevated":"升高","high":"高","critical":"嚴重"},
       "actions": {"observe":"保持觀察","monitor":"持續監控","enhanced_review":"加強審核","rate_limit":"評估限速","require_signed_identity":"要求可信簽名身份","temporary_restriction_review":"評估臨時限制","account_rotation_review":"評估帳號輪換","account_routing_review":"檢查帳號路由"},
-      "events": {"review_cleared":"複核通過","review_flagged_monitor":"模型命中（監控模式）","local_block_strike":"本地攔截並計次","local_block":"本地攔截","local_warn":"本地警告","local_audit_hit":"本地審計命中","local_security_context_observed":"安全測試上下文觀察","upstream_cy_confirmed_miss":"上游 CY：確認漏檢","upstream_cy_local_detected":"上游 CY：本地已識別","upstream_cy_upstream_only":"上游 CY：僅上游證據","upstream_cy_evidence_unavailable":"上游 CY：證據不可用","upstream_cy_not_comparable":"上游 CY：不可比較","upstream_cy_legacy_unknown":"上游 CY：歷史未知"}
+      "events": {"review_cleared":"複核通過","review_flagged_monitor":"模型命中（監控模式）","local_block_strike":"本地終局攔截","local_block":"歷史未確認攔截","local_block_unverified":"本地攔截（待確認）","local_block_cleared":"本地攔截（已修正）","local_warn":"本地警告","local_audit_hit":"本地審計命中","local_security_context_observed":"安全測試上下文觀察","upstream_cy_confirmed_miss":"上游 CY：確認漏檢","upstream_cy_local_detected":"上游 CY：本地已識別","upstream_cy_upstream_only":"上游 CY：僅上游證據","upstream_cy_evidence_unavailable":"上游 CY：證據不可用","upstream_cy_not_comparable":"上游 CY：不可比較","upstream_cy_legacy_unknown":"上游 CY：歷史未知"}
     },
     "saveRefreshFailed": "設定已儲存，但規則或日誌重新整理失敗；可稍後單獨重新整理頁面",
     "advancedConfigInvalidTitle": "進階防護設定無法解析",

@@ -19,15 +19,17 @@ import (
 )
 
 const (
-	DefaultReviewBaseURL        = "https://api.openai.com"
-	DefaultReviewModel          = "omni-moderation-latest"
-	DefaultReviewTimeoutSeconds = 10
-	DefaultReviewRequestMode    = ReviewRequestModeModerations
-	DefaultReviewScope          = ReviewScopeAllRequests
-	DefaultReviewConfidence     = 0.70
-	DefaultReviewMaxConcurrent  = 32
-	DefaultReviewMaxTextLength  = 32 * 1024
-	maxReviewResponseBytes      = 64 * 1024
+	DefaultReviewBaseURL                = "https://api.openai.com"
+	DefaultReviewModel                  = "omni-moderation-latest"
+	DefaultReviewTimeoutSeconds         = 10
+	DefaultReviewRequestMode            = ReviewRequestModeModerations
+	DefaultReviewScope                  = ReviewScopeAllRequests
+	DefaultReviewConfidence             = 0.70
+	DefaultReviewMaxConcurrent          = 32
+	DefaultReviewMaxTextLength          = 32 * 1024
+	DefaultReviewCircuitBreakerFailures = 3
+	DefaultReviewCircuitBreakerSeconds  = 30
+	maxReviewResponseBytes              = 64 * 1024
 
 	ReviewRequestModeModerations     = "moderations"
 	ReviewRequestModeChatCompletions = "chat_completions"
@@ -137,14 +139,16 @@ Markdown, commentary, or a flagged field.`
 // installations do not need a database migration and API keys remain in their
 // existing secret-bearing column.
 type ReviewAdapterConfig struct {
-	RequestMode         string  `json:"request_mode"`
-	Scope               string  `json:"scope"`
-	SystemPrompt        string  `json:"system_prompt"`
-	UserPromptTemplate  string  `json:"user_prompt_template"`
-	PayloadTemplate     string  `json:"payload_template"`
-	ConfidenceThreshold float64 `json:"confidence_threshold"`
-	MaxConcurrent       int     `json:"max_concurrent"`
-	MaxTextLength       int     `json:"max_text_length"`
+	RequestMode            string  `json:"request_mode"`
+	Scope                  string  `json:"scope"`
+	SystemPrompt           string  `json:"system_prompt"`
+	UserPromptTemplate     string  `json:"user_prompt_template"`
+	PayloadTemplate        string  `json:"payload_template"`
+	ConfidenceThreshold    float64 `json:"confidence_threshold"`
+	MaxConcurrent          int     `json:"max_concurrent"`
+	MaxTextLength          int     `json:"max_text_length"`
+	CircuitBreakerFailures int     `json:"circuit_breaker_failures"`
+	CircuitBreakerSeconds  int     `json:"circuit_breaker_seconds"`
 }
 
 type ReviewOutcome struct {
@@ -249,6 +253,18 @@ func NormalizeReviewAdapterConfig(cfg ReviewAdapterConfig) ReviewAdapterConfig {
 	if cfg.MaxTextLength > 256*1024 {
 		cfg.MaxTextLength = 256 * 1024
 	}
+	if cfg.CircuitBreakerFailures <= 0 {
+		cfg.CircuitBreakerFailures = DefaultReviewCircuitBreakerFailures
+	}
+	if cfg.CircuitBreakerFailures > 20 {
+		cfg.CircuitBreakerFailures = 20
+	}
+	if cfg.CircuitBreakerSeconds <= 0 {
+		cfg.CircuitBreakerSeconds = DefaultReviewCircuitBreakerSeconds
+	}
+	if cfg.CircuitBreakerSeconds > 3600 {
+		cfg.CircuitBreakerSeconds = 3600
+	}
 	return cfg
 }
 
@@ -334,6 +350,20 @@ type reviewLimiter struct {
 	slots chan struct{}
 }
 
+type reviewCircuitBreaker struct {
+	mu        sync.Mutex
+	failures  int
+	openUntil time.Time
+	probing   bool
+}
+
+type reviewCircuitLease struct {
+	state           *reviewCircuitBreaker
+	probe           bool
+	failureLimit    int
+	recoverySeconds int
+}
+
 type reviewModelResponseError struct {
 	err error
 }
@@ -346,7 +376,10 @@ func (e *reviewModelResponseError) Unwrap() error {
 	return e.err
 }
 
-var reviewLimiters sync.Map
+var (
+	reviewLimiters        sync.Map
+	reviewCircuitBreakers sync.Map
+)
 
 func (c ReviewClient) ReviewText(ctx context.Context, text string, cfg ReviewConfig) (bool, string, error) {
 	outcome, err := c.ReviewTextDetailed(ctx, text, cfg)
@@ -380,6 +413,14 @@ func (c ReviewClient) ReviewTextDetailed(ctx context.Context, text string, cfg R
 		return ReviewOutcome{Model: cfg.Model, Endpoint: endpoint}, err
 	}
 	defer release()
+	circuitLease, err := acquireReviewCircuit(endpoint, cfg.Model, cfg.Adapter)
+	if err != nil {
+		return ReviewOutcome{Model: cfg.Model, Endpoint: endpoint}, err
+	}
+	finishWithError := func(reviewErr error) (ReviewOutcome, error) {
+		completeReviewCircuit(circuitLease, reviewErr)
+		return ReviewOutcome{Model: cfg.Model, Endpoint: endpoint}, reviewErr
+	}
 
 	keys := cfg.APIKeyList()
 	// 轮询起点 + 遇到限流/失效 key（429/401/403/5xx/网络错误）自动切换下一个 key。
@@ -390,6 +431,7 @@ func (c ReviewClient) ReviewTextDetailed(ctx context.Context, text string, cfg R
 		for responseAttempt := 0; responseAttempt < 2; responseAttempt++ {
 			outcome, retriable, reqErr := c.reviewOnce(timeoutCtx, endpoint, key, payload, cfg)
 			if reqErr == nil {
+				completeReviewCircuit(circuitLease, nil)
 				return outcome, nil
 			}
 			lastErr = reqErr
@@ -398,7 +440,7 @@ func (c ReviewClient) ReviewTextDetailed(ctx context.Context, text string, cfg R
 				continue
 			}
 			if !retriable {
-				return ReviewOutcome{Model: cfg.Model, Endpoint: endpoint}, reqErr
+				return finishWithError(reqErr)
 			}
 			break
 		}
@@ -406,7 +448,66 @@ func (c ReviewClient) ReviewTextDetailed(ctx context.Context, text string, cfg R
 	if lastErr == nil {
 		lastErr = fmt.Errorf("review request failed")
 	}
-	return ReviewOutcome{Model: cfg.Model, Endpoint: endpoint}, lastErr
+	return finishWithError(lastErr)
+}
+
+func reviewCircuitKey(endpoint, model string) string {
+	return strings.TrimSpace(endpoint) + "\x00" + strings.TrimSpace(model)
+}
+
+func acquireReviewCircuit(endpoint, model string, cfg ReviewAdapterConfig) (*reviewCircuitLease, error) {
+	cfg = NormalizeReviewAdapterConfig(cfg)
+	value, _ := reviewCircuitBreakers.LoadOrStore(reviewCircuitKey(endpoint, model), &reviewCircuitBreaker{})
+	state := value.(*reviewCircuitBreaker)
+	now := time.Now()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	lease := &reviewCircuitLease{
+		state:           state,
+		failureLimit:    cfg.CircuitBreakerFailures,
+		recoverySeconds: cfg.CircuitBreakerSeconds,
+	}
+	if state.openUntil.IsZero() {
+		return lease, nil
+	}
+	if now.Before(state.openUntil) {
+		return nil, fmt.Errorf("review circuit breaker is open; retry after %s", time.Until(state.openUntil).Round(time.Second))
+	}
+	if state.probing {
+		return nil, fmt.Errorf("review circuit breaker is half-open; recovery probe in progress")
+	}
+	state.probing = true
+	lease.probe = true
+	return lease, nil
+}
+
+func completeReviewCircuit(lease *reviewCircuitLease, reviewErr error) {
+	if lease == nil || lease.state == nil {
+		return
+	}
+	state := lease.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if reviewErr == nil {
+		state.failures = 0
+		state.openUntil = time.Time{}
+		state.probing = false
+		return
+	}
+	if errors.Is(reviewErr, context.Canceled) {
+		if lease.probe {
+			state.openUntil = time.Now().Add(time.Duration(lease.recoverySeconds) * time.Second)
+			state.probing = false
+		}
+		return
+	}
+	state.failures++
+	if lease.probe || state.failures >= lease.failureLimit {
+		state.openUntil = time.Now().Add(time.Duration(lease.recoverySeconds) * time.Second)
+		state.probing = false
+	}
 }
 
 // reviewOnce uses one key for one OpenAI-compatible request. retriable means a

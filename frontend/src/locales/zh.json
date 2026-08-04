@@ -1881,7 +1881,7 @@
       "subjects": {"newapi_user":"NewAPI 用户","session":"会话","api_key":"API Key","client_ip":"客户端网络","upstream_account":"上游账号"},
       "levels": {"low":"低","observed":"观察","elevated":"升高","high":"高","critical":"严重"},
       "actions": {"observe":"保持观察","monitor":"持续监控","enhanced_review":"加强审核","rate_limit":"评估限速","require_signed_identity":"要求可信签名身份","temporary_restriction_review":"评估临时限制","account_rotation_review":"评估账号轮换","account_routing_review":"检查账号路由"},
-      "events": {"review_cleared":"复核通过","review_flagged_monitor":"模型命中（监控模式）","local_block_strike":"本地拦截并计次","local_block":"本地拦截","local_warn":"本地警告","local_audit_hit":"本地审计命中","local_security_context_observed":"安全测试上下文观察","upstream_cy_confirmed_miss":"上游 CY：确认漏检","upstream_cy_local_detected":"上游 CY：本地已识别","upstream_cy_upstream_only":"上游 CY：仅上游证据","upstream_cy_evidence_unavailable":"上游 CY：证据不可用","upstream_cy_not_comparable":"上游 CY：不可比较","upstream_cy_legacy_unknown":"上游 CY：历史未知"}
+      "events": {"review_cleared":"复核通过","review_flagged_monitor":"模型命中（监控模式）","local_block_strike":"本地终局拦截","local_block":"历史未确认拦截","local_block_unverified":"本地拦截（待确认）","local_block_cleared":"本地拦截（已纠正）","local_warn":"本地警告","local_audit_hit":"本地审计命中","local_security_context_observed":"安全测试上下文观察","upstream_cy_confirmed_miss":"上游 CY：确认漏检","upstream_cy_local_detected":"上游 CY：本地已识别","upstream_cy_upstream_only":"上游 CY：仅上游证据","upstream_cy_evidence_unavailable":"上游 CY：证据不可用","upstream_cy_not_comparable":"上游 CY：不可比较","upstream_cy_legacy_unknown":"上游 CY：历史未知"}
     },
     "loadingTitle": "正在加载 Prompt 检查",
     "loadingDesc": "规则配置和触发日志正在同步。",
@@ -1916,7 +1916,7 @@
     "adaptiveReview": {
       "title": "自适应模型审核",
       "description": "新用户先完整复核；已签名人员在持续低风险后自动减少同步 DS 请求。本地规则与会话关联始终运行，命中、CY 或风险上升会立即恢复完整复核。",
-      "defaults": "安全默认：10 次干净复核且观察满 24 小时后生效；5% 周期抽检，最长 6 小时强制复核一次。",
+      "defaults": "当前策略：{{minClean}} 次干净复核且观察满 {{hours}} 小时后生效；{{sample}}% 周期抽检，最长 {{forceHours}} 小时强制复核一次。",
       "activeBadge": "低风险人员自适应降频"
     },
     "expertSettingsSummary": "底层与兼容设置",
@@ -2357,6 +2357,10 @@
     "reviewConfidenceThreshold": "违规置信度阈值",
     "reviewMaxConcurrent": "最大并发审核数",
     "reviewMaxTextLength": "单次审核最大字符数",
+    "reviewCircuitBreakerFailures": "连续失败熔断阈值",
+    "reviewCircuitBreakerSeconds": "熔断恢复等待（秒）",
+    "reviewResilienceTitle": "审核性能与故障隔离",
+    "reviewResilienceDesc": "通常无需调整。连续失败后快速停止等待外部模型，恢复窗口结束后仅放行一个探针请求。",
     "reviewSystemPrompt": "Agent / System Prompt",
     "reviewSystemPromptHint": "模型的不可变审核指令。模型应只输出 confidence 与 reason JSON。",
     "reviewSystemPromptPlaceholder": "留空使用服务端维护的默认审核提示词",
@@ -3770,7 +3774,14 @@
     "keyAccountsSortGroupHint": "按账号分组聚类，同组账号排在一起；再次点击切换升降序",
     "keyAccountsReqUnit": "req",
     "keyAccountsTokUnit": "tok",
-    "keyAccountsErrUnit": "err"
+    "keyAccountsErrUnit": "err",
+    "keyGroupsTitle": "当前分组用量汇总",
+    "keyGroupsAccounts": "{{count}} 个账号",
+	"keyGroupsAccountCost": "上游成本",
+	"keyGroupsBilled": "下游计费",
+	"keyGroupsCurrentHint": "活跃账号按当前分组、回收站账号按删除前保留的分组汇总；同一账号属于多个分组时会计入每个分组。",
+	"keyAccountDeleted": "已删除",
+	"keyAccountDeletedHint": "该上游账号已进入回收站，但历史用量仍计入统计。"
   },
   "keyUsage": {
     "title": "API Key 使用统计",

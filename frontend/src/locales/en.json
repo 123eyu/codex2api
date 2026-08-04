@@ -1881,7 +1881,7 @@
       "subjects": {"newapi_user":"NewAPI user","session":"Session","api_key":"API key","client_ip":"Client network","upstream_account":"Upstream account"},
       "levels": {"low":"Low","observed":"Observed","elevated":"Elevated","high":"High","critical":"Critical"},
       "actions": {"observe":"Observe","monitor":"Monitor","enhanced_review":"Enhanced review","rate_limit":"Review rate limit","require_signed_identity":"Require signed identity","temporary_restriction_review":"Review temporary restriction","account_rotation_review":"Review account rotation","account_routing_review":"Review account routing"},
-      "events": {"review_cleared":"Review cleared","review_flagged_monitor":"Review flagged in monitor mode","local_block_strike":"Local block with strike","local_block":"Local block","local_warn":"Local warning","local_audit_hit":"Local audit hit","local_security_context_observed":"Security context observed","upstream_cy_confirmed_miss":"Upstream CY: confirmed miss","upstream_cy_local_detected":"Upstream CY: locally detected","upstream_cy_upstream_only":"Upstream CY: upstream-only evidence","upstream_cy_evidence_unavailable":"Upstream CY: evidence unavailable","upstream_cy_not_comparable":"Upstream CY: not comparable","upstream_cy_legacy_unknown":"Upstream CY: legacy unknown"}
+      "events": {"review_cleared":"Review cleared","review_flagged_monitor":"Review flagged in monitor mode","local_block_strike":"Terminal local block","local_block":"Legacy unverified block","local_block_unverified":"Local block (unverified)","local_block_cleared":"Local block (cleared)","local_warn":"Local warning","local_audit_hit":"Local audit hit","local_security_context_observed":"Security context observed","upstream_cy_confirmed_miss":"Upstream CY: confirmed miss","upstream_cy_local_detected":"Upstream CY: locally detected","upstream_cy_upstream_only":"Upstream CY: upstream-only evidence","upstream_cy_evidence_unavailable":"Upstream CY: evidence unavailable","upstream_cy_not_comparable":"Upstream CY: not comparable","upstream_cy_legacy_unknown":"Upstream CY: legacy unknown"}
     },
     "loadingTitle": "Loading Prompt Filter",
     "loadingDesc": "Syncing rule settings and hit logs.",
@@ -1916,7 +1916,7 @@
     "adaptiveReview": {
       "title": "Adaptive model review",
       "description": "New identities receive full review. Signed people with sustained low risk automatically reduce synchronous model calls. Local rules and session correlation always run; a hit, CY, or rising risk restores full review immediately.",
-      "defaults": "Safe defaults: 10 clean reviews across 24 hours, 5% sampling, and at least one forced model review every 6 hours.",
+      "defaults": "Current policy: {{minClean}} clean reviews across {{hours}} hours, {{sample}}% sampling, and at least one forced model review every {{forceHours}} hours.",
       "activeBadge": "Adaptive review for low-risk people"
     },
     "expertSettingsSummary": "Runtime and compatibility settings",
@@ -2357,6 +2357,10 @@
     "reviewConfidenceThreshold": "Violation Confidence Threshold",
     "reviewMaxConcurrent": "Maximum Concurrent Reviews",
     "reviewMaxTextLength": "Maximum Review Characters",
+    "reviewCircuitBreakerFailures": "Circuit Breaker Failure Threshold",
+    "reviewCircuitBreakerSeconds": "Circuit Breaker Recovery (sec)",
+    "reviewResilienceTitle": "Review Performance and Failure Isolation",
+    "reviewResilienceDesc": "Usually no tuning is needed. Repeated failures stop synchronous waits, and one probe is allowed after the recovery window.",
     "reviewSystemPrompt": "Agent / System Prompt",
     "reviewSystemPromptHint": "Immutable review instructions. The model should emit only confidence and reason JSON.",
     "reviewSystemPromptPlaceholder": "Leave blank to use the server-managed default prompt",
@@ -3770,7 +3774,14 @@
     "keyAccountsSortGroupHint": "Cluster accounts by group; click again to toggle direction",
     "keyAccountsReqUnit": "req",
     "keyAccountsTokUnit": "tok",
-    "keyAccountsErrUnit": "err"
+    "keyAccountsErrUnit": "err",
+    "keyGroupsTitle": "Current group totals",
+    "keyGroupsAccounts": "{{count}} accounts",
+	"keyGroupsAccountCost": "Upstream cost",
+	"keyGroupsBilled": "User billed",
+	"keyGroupsCurrentHint": "Active accounts use current groups; recycle-bin accounts use their last retained groups. Accounts in multiple groups count toward each group.",
+	"keyAccountDeleted": "Deleted",
+	"keyAccountDeletedHint": "This upstream account is in the recycle bin; its historical usage is still included."
   },
   "keyUsage": {
     "title": "API Key Usage",

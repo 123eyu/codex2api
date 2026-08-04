@@ -4036,9 +4036,21 @@ type TrafficSnapshot struct {
 // GetUsageStats 聚合用量统计。channel 非空（codex/grok）时按渠道过滤；
 // 渠道视图下的「累计」只覆盖现存 usage_logs（清空日志前的 baseline 无渠道维度，不计入）。
 func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time, channel string) (*UsageStats, error) {
+	return db.getUsageStats(ctx, rangeStart, rangeEnd, channel, true)
+}
+
+// GetUsageStatsSummary returns only the aggregate fields used by the dashboard.
+// It deliberately skips model, endpoint, API-key and feature breakdowns, which
+// otherwise require four additional scans over the selected usage-log range.
+func (db *DB) GetUsageStatsSummary(ctx context.Context, rangeStart, rangeEnd time.Time, channel string) (*UsageStats, error) {
+	return db.getUsageStats(ctx, rangeStart, rangeEnd, channel, false)
+}
+
+func (db *DB) getUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time, channel string, includeBreakdowns bool) (*UsageStats, error) {
 	channel = strings.TrimSpace(channel)
+	explicitRange := !rangeStart.IsZero()
 	if db.isSQLite() {
-		return db.getUsageStatsSQLite(ctx, rangeStart, rangeEnd, channel)
+		return db.getUsageStatsSQLite(ctx, rangeStart, rangeEnd, channel, includeBreakdowns)
 	}
 
 	stats := &UsageStats{}
@@ -4112,7 +4124,7 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time,
 	if stats.TotalRequests > 0 {
 		stats.TotalCacheRate = float64(rollup.CacheHitRequests) / float64(stats.TotalRequests) * 100
 	}
-	if rollup.FirstTokenSamples > 0 {
+	if !explicitRange && rollup.FirstTokenSamples > 0 {
 		stats.AvgFirstTokenMs = rollup.FirstTokenMsSum / float64(rollup.FirstTokenSamples)
 	}
 	if stats.TotalRequests > 0 {
@@ -4123,12 +4135,18 @@ func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time,
 	if stats.TodayRequests > 0 {
 		stats.ErrorRate = float64(todayErrors) / float64(stats.TodayRequests) * 100
 	}
-	stats.ModelStats, err = db.getUsageModelStats(ctx, 10, rangeStart, rangeEnd, channel)
-	if err != nil {
-		return nil, err
-	}
-	if err := db.populateUsageBreakdownStats(ctx, stats, rangeStart, rangeEnd, channel); err != nil {
-		return nil, err
+	if includeBreakdowns {
+		stats.ModelStats, err = db.getUsageModelStats(ctx, 10, rangeStart, rangeEnd, channel)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.populateUsageBreakdownStats(ctx, stats, rangeStart, rangeEnd, channel); err != nil {
+			return nil, err
+		}
+	} else {
+		stats.ModelStats = []UsageModelStat{}
+		stats.EndpointStats = []UsageEndpointStat{}
+		stats.APIKeyStats = []UsageAPIKeyStat{}
 	}
 
 	return stats, nil
@@ -4578,27 +4596,36 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 	}
 	result := &ChartAggregation{}
 
-	// 时间轴聚合：按 bucketMinutes 分桶
+	// One GROUPING SETS query produces both the timeline and model ranking. The
+	// epoch-based bucket works for every interval, including 6h and 24h; the old
+	// minute-of-hour modulo accidentally returned hourly points for those ranges.
 	timelineQuery := `
+	WITH filtered AS (
+		SELECT
+			TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM created_at) / ($3 * 60)) * ($3 * 60)) AS bucket,
+			COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown') AS model_name,
+			duration_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, status_code
+		FROM usage_logs
+		WHERE created_at >= $1 AND created_at < $2
+		  AND status_code <> 499` + channelClause + `
+	)
 	SELECT
-		TO_CHAR(
-			date_trunc('minute', created_at)
-			- (EXTRACT(MINUTE FROM created_at)::int % $3) * INTERVAL '1 minute',
-			'YYYY-MM-DD"T"HH24:MI:SS'
-		) AS bucket,
-		COUNT(*)                              AS requests,
-		COALESCE(AVG(duration_ms), 0)         AS avg_latency,
-		COALESCE(SUM(input_tokens), 0)        AS input_tokens,
-		COALESCE(SUM(output_tokens), 0)       AS output_tokens,
-		COALESCE(SUM(reasoning_tokens), 0)    AS reasoning_tokens,
-		COALESCE(SUM(cached_tokens), 0)       AS cached_tokens,
+		CASE WHEN GROUPING(bucket) = 0 THEN 'timeline' ELSE 'model' END AS row_kind,
+		CASE WHEN GROUPING(bucket) = 0
+			THEN TO_CHAR(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+			ELSE model_name
+		END AS row_key,
+		COUNT(*) AS requests,
+		COALESCE(AVG(duration_ms), 0) AS avg_latency,
+		COALESCE(SUM(input_tokens), 0) AS input_tokens,
+		COALESCE(SUM(output_tokens), 0) AS output_tokens,
+		COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+		COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
 		COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END), 0) AS errors_4xx,
 		COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0) AS errors_5xx
-	FROM usage_logs
-	WHERE created_at >= $1 AND created_at <= $2
-	  AND status_code <> 499` + channelClause + `
-	GROUP BY 1
-	ORDER BY 1`
+	FROM filtered
+	GROUP BY GROUPING SETS ((bucket), (model_name))
+	ORDER BY GROUPING(bucket), bucket, requests DESC, row_key`
 
 	timelineArgs := []interface{}{start, end, bucketMinutes}
 	if channel != "" {
@@ -4611,11 +4638,22 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 	defer rows.Close()
 
 	for rows.Next() {
-		var p ChartTimelinePoint
-		if err := rows.Scan(&p.Bucket, &p.Requests, &p.AvgLatency, &p.InputTokens, &p.OutputTokens, &p.ReasoningTokens, &p.CachedTokens, &p.Errors4xx, &p.Errors5xx); err != nil {
+		var rowKind, rowKey string
+		var requests int64
+		var avgLatency float64
+		var inputTokens, outputTokens, reasoningTokens, cachedTokens, errors4xx, errors5xx int64
+		if err := rows.Scan(&rowKind, &rowKey, &requests, &avgLatency, &inputTokens, &outputTokens, &reasoningTokens, &cachedTokens, &errors4xx, &errors5xx); err != nil {
 			return nil, err
 		}
-		result.Timeline = append(result.Timeline, p)
+		if rowKind == "model" {
+			result.Models = append(result.Models, ChartModelPoint{Model: rowKey, Requests: requests})
+			continue
+		}
+		result.Timeline = append(result.Timeline, ChartTimelinePoint{
+			Bucket: rowKey, Requests: requests, AvgLatency: avgLatency,
+			InputTokens: inputTokens, OutputTokens: outputTokens, ReasoningTokens: reasoningTokens,
+			CachedTokens: cachedTokens, Errors4xx: errors4xx, Errors5xx: errors5xx,
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -4624,40 +4662,14 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 		result.Timeline = []ChartTimelinePoint{}
 	}
 
-	// 模型排行聚合：Top 10
-	modelChannelClause := ""
-	modelArgs := []interface{}{start, end}
-	if channel != "" {
-		modelChannelClause = " AND channel = $3"
-		modelArgs = append(modelArgs, channel)
-	}
-	modelQuery := `
-	SELECT COALESCE(model, 'unknown'), COUNT(*) AS requests
-	FROM usage_logs
-	WHERE created_at >= $1 AND created_at <= $2
-	  AND status_code <> 499` + modelChannelClause + `
-	GROUP BY 1
-	ORDER BY 2 DESC
-	LIMIT 10`
-
-	mRows, err := db.conn.QueryContext(ctx, modelQuery, modelArgs...)
-	if err != nil {
-		return nil, err
-	}
-	defer mRows.Close()
-
-	for mRows.Next() {
-		var m ChartModelPoint
-		if err := mRows.Scan(&m.Model, &m.Requests); err != nil {
-			return nil, err
-		}
-		result.Models = append(result.Models, m)
+	if len(result.Models) > 10 {
+		result.Models = result.Models[:10]
 	}
 	if result.Models == nil {
 		result.Models = []ChartModelPoint{}
 	}
 
-	return result, mRows.Err()
+	return result, nil
 }
 
 // GetAccountUsageStats 查询单个账号的用量统计和模型分布。days<=0 表示全量。
@@ -6550,9 +6562,10 @@ func (db *DB) SoftDeleteAccount(ctx context.Context, id int64) error {
 	if affected == 0 {
 		return sql.ErrNoRows
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM account_group_members WHERE account_id = $1`, id); err != nil {
-		return err
-	}
+	// Keep the last group membership snapshot on the soft-deleted account.
+	// Usage reports need it to attribute historical requests after an account
+	// moves to the recycle bin. Active-account queries already exclude deleted
+	// accounts, while restoring the account reuses the retained memberships.
 	return tx.Commit()
 }
 
@@ -6656,8 +6669,13 @@ func (db *DB) RestoreAccount(ctx context.Context, id int64) error {
 
 // PurgeAccount 从回收站彻底删除账号（物理删除，不可恢复）。
 func (db *DB) PurgeAccount(ctx context.Context, id int64) error {
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	query := `DELETE FROM accounts WHERE id = $1 AND (status = 'deleted' OR COALESCE(error_message, '') = 'deleted')`
-	res, err := db.conn.ExecContext(ctx, query, id)
+	res, err := tx.ExecContext(ctx, query, id)
 	if err != nil {
 		return err
 	}
@@ -6668,16 +6686,37 @@ func (db *DB) PurgeAccount(ctx context.Context, id int64) error {
 	if affected == 0 {
 		return sql.ErrNoRows
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `DELETE FROM account_group_members WHERE account_id = $1`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // PurgeDeletedAccounts 清空回收站，返回被彻底删除的账号数量。
 func (db *DB) PurgeDeletedAccounts(ctx context.Context) (int64, error) {
-	res, err := db.conn.ExecContext(ctx, `DELETE FROM accounts WHERE status = 'deleted' OR COALESCE(error_message, '') = 'deleted'`)
+	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM account_group_members
+		WHERE account_id IN (SELECT id FROM accounts WHERE status = 'deleted' OR COALESCE(error_message, '') = 'deleted')
+	`); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE status = 'deleted' OR COALESCE(error_message, '') = 'deleted'`)
+	if err != nil {
+		return 0, err
+	}
+	count, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // BatchSoftDeleteAccounts 批量软删除账号，分批执行避免 SQL 参数过多。

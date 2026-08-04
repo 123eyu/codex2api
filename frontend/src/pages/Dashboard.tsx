@@ -86,7 +86,9 @@ export default function Dashboard() {
   const [chartData, setChartData] = useState<ChartAggregation | null>(null)
   const [chartRefreshedAt, setChartRefreshedAt] = useState<number | null>(null)
   const [chartLoading, setChartLoading] = useState(true)
+  const [chartError, setChartError] = useState<string | null>(null)
   const chartAbort = useRef<AbortController | null>(null)
+  const statsAbort = useRef<AbortController | null>(null)
   const timeRangeRef = useRef<TimeRangeKey>(timeRange)
   const usageStatsRangeInitialized = useRef(false)
   const showPoolRunwayRef = useRef(showPoolRunway)
@@ -94,10 +96,19 @@ export default function Dashboard() {
 
   // 核心统计与号池分析解耦：百万级日志下账号聚合变慢时，不能阻塞整个仪表盘首屏。
   const loadDashboardStats = useCallback(async () => {
+    statsAbort.current?.abort()
+    const controller = new AbortController()
+    statsAbort.current = controller
     const { start, end } = getTimeRangeISO(timeRangeRef.current)
     const [stats, usageStats, settings] = await Promise.all([
       api.getStats(),
-      api.getUsageStats({ start, end, channel: channelRef.current || undefined }),
+      api.getUsageStats({
+        start,
+        end,
+        channel: channelRef.current || undefined,
+        detail: 'summary',
+        signal: controller.signal,
+      }),
       api.getSettings().catch((): SystemSettings | null => null),
     ])
     return {
@@ -174,22 +185,36 @@ export default function Dashboard() {
     const controller = new AbortController()
     chartAbort.current = controller
     setChartLoading(true)
+    setChartError(null)
     try {
       const { start, end } = getTimeRangeISO(timeRange)
       const { bucketMinutes } = getBucketConfig(timeRange)
-      const res = await api.getChartData({ start, end, bucketMinutes, channel: channel || undefined })
+      const res = await api.getChartData({
+        start,
+        end,
+        bucketMinutes,
+        channel: channel || undefined,
+        signal: controller.signal,
+      })
       if (!controller.signal.aborted) {
         setChartData(res)
         setChartRefreshedAt(Date.now())
       }
-    } catch {
-      // 静默容错
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setChartError(err instanceof Error ? err.message : t('common.loadFailed'))
+      }
     } finally {
       if (!controller.signal.aborted) {
         setChartLoading(false)
       }
     }
-  }, [timeRange, channel])
+  }, [timeRange, channel, t])
+
+  useEffect(() => () => {
+    chartAbort.current?.abort()
+    statsAbort.current?.abort()
+  }, [])
 
   // 首次加载 + timeRange 变更时重新拉取图表数据
   useEffect(() => {
@@ -392,6 +417,14 @@ export default function Dashboard() {
             />
           ) : null}
           <SystemHealthBar chartData={chartData} timeRange={timeRange} loading={chartLoading} />
+          {chartError ? (
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <span>{chartError}</span>
+              <Button variant="outline" size="sm" onClick={() => void loadChartData()}>
+                {t('common.retry')}
+              </Button>
+            </div>
+          ) : null}
         </div>
 
         {/* Usage stats */}

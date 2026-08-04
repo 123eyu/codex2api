@@ -450,10 +450,8 @@ func softDeleteAccountsTx(ctx context.Context, tx *sql.Tx, ids []int64) error {
 			return fmt.Errorf("软删除重复账号失败: %w", err)
 		}
 
-		query = fmt.Sprintf(`DELETE FROM account_group_members WHERE account_id IN (%s)`, strings.Join(placeholders, ","))
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("清理重复账号分组关系失败: %w", err)
-		}
+		// Keep the duplicate account's last group snapshot for historical usage
+		// attribution. The account is already excluded from the active pool.
 	}
 	return nil
 }

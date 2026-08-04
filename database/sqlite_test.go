@@ -26,6 +26,36 @@ func TestNewSQLiteInitializesFreshDatabase(t *testing.T) {
 	}
 }
 
+func TestChartAggregationUsesEpochBucketsForDailyRange(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "chart-daily.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	start := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	for _, at := range []time.Time{start.Add(time.Hour), start.Add(23 * time.Hour), start.Add(25 * time.Hour)} {
+		if _, err := db.conn.ExecContext(ctx, `
+			INSERT INTO usage_logs (endpoint, model, effective_model, status_code, duration_ms, total_tokens, created_at)
+			VALUES ('/v1/responses', 'gpt-5.4', 'gpt-5.4', 200, 100, 10, $1)
+		`, sqliteTimeParam(at)); err != nil {
+			t.Fatalf("insert usage log: %v", err)
+		}
+	}
+
+	result, err := db.GetChartAggregation(ctx, start, start.Add(48*time.Hour), 24*60, "")
+	if err != nil {
+		t.Fatalf("GetChartAggregation: %v", err)
+	}
+	if len(result.Timeline) != 2 || result.Timeline[0].Requests != 2 || result.Timeline[1].Requests != 1 {
+		t.Fatalf("timeline = %+v, want two daily buckets with 2/1 requests", result.Timeline)
+	}
+	if len(result.Models) != 1 || result.Models[0].Requests != 3 {
+		t.Fatalf("models = %+v, want one model with 3 requests", result.Models)
+	}
+}
+
 func TestSQLitePromptFilterColumnDefaultsRemainUpgradeCompatible(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 	db, err := New("sqlite", dbPath)

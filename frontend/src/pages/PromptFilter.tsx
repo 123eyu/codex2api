@@ -114,10 +114,16 @@ type ReviewAdapterFormConfig = {
   confidence_threshold: number
   max_concurrent: number
   max_text_length: number
+  circuit_breaker_failures: number
+  circuit_breaker_seconds: number
 }
 
 type AdaptiveReviewFormConfig = {
   enabled: boolean
+  min_clean_reviews: number
+  min_observation_hours: number
+  sample_percent: number
+  force_review_interval_minutes: number
 }
 
 type RecommendedProtectionStrength = 'monitor' | 'block'
@@ -131,6 +137,8 @@ const defaultReviewAdapter: ReviewAdapterFormConfig = {
   confidence_threshold: 0.7,
   max_concurrent: 32,
   max_text_length: 32768,
+  circuit_breaker_failures: 3,
+  circuit_breaker_seconds: 30,
 }
 
 function parseReviewAdapter(value: AdvancedConfigObject): ReviewAdapterFormConfig {
@@ -146,6 +154,8 @@ function parseReviewAdapter(value: AdvancedConfigObject): ReviewAdapterFormConfi
     confidence_threshold: typeof raw.confidence_threshold === 'number' && raw.confidence_threshold > 0 && raw.confidence_threshold <= 1 ? raw.confidence_threshold : defaultReviewAdapter.confidence_threshold,
     max_concurrent: typeof raw.max_concurrent === 'number' && raw.max_concurrent > 0 ? raw.max_concurrent : defaultReviewAdapter.max_concurrent,
     max_text_length: typeof raw.max_text_length === 'number' && raw.max_text_length > 0 ? raw.max_text_length : defaultReviewAdapter.max_text_length,
+    circuit_breaker_failures: typeof raw.circuit_breaker_failures === 'number' && raw.circuit_breaker_failures > 0 ? raw.circuit_breaker_failures : defaultReviewAdapter.circuit_breaker_failures,
+    circuit_breaker_seconds: typeof raw.circuit_breaker_seconds === 'number' && raw.circuit_breaker_seconds > 0 ? raw.circuit_breaker_seconds : defaultReviewAdapter.circuit_breaker_seconds,
   }
 }
 
@@ -153,7 +163,13 @@ function parseAdaptiveReview(value: AdvancedConfigObject): AdaptiveReviewFormCon
   const raw = value.adaptive_review && typeof value.adaptive_review === 'object'
     ? value.adaptive_review as Record<string, unknown>
     : {}
-  return { enabled: raw.enabled === true }
+  return {
+    enabled: raw.enabled === true,
+    min_clean_reviews: typeof raw.min_clean_reviews === 'number' && raw.min_clean_reviews > 0 ? raw.min_clean_reviews : 10,
+    min_observation_hours: typeof raw.min_observation_hours === 'number' && raw.min_observation_hours > 0 ? raw.min_observation_hours : 24,
+    sample_percent: typeof raw.sample_percent === 'number' && raw.sample_percent >= 0 ? raw.sample_percent : 5,
+    force_review_interval_minutes: typeof raw.force_review_interval_minutes === 'number' && raw.force_review_interval_minutes > 0 ? raw.force_review_interval_minutes : 360,
+  }
 }
 
 type PromptGuardEditorConfig = Omit<PromptGuardConfig, 'performance'>
@@ -2743,7 +2759,19 @@ function OverviewView({
     setForm((current) => ({ ...current, prompt_filter_advanced_config: patched.serialized }))
   }
   const updateAdaptiveReview = (enabled: boolean) => {
-    const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, [{ path: ['adaptive_review', 'enabled'], value: enabled }])
+    const patches = enabled
+      ? [
+          { path: ['adaptive_review', 'enabled'], value: true },
+          { path: ['adaptive_review', 'min_clean_reviews'], value: 3 },
+          { path: ['adaptive_review', 'min_observation_hours'], value: 1 },
+          { path: ['adaptive_review', 'sample_percent'], value: 5 },
+          { path: ['adaptive_review', 'force_review_interval_minutes'], value: 360 },
+          { path: ['adaptive_review', 'trust_duration_hours'], value: 168 },
+          { path: ['adaptive_review', 'reactivation_clean_reviews'], value: 3 },
+          { path: ['adaptive_review', 'reactivation_cooldown_hours'], value: 24 },
+        ]
+      : [{ path: ['adaptive_review', 'enabled'], value: false }]
+    const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, patches)
     if (!patched.ok) {
       showToast(t('promptFilter.advancedConfigInvalidSave'), 'error')
       return
@@ -2783,13 +2811,29 @@ function OverviewView({
     }
   }
   const applyRecommendedProtection = () => {
-    setForm((current) => ({
-      ...current,
-      prompt_filter_enabled: true,
-      prompt_filter_mode: recommendedStrength === 'monitor' ? 'monitor' : 'block',
-      prompt_filter_strict_terminal_enabled: recommendedStrength !== 'monitor',
-      prompt_filter_log_matches: true,
-    }))
+    setForm((current) => {
+      const patched = patchAdvancedConfigDocument(current.prompt_filter_advanced_config, [
+        { path: ['adaptive_review', 'enabled'], value: true },
+        { path: ['adaptive_review', 'min_clean_reviews'], value: 3 },
+        { path: ['adaptive_review', 'min_observation_hours'], value: 1 },
+        { path: ['adaptive_review', 'sample_percent'], value: 5 },
+        { path: ['adaptive_review', 'force_review_interval_minutes'], value: 360 },
+        { path: ['adaptive_review', 'trust_duration_hours'], value: 168 },
+        { path: ['adaptive_review', 'reactivation_clean_reviews'], value: 3 },
+        { path: ['adaptive_review', 'reactivation_cooldown_hours'], value: 24 },
+        { path: ['review_adapter', 'circuit_breaker_failures'], value: 3 },
+        { path: ['review_adapter', 'circuit_breaker_seconds'], value: 30 },
+      ])
+      return {
+        ...current,
+        prompt_filter_enabled: true,
+        prompt_filter_mode: recommendedStrength === 'monitor' ? 'monitor' : 'block',
+        prompt_filter_strict_terminal_enabled: recommendedStrength !== 'monitor',
+        prompt_filter_log_matches: true,
+        prompt_filter_review_timeout_seconds: Math.min(current.prompt_filter_review_timeout_seconds || 8, 8),
+        prompt_filter_advanced_config: patched.ok ? patched.serialized : current.prompt_filter_advanced_config,
+      }
+    })
     showToast(t('promptFilter.recommendedAppliedWithStrength', { strength: t(`promptFilter.recommendedStrength.${recommendedStrength}.label`) }))
   }
 
@@ -2955,7 +2999,7 @@ function OverviewView({
                     <div className="min-w-0">
                       <div className="text-sm font-semibold">{t('promptFilter.adaptiveReview.title')}</div>
                       <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.adaptiveReview.description')}</p>
-                      <p className="mt-1 text-[11px] leading-5 text-muted-foreground">{t('promptFilter.adaptiveReview.defaults')}</p>
+                      <p className="mt-1 text-[11px] leading-5 text-muted-foreground">{t('promptFilter.adaptiveReview.defaults', { minClean: adaptiveReview.min_clean_reviews, hours: adaptiveReview.min_observation_hours, sample: adaptiveReview.sample_percent, forceHours: Math.ceil(adaptiveReview.force_review_interval_minutes / 60) })}</p>
                     </div>
                     <Switch checked={adaptiveReview.enabled} disabled={!form.prompt_filter_review_enabled} onCheckedChange={updateAdaptiveReview} />
                   </div>
@@ -2980,13 +3024,26 @@ function OverviewView({
                     />
                     <span className="block text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewApiKeyHint')}</span>
                   </Field>
-                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+                  <div className="grid gap-4 sm:grid-cols-3">
                     <Field label={t('promptFilter.reviewRequestMode')}><Select value={reviewAdapter.request_mode} onValueChange={(value) => updateReviewAdapter('request_mode', value as ReviewAdapterFormConfig['request_mode'])} options={[{ label: t('promptFilter.reviewModeChat'), value: 'chat_completions' }, { label: t('promptFilter.reviewModeModerations'), value: 'moderations' }]} /></Field>
                     <Field label={t('promptFilter.reviewScope')}><Select value={reviewAdapter.scope} onValueChange={(value) => updateReviewAdapter('scope', value as ReviewAdapterFormConfig['scope'])} options={(['all_requests', 'local_candidates', 'local_blocks'] as ReviewAdapterFormConfig['scope'][]).map((scope) => ({ label: t(`promptFilter.reviewScopeOptions.${scope}`), value: scope }))} /></Field>
                     <Field label={t('promptFilter.reviewConfidenceThreshold')}><DraftNumberInput integer={false} step="0.01" min={0.01} max={1} value={reviewAdapter.confidence_threshold} onValueChange={(value) => updateReviewAdapter('confidence_threshold', value)} /></Field>
-                    <Field label={t('promptFilter.reviewMaxConcurrent')}><DraftNumberInput min={1} max={256} value={reviewAdapter.max_concurrent} onValueChange={(value) => updateReviewAdapter('max_concurrent', value)} /></Field>
-                    <Field label={t('promptFilter.reviewMaxTextLength')}><DraftNumberInput min={1024} max={262144} value={reviewAdapter.max_text_length} onValueChange={(value) => updateReviewAdapter('max_text_length', value)} /></Field>
                   </div>
+                  <details className="group rounded-lg border border-foreground/10 bg-muted/10 open:bg-muted/20">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 marker:content-none [&::-webkit-details-marker]:hidden">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold">{t('promptFilter.reviewResilienceTitle')}</div>
+                        <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewResilienceDesc')}</p>
+                      </div>
+                      <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                    </summary>
+                    <div className="grid gap-4 border-t px-4 py-4 sm:grid-cols-2 lg:grid-cols-4">
+                      <Field label={t('promptFilter.reviewMaxConcurrent')}><DraftNumberInput min={1} max={256} value={reviewAdapter.max_concurrent} onValueChange={(value) => updateReviewAdapter('max_concurrent', value)} /></Field>
+                      <Field label={t('promptFilter.reviewMaxTextLength')}><DraftNumberInput min={1024} max={262144} value={reviewAdapter.max_text_length} onValueChange={(value) => updateReviewAdapter('max_text_length', value)} /></Field>
+                      <Field label={t('promptFilter.reviewCircuitBreakerFailures')}><DraftNumberInput min={1} max={20} value={reviewAdapter.circuit_breaker_failures} onValueChange={(value) => updateReviewAdapter('circuit_breaker_failures', value)} /></Field>
+                      <Field label={t('promptFilter.reviewCircuitBreakerSeconds')}><DraftNumberInput min={1} max={3600} value={reviewAdapter.circuit_breaker_seconds} onValueChange={(value) => updateReviewAdapter('circuit_breaker_seconds', value)} /></Field>
+                    </div>
+                  </details>
                   <details className="group rounded-lg border border-foreground/10 bg-muted/10 open:bg-muted/20">
                     <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 marker:content-none [&::-webkit-details-marker]:hidden">
                       <div className="min-w-0">

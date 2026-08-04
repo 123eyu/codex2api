@@ -774,139 +774,76 @@ func (db *DB) getTrafficSnapshotSQLite(ctx context.Context) (*TrafficSnapshot, e
 
 func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Time, bucketMinutes int, channel string) (*ChartAggregation, error) {
 	startArg, endArg := db.timeRangeArgs(start, end)
+	if bucketMinutes < 1 {
+		bucketMinutes = 5
+	}
 	query := `
-		SELECT created_at, duration_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, model, status_code
+		SELECT
+			datetime((CAST(strftime('%s', created_at) AS INTEGER) / ($3 * 60)) * ($3 * 60), 'unixepoch') AS bucket,
+			COUNT(*), COALESCE(AVG(duration_ms), 0),
+			COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+			COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cached_tokens), 0),
+			COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0)
 		FROM usage_logs
-		WHERE created_at >= $1 AND created_at <= $2
+		WHERE created_at >= $1 AND created_at < $2
 		  AND status_code <> 499
 	`
-	args := []interface{}{startArg, endArg}
+	args := []interface{}{startArg, endArg, bucketMinutes}
 	if channel != "" {
-		query += " AND channel = $3"
+		query += " AND channel = $4"
 		args = append(args, channel)
 	}
+	query += " GROUP BY 1 ORDER BY 1"
 	rows, err := db.conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	type bucketAgg struct {
-		requests        int64
-		totalLatency    float64
-		inputTokens     int64
-		outputTokens    int64
-		reasoningTokens int64
-		cachedTokens    int64
-		errors4xx       int64
-		errors5xx       int64
-	}
-
 	result := &ChartAggregation{}
-	timelineMap := make(map[string]*bucketAgg)
-	modelMap := make(map[string]int64)
-
 	for rows.Next() {
-		var createdRaw interface{}
-		var durationMs int
-		var inputTokens int64
-		var outputTokens int64
-		var reasoningTokens int64
-		var cachedTokens int64
-		var model sql.NullString
-		var statusCode int
-		if err := rows.Scan(&createdRaw, &durationMs, &inputTokens, &outputTokens, &reasoningTokens, &cachedTokens, &model, &statusCode); err != nil {
+		var point ChartTimelinePoint
+		if err := rows.Scan(&point.Bucket, &point.Requests, &point.AvgLatency, &point.InputTokens,
+			&point.OutputTokens, &point.ReasoningTokens, &point.CachedTokens, &point.Errors4xx, &point.Errors5xx); err != nil {
 			return nil, err
 		}
-		createdAt, err := parseDBTimeValue(createdRaw)
-		if err != nil || createdAt.IsZero() {
-			continue
-		}
-
-		bucket := createdAt.Truncate(time.Duration(bucketMinutes) * time.Minute).Format("2006-01-02T15:04:05")
-		agg, ok := timelineMap[bucket]
-		if !ok {
-			agg = &bucketAgg{}
-			timelineMap[bucket] = agg
-		}
-		agg.requests++
-		agg.totalLatency += float64(durationMs)
-		agg.inputTokens += inputTokens
-		agg.outputTokens += outputTokens
-		agg.reasoningTokens += reasoningTokens
-		agg.cachedTokens += cachedTokens
-		if statusCode >= 400 && statusCode < 500 {
-			agg.errors4xx++
-		}
-		if statusCode >= 500 && statusCode < 600 {
-			agg.errors5xx++
-		}
-
-		modelName := "unknown"
-		if model.Valid && model.String != "" {
-			modelName = model.String
-		}
-		modelMap[modelName]++
+		point.Bucket = strings.Replace(point.Bucket, " ", "T", 1) + "Z"
+		result.Timeline = append(result.Timeline, point)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	keys := make([]string, 0, len(timelineMap))
-	for key := range timelineMap {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		agg := timelineMap[key]
-		avgLatency := 0.0
-		if agg.requests > 0 {
-			avgLatency = agg.totalLatency / float64(agg.requests)
-		}
-		result.Timeline = append(result.Timeline, ChartTimelinePoint{
-			Bucket:          key,
-			Requests:        agg.requests,
-			AvgLatency:      avgLatency,
-			InputTokens:     agg.inputTokens,
-			OutputTokens:    agg.outputTokens,
-			ReasoningTokens: agg.reasoningTokens,
-			CachedTokens:    agg.cachedTokens,
-			Errors4xx:       agg.errors4xx,
-			Errors5xx:       agg.errors5xx,
-		})
-	}
 	if result.Timeline == nil {
 		result.Timeline = []ChartTimelinePoint{}
 	}
 
-	type modelAgg struct {
-		model    string
-		requests int64
+	modelQuery := `SELECT COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown'), COUNT(*)
+		FROM usage_logs WHERE created_at >= $1 AND created_at < $2 AND status_code <> 499`
+	modelArgs := []interface{}{startArg, endArg}
+	if channel != "" {
+		modelQuery += " AND channel = $3"
+		modelArgs = append(modelArgs, channel)
 	}
-	models := make([]modelAgg, 0, len(modelMap))
-	for model, requests := range modelMap {
-		models = append(models, modelAgg{model: model, requests: requests})
+	modelQuery += " GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 10"
+	modelRows, err := db.conn.QueryContext(ctx, modelQuery, modelArgs...)
+	if err != nil {
+		return nil, err
 	}
-	sort.Slice(models, func(i, j int) bool {
-		if models[i].requests == models[j].requests {
-			return models[i].model < models[j].model
+	defer modelRows.Close()
+	for modelRows.Next() {
+		var point ChartModelPoint
+		if err := modelRows.Scan(&point.Model, &point.Requests); err != nil {
+			return nil, err
 		}
-		return models[i].requests > models[j].requests
-	})
-	if len(models) > 10 {
-		models = models[:10]
-	}
-	for _, model := range models {
-		result.Models = append(result.Models, ChartModelPoint{
-			Model:    model.model,
-			Requests: model.requests,
-		})
+		result.Models = append(result.Models, point)
 	}
 	if result.Models == nil {
 		result.Models = []ChartModelPoint{}
 	}
 
-	return result, nil
+	return result, modelRows.Err()
 }
 
 // getAccountEventTrendSQLite SQLite 版账号事件趋势聚合（内存分桶）
@@ -987,8 +924,9 @@ func (db *DB) getAccountEventTrendSQLite(ctx context.Context, start, end time.Ti
 
 // getUsageStatsSQLite SQLite 版使用统计（内存聚合，避免 PG 特有语法）。
 // rangeStart 为零值时回落到"今日"(本地 0 点起);rangeEnd 为零值表示至今。
-func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time.Time, channel string) (*UsageStats, error) {
+func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time.Time, channel string, includeBreakdowns bool) (*UsageStats, error) {
 	now := time.Now()
+	explicitRange := !rangeStart.IsZero()
 	if rangeStart.IsZero() {
 		rangeStart = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	}
@@ -1052,19 +990,25 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 	if stats.TotalRequests > 0 {
 		stats.TotalCacheRate = float64(rollup.CacheHitRequests) / float64(stats.TotalRequests) * 100
 	}
-	if rollup.FirstTokenSamples > 0 {
+	if !explicitRange && rollup.FirstTokenSamples > 0 {
 		stats.AvgFirstTokenMs = rollup.FirstTokenMsSum / float64(rollup.FirstTokenSamples)
 	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)
 		stats.AvgUserBilled = stats.TotalUserBilled / float64(stats.TotalRequests)
 	}
-	stats.ModelStats, err = db.getUsageModelStats(ctx, 10, rangeStart, rangeEnd, channel)
-	if err != nil {
-		return nil, err
-	}
-	if err := db.populateUsageBreakdownStats(ctx, stats, rangeStart, rangeEnd, channel); err != nil {
-		return nil, err
+	if includeBreakdowns {
+		stats.ModelStats, err = db.getUsageModelStats(ctx, 10, rangeStart, rangeEnd, channel)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.populateUsageBreakdownStats(ctx, stats, rangeStart, rangeEnd, channel); err != nil {
+			return nil, err
+		}
+	} else {
+		stats.ModelStats = []UsageModelStat{}
+		stats.EndpointStats = []UsageEndpointStat{}
+		stats.APIKeyStats = []UsageAPIKeyStat{}
 	}
 
 	return stats, nil
