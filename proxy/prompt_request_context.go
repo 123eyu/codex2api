@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"strings"
 
+	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -69,10 +70,21 @@ func (h *Handler) promptFilterConfigForRequest(c *gin.Context) promptfilter.Conf
 	// binding. Ignore any retired persisted enablement value.
 	state.config.Advanced.NewAPI.Enabled = false
 	if binding, bound := h.resolvePromptFilterNewAPIBinding(c); bound {
-		// A key binding is only the identity isolation boundary. Prompt filtering
-		// mode and profile remain owned by the unified GuardPipeline configuration;
-		// an identity binding must never weaken or strengthen request enforcement.
 		state.config.Advanced.NewAPI.Enabled = binding.Enabled
+		if binding.Enabled {
+			switch binding.PromptFilterScope {
+			case database.PromptFilterScopeLocalOnly:
+				// Keep the deterministic local GuardPipeline, session correlation,
+				// audit evidence and risk profiling, but remove the synchronous
+				// remote model hop for this API key.
+				state.config.Review.Enabled = false
+			case database.PromptFilterScopeOff:
+				// This explicit admin-side API-key exception disables Prompt checks
+				// only. NewAPI signature verification remains enabled above and API
+				// key authentication is enforced before this request-local snapshot.
+				state.config.Enabled = false
+			}
+		}
 	}
 	state.configOwner = h
 	state.configReady = true

@@ -17,6 +17,7 @@ import { useToast } from '../hooks/useToast'
 import type {
   APIKeyRow,
   PromptFilterNewAPIBinding,
+  PromptFilterScope,
 } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { formatBeijingTime } from '../utils/time'
@@ -40,6 +41,7 @@ type BindingForm = {
   platformName: string
   enabled: boolean
   requireSignedIdentity: boolean
+  promptFilterScope: PromptFilterScope
 }
 
 const emptyBindingForm: BindingForm = {
@@ -48,6 +50,7 @@ const emptyBindingForm: BindingForm = {
   platformName: '',
   enabled: true,
   requireSignedIdentity: false,
+  promptFilterScope: 'inherit',
 }
 
 function apiKeyLabel(apiKey: APIKeyRow): string {
@@ -140,6 +143,21 @@ function BindingFormFields({
           onCheckedChange={(requireSignedIdentity) => setForm({ ...form, requireSignedIdentity })}
         />
       </div>
+      <label className="block space-y-1.5 rounded-lg border border-border/70 bg-muted/20 p-3">
+        <span className="text-sm font-medium">该 Key 的 Prompt 检查范围</span>
+        <Select
+          value={form.promptFilterScope}
+          onValueChange={(promptFilterScope) => setForm({ ...form, promptFilterScope: promptFilterScope as PromptFilterScope })}
+          options={[
+            { value: 'inherit', label: '继承全局：本地检测 + 远程模型复核' },
+            { value: 'local_only', label: '仅本地检测：跳过远程模型复核' },
+            { value: 'off', label: '完全跳过：不执行 Prompt 检查' },
+          ]}
+        />
+        <span className="block text-xs leading-5 text-muted-foreground">
+          “仅本地检测”仍会执行高危规则、会话关联、审计记录与风险画像；“完全跳过”只保留 API Key 和签名身份校验，适合明确受控的内部调用方。
+        </span>
+      </label>
     </div>
   )
 }
@@ -201,6 +219,7 @@ export default function PromptFilterNewAPIBindings() {
       platformName: binding.platform_name,
       enabled: binding.enabled,
       requireSignedIdentity: binding.require_signed_identity,
+      promptFilterScope: binding.prompt_filter_scope || 'inherit',
     })
     setEditing(binding)
   }
@@ -220,6 +239,15 @@ export default function PromptFilterNewAPIBindings() {
       showToast('请选择 Codex2API Key，并填写调用方代码。', 'error')
       return
     }
+    if (createForm.promptFilterScope === 'off') {
+      const approved = await confirm({
+        title: '确认让该 Key 跳过全部 Prompt 检查？',
+        description: '该 Key 的请求将不执行本地高危规则和远程模型复核。API Key 鉴权及可选的 NewAPI 签名身份校验仍会保留。',
+        confirmText: '确认完全跳过',
+        tone: 'warning',
+      })
+      if (!approved) return
+    }
     setSaving(true)
     try {
       const result = await api.createPromptFilterNewAPIBinding({
@@ -228,6 +256,7 @@ export default function PromptFilterNewAPIBindings() {
         platform_name: createForm.platformName.trim(),
         enabled: createForm.enabled,
         require_signed_identity: createForm.requireSignedIdentity,
+        prompt_filter_scope: createForm.promptFilterScope,
       })
       setCreateOpen(false)
       await load()
@@ -254,6 +283,15 @@ export default function PromptFilterNewAPIBindings() {
       })
       if (!approved) return
     }
+    if (editing.prompt_filter_scope !== 'off' && editForm.promptFilterScope === 'off') {
+      const approved = await confirm({
+        title: '确认让该 Key 跳过全部 Prompt 检查？',
+        description: '保存后，该 Key 将不再执行本地高危规则和远程模型复核。API Key 鉴权及可选的 NewAPI 签名身份校验仍会保留。',
+        confirmText: '确认完全跳过',
+        tone: 'warning',
+      })
+      if (!approved) return
+    }
     setSaving(true)
     try {
       await api.updatePromptFilterNewAPIBinding(editing.api_key_id, {
@@ -261,6 +299,7 @@ export default function PromptFilterNewAPIBindings() {
         platform_name: editForm.platformName.trim(),
         enabled: editForm.enabled,
         require_signed_identity: editForm.requireSignedIdentity,
+        prompt_filter_scope: editForm.promptFilterScope,
       })
       setEditing(null)
       await load()
@@ -346,7 +385,8 @@ export default function PromptFilterNewAPIBindings() {
               <h4 id="newapi-key-bindings-title" className="text-sm font-semibold">按 Codex2API Key 绑定审计身份</h4>
             </div>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              将签名身份与实际请求使用的 Codex2API Key 对应起来。绑定只负责身份校验，拦截模式和审核档位统一由 GuardPipeline 管理。
+              将签名身份与实际请求使用的 Codex2API Key 对应起来，并可为指定 Key 缩小 Prompt 检查范围。
+              全局阈值和审核档位仍由 GuardPipeline 管理，调用方不能通过请求头或元数据修改此策略。
             </p>
           </div>
           <div className="flex gap-2">
@@ -425,6 +465,13 @@ export default function PromptFilterNewAPIBindings() {
                             <Badge variant={binding.require_signed_identity ? 'default' : 'outline'}>
                               {binding.require_signed_identity ? '强制签名' : '未强制签名'}
                             </Badge>
+                            <Badge variant={binding.prompt_filter_scope === 'off' ? 'destructive' : 'outline'}>
+                              {binding.prompt_filter_scope === 'local_only'
+                                ? '仅本地检测'
+                                : binding.prompt_filter_scope === 'off'
+                                  ? '跳过 Prompt 检查'
+                                  : '继承全局审核'}
+                            </Badge>
                           </div>
                         </td>
                         <td className="px-3 py-3">
@@ -479,7 +526,7 @@ export default function PromptFilterNewAPIBindings() {
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>编辑审计身份绑定</DialogTitle>
-            <DialogDescription>此处只管理调用方身份；拦截模式和审核档位请在统一 GuardPipeline 中设置。</DialogDescription>
+            <DialogDescription>管理调用方身份及该 Key 的检查范围；全局拦截阈值和审核档位仍由统一 GuardPipeline 管理。</DialogDescription>
           </DialogHeader>
           <BindingFormFields form={editForm} setForm={setEditForm} apiKeys={apiKeys.filter((key) => key.id === editing?.api_key_id)} editing />
           <DialogFooter>

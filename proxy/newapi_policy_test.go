@@ -531,6 +531,40 @@ func TestNewAPIIdentitySecretsDoNotFallbackForUnboundKeyInBindingMode(t *testing
 	}
 }
 
+func TestPromptFilterBindingScopeControlsOnlyItsAPIKey(t *testing.T) {
+	cfg := promptGuardTestConfig()
+	cfg.Enabled = true
+	cfg.Review.Enabled = true
+	handler := newPromptFilterBindingTestHandler(t, cfg, []database.PromptFilterNewAPIBinding{
+		{APIKeyID: 101, PlatformCode: "full-review", Secret: "full-review-secret", Enabled: true, PromptFilterScope: database.PromptFilterScopeInherit},
+		{APIKeyID: 202, PlatformCode: "local-only", Secret: "local-only-secret", Enabled: true, PromptFilterScope: database.PromptFilterScopeLocalOnly},
+		{APIKeyID: 303, PlatformCode: "prompt-off", Secret: "prompt-off-secret", Enabled: true, PromptFilterScope: database.PromptFilterScopeOff},
+	})
+	requestConfig := func(apiKeyID int64) promptfilter.Config {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		c.Set(contextAPIKeyID, apiKeyID)
+		return handler.promptFilterConfigForRequest(c)
+	}
+
+	inherit := requestConfig(101)
+	if !inherit.Enabled || !inherit.Review.Enabled {
+		t.Fatalf("inherit scope changed global review: enabled=%v review=%v", inherit.Enabled, inherit.Review.Enabled)
+	}
+	localOnly := requestConfig(202)
+	if !localOnly.Enabled || localOnly.Review.Enabled || !localOnly.Advanced.NewAPI.Enabled {
+		t.Fatalf("local-only scope=%+v", localOnly)
+	}
+	off := requestConfig(303)
+	if off.Enabled || !off.Advanced.NewAPI.Enabled {
+		t.Fatalf("off scope disabled identity or retained prompt checks: enabled=%v newapi=%v", off.Enabled, off.Advanced.NewAPI.Enabled)
+	}
+	unbound := requestConfig(404)
+	if !unbound.Enabled || !unbound.Review.Enabled || unbound.Advanced.NewAPI.Enabled {
+		t.Fatalf("unbound key inherited wrong config: enabled=%v review=%v newapi=%v", unbound.Enabled, unbound.Review.Enabled, unbound.Advanced.NewAPI.Enabled)
+	}
+}
+
 func TestUnboundWebSocketIsNotRevokedByAnotherKeysBinding(t *testing.T) {
 	handler := newPromptFilterBindingTestHandler(t, promptGuardTestConfig(), []database.PromptFilterNewAPIBinding{{
 		APIKeyID: 101, PlatformCode: "gateway-a", Secret: "gateway-a-secret", Enabled: true,
@@ -559,7 +593,8 @@ func TestUnboundWebSocketIsNotRevokedByAnotherKeysBinding(t *testing.T) {
 func TestBindingSnapshotRefreshesPolicyAndRevokesObsoleteWebSocketIdentity(t *testing.T) {
 	oldBinding := database.PromptFilterNewAPIBinding{
 		APIKeyID: 101, PlatformCode: "gateway-a", Secret: "old-secret", Enabled: true, RequireSignedIdentity: true,
-		PolicyMode: database.PromptFilterPolicyModeWarn, PolicyProfile: database.PromptFilterPolicyProfileResearch,
+		PromptFilterScope: database.PromptFilterScopeInherit,
+		PolicyMode:        database.PromptFilterPolicyModeWarn, PolicyProfile: database.PromptFilterPolicyProfileResearch,
 	}
 	handler := newPromptFilterBindingTestHandler(t, promptGuardTestConfig(), []database.PromptFilterNewAPIBinding{oldBinding})
 	newConnection := func() *gin.Context {
@@ -581,7 +616,8 @@ func TestBindingSnapshotRefreshesPolicyAndRevokesObsoleteWebSocketIdentity(t *te
 	rotated := database.PromptFilterNewAPIBinding{
 		APIKeyID: 101, PlatformCode: "gateway-a", Secret: "new-secret", PreviousSecret: "old-secret", PreviousSecretExpiresAt: &expiresAt,
 		Enabled: true, RequireSignedIdentity: true,
-		PolicyMode: database.PromptFilterPolicyModeEnforce, PolicyProfile: database.PromptFilterPolicyProfileStrict,
+		PromptFilterScope: database.PromptFilterScopeLocalOnly,
+		PolicyMode:        database.PromptFilterPolicyModeEnforce, PolicyProfile: database.PromptFilterPolicyProfileStrict,
 	}
 	handler.store.ReplacePromptFilterNewAPIBindings([]*database.PromptFilterNewAPIBinding{&rotated})
 	if apiErr := handler.refreshNewAPIWebSocketBinding(c, time.Now()); apiErr != nil {
@@ -595,6 +631,9 @@ func TestBindingSnapshotRefreshesPolicyAndRevokesObsoleteWebSocketIdentity(t *te
 	currentCfg := handler.promptFilterConfigForRequest(c)
 	if currentCfg.Advanced.Guard.Mode != promptfilter.GuardModeInherit || currentCfg.Advanced.Guard.DefaultProfile != promptfilter.GuardProfileBalanced {
 		t.Fatalf("binding changed unified policy: mode=%q profile=%q", currentCfg.Advanced.Guard.Mode, currentCfg.Advanced.Guard.DefaultProfile)
+	}
+	if currentCfg.Review.Enabled {
+		t.Fatal("websocket frame did not hot-refresh local-only review scope")
 	}
 
 	for _, tc := range []struct {

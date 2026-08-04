@@ -82,7 +82,8 @@ func TestPromptFilterNewAPIBindingCRUDAndSecretRotationSQLite(t *testing.T) {
 	binding := &PromptFilterNewAPIBinding{
 		APIKeyID: apiKeyID, PlatformCode: "gateway-a", PlatformName: "示例平台 NewAPI",
 		Secret: "01234567890123456789012345678901", Enabled: true, RequireSignedIdentity: true,
-		PolicyMode: PromptFilterPolicyModeEnforce, PolicyProfile: PromptFilterPolicyProfileBalanced,
+		PromptFilterScope: PromptFilterScopeLocalOnly,
+		PolicyMode:        PromptFilterPolicyModeEnforce, PolicyProfile: PromptFilterPolicyProfileBalanced,
 	}
 	if err := db.CreatePromptFilterNewAPIBinding(ctx, binding); err != nil {
 		t.Fatalf("Create binding: %v", err)
@@ -91,7 +92,7 @@ func TestPromptFilterNewAPIBindingCRUDAndSecretRotationSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get binding: %v", err)
 	}
-	if got.PlatformCode != "gateway-a" || got.Secret != binding.Secret || !got.Enabled || !got.RequireSignedIdentity {
+	if got.PlatformCode != "gateway-a" || got.Secret != binding.Secret || !got.Enabled || !got.RequireSignedIdentity || got.PromptFilterScope != PromptFilterScopeLocalOnly {
 		t.Fatalf("binding = %#v", got)
 	}
 	if got.PolicyMode != PromptFilterPolicyModeInherit || got.PolicyProfile != PromptFilterPolicyProfileInherit {
@@ -115,6 +116,7 @@ func TestPromptFilterNewAPIBindingCRUDAndSecretRotationSQLite(t *testing.T) {
 	got.PlatformName = "示例平台生产站"
 	got.PolicyMode = PromptFilterPolicyModeWarn
 	got.PolicyProfile = PromptFilterPolicyProfileStrict
+	got.PromptFilterScope = PromptFilterScopeOff
 	got.Enabled = false
 	if err := db.UpdatePromptFilterNewAPIBinding(ctx, got); err != nil {
 		t.Fatalf("Update binding: %v", err)
@@ -125,6 +127,9 @@ func TestPromptFilterNewAPIBindingCRUDAndSecretRotationSQLite(t *testing.T) {
 	}
 	if updated.PolicyMode != PromptFilterPolicyModeInherit || updated.PolicyProfile != PromptFilterPolicyProfileInherit {
 		t.Fatalf("update retained retired policy override: %#v", updated)
+	}
+	if updated.PromptFilterScope != PromptFilterScopeOff {
+		t.Fatalf("update lost prompt filter scope: %#v", updated)
 	}
 
 	newSecret := "abcdefghijklmnopqrstuvwxyzABCDEF"
@@ -200,8 +205,8 @@ func TestPromptFilterNewAPIBindingPostgresMigrationDDL(t *testing.T) {
 	promptFilterBindingDDLQueryMu.Lock()
 	queries := append([]string(nil), promptFilterBindingDDLQueries...)
 	promptFilterBindingDDLQueryMu.Unlock()
-	if len(queries) != 2 {
-		t.Fatalf("ensure executed %d statements, want DDL plus override retirement", len(queries))
+	if len(queries) != 3 {
+		t.Fatalf("ensure executed %d statements, want DDL, scope migration, and override retirement", len(queries))
 	}
 	query := queries[0]
 	for _, fragment := range []string{
@@ -209,14 +214,18 @@ func TestPromptFilterNewAPIBindingPostgresMigrationDDL(t *testing.T) {
 		"api_key_id INT PRIMARY KEY",
 		"platform_code VARCHAR(32) NOT NULL UNIQUE",
 		"require_signed_identity BOOLEAN NOT NULL DEFAULT FALSE",
+		"prompt_filter_scope VARCHAR(16) NOT NULL DEFAULT 'inherit'",
 		"previous_secret_expires_at TIMESTAMPTZ NULL",
 	} {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("postgres DDL missing %q: %s", fragment, query)
 		}
 	}
-	if !strings.Contains(queries[1], "SET policy_mode='inherit', policy_profile='inherit'") {
-		t.Fatalf("postgres migration did not retire binding policy overrides: %s", queries[1])
+	if !strings.Contains(queries[1], "ADD COLUMN IF NOT EXISTS prompt_filter_scope") {
+		t.Fatalf("postgres migration did not add prompt filter scope: %s", queries[1])
+	}
+	if !strings.Contains(queries[2], "SET policy_mode='inherit', policy_profile='inherit'") || !strings.Contains(queries[2], "prompt_filter_scope IN ('inherit','local_only','off')") {
+		t.Fatalf("postgres migration did not retire policy overrides and preserve valid scopes: %s", queries[2])
 	}
 }
 
@@ -236,7 +245,7 @@ func TestPromptFilterNewAPIBindingMigrationNeutralizesLegacyPolicyOverrides(t *t
 	}); err != nil {
 		t.Fatalf("Create binding: %v", err)
 	}
-	if _, err := db.conn.ExecContext(ctx, `UPDATE prompt_filter_newapi_bindings SET policy_mode='shadow', policy_profile='research' WHERE api_key_id=?`, apiKeyID); err != nil {
+	if _, err := db.conn.ExecContext(ctx, `UPDATE prompt_filter_newapi_bindings SET policy_mode='shadow', policy_profile='research', prompt_filter_scope='invalid' WHERE api_key_id=?`, apiKeyID); err != nil {
 		t.Fatalf("seed legacy policy override: %v", err)
 	}
 	if err := db.ensurePromptFilterNewAPIBindingsTable(ctx); err != nil {
@@ -248,6 +257,9 @@ func TestPromptFilterNewAPIBindingMigrationNeutralizesLegacyPolicyOverrides(t *t
 	}
 	if got.PolicyMode != PromptFilterPolicyModeInherit || got.PolicyProfile != PromptFilterPolicyProfileInherit {
 		t.Fatalf("legacy policy override survived migration: %#v", got)
+	}
+	if got.PromptFilterScope != PromptFilterScopeInherit {
+		t.Fatalf("invalid prompt filter scope survived migration: %#v", got)
 	}
 }
 

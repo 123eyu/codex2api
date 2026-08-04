@@ -7,17 +7,21 @@ const pageSource = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta
 const apiSource = readFileSync(new URL('../api.ts', import.meta.url), 'utf8')
 const typesSource = readFileSync(new URL('../types.ts', import.meta.url), 'utf8')
 
-test('identity binding cannot override the unified GuardPipeline policy', () => {
+test('identity binding only narrows prompt scope without overriding GuardPipeline thresholds', () => {
   assert.equal(componentSource.includes('requireSignedIdentity: false'), true)
-  assert.equal(componentSource.includes('拦截模式和审核档位统一由 GuardPipeline 管理'), true)
+  assert.equal(componentSource.includes('全局阈值和审核档位仍由 GuardPipeline 管理'), true)
+  for (const fragment of ['promptFilterScope', "'inherit'", "'local_only'", "'off'", '仅本地检测：跳过远程模型复核']) {
+    assert.equal(componentSource.includes(fragment), true, `binding editor missing prompt scope control: ${fragment}`)
+  }
   for (const fragment of ['policyMode', 'policyProfile', 'policy_mode', 'policy_profile', '策略模式']) {
     assert.equal(componentSource.includes(fragment), false, `binding editor still exposes policy control: ${fragment}`)
   }
-	  const bindingStart = typesSource.indexOf('export interface PromptFilterNewAPIBinding')
-	  const bindingEnd = typesSource.indexOf('export interface CreateAPIKeyRequest')
-	  assert.ok(bindingStart >= 0, 'missing PromptFilterNewAPIBinding interface')
-	  assert.ok(bindingEnd > bindingStart, 'missing CreateAPIKeyRequest boundary after PromptFilterNewAPIBinding')
-	  const bindingTypes = typesSource.slice(bindingStart, bindingEnd)
+  const bindingStart = typesSource.indexOf('export interface PromptFilterNewAPIBinding')
+  const bindingEnd = typesSource.indexOf('export interface CreateAPIKeyRequest')
+  assert.ok(bindingStart >= 0, 'missing PromptFilterNewAPIBinding interface')
+  assert.ok(bindingEnd > bindingStart, 'missing CreateAPIKeyRequest boundary after PromptFilterNewAPIBinding')
+  const bindingTypes = typesSource.slice(bindingStart, bindingEnd)
+  assert.equal(bindingTypes.includes('prompt_filter_scope'), true)
   assert.equal(bindingTypes.includes('policy_mode'), false)
   assert.equal(bindingTypes.includes('policy_profile'), false)
 })
@@ -50,11 +54,11 @@ test('key bindings are embedded in an optional NewAPI adapter panel', () => {
   assert.equal(componentSource.includes('<Card'), false, 'embedded binding editor must not create a second top-level card')
   assert.equal(pageSource.includes('getPromptFilterNewAPISecret'), false)
   assert.equal(pageSource.includes("setBool('newapi', 'enabled'"), false)
-	  const recommendedPresetStart = pageSource.indexOf('const applyRecommendedProtection')
-	  const recommendedPresetEnd = pageSource.indexOf('\n\n  return (', recommendedPresetStart)
-	  assert.ok(recommendedPresetStart >= 0, 'missing applyRecommendedProtection')
-	  assert.ok(recommendedPresetEnd > recommendedPresetStart, 'missing PromptFilter render boundary')
-	  const recommendedPreset = pageSource.slice(recommendedPresetStart, recommendedPresetEnd)
+  const recommendedPresetStart = pageSource.indexOf('const applyRecommendedProtection')
+  const recommendedPresetEnd = pageSource.indexOf('\n\n  return (', recommendedPresetStart)
+  assert.ok(recommendedPresetStart >= 0, 'missing applyRecommendedProtection')
+  assert.ok(recommendedPresetEnd > recommendedPresetStart, 'missing PromptFilter render boundary')
+  const recommendedPreset = pageSource.slice(recommendedPresetStart, recommendedPresetEnd)
   for (const fragment of [
     "recommendedStrength === 'penalty'",
     "t('promptFilter.penaltyRequiresNewAPI')",
