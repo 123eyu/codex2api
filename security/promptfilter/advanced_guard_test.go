@@ -119,6 +119,9 @@ func TestRecommendedAdvancedConfigUsesExplicitCurrentPromptLayers(t *testing.T) 
 	if len(cfg.Enforcement.TerminalBypassModels) != 1 || cfg.Enforcement.TerminalBypassModels[0] != "codex-auto-review" {
 		t.Fatalf("terminal bypass models = %v, want codex-auto-review", cfg.Enforcement.TerminalBypassModels)
 	}
+	if !cfg.Enforcement.ConversationLockEnabled {
+		t.Fatal("upstream CYB conversation lock must default to enabled")
+	}
 	if len(cfg.Intelligence.Queries) == 0 {
 		t.Fatal("recommended intelligence queries must be a non-nil audit seed")
 	}

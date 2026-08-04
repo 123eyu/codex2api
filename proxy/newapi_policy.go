@@ -623,7 +623,11 @@ func (h *Handler) sendNewAPIPolicyDecision(c *gin.Context, cfg promptfilter.Conf
 	metadata := buildNewAPIPolicyDecisionMetadataWithSecret(policyContext.Identity, decision, verdict, cfg, body, endpoint, model, "", policyContext.VerificationSecret)
 	writeNewAPIPolicyDecisionHeaders(c, metadata)
 	if requestUsesAnthropicErrorEnvelope(c) {
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "请求违反安全策略，本次请求已被拒绝")
+		message := "请求违反安全策略，本次请求已被拒绝"
+		if metadata.ReasonCode == promptConversationLockedReasonCode {
+			message = promptConversationLockedMessage
+		}
+		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", message)
 		return true
 	}
 	api.SendErrorWithStatus(c, newAPIPolicyDecisionAPIError(metadata), http.StatusBadRequest)
@@ -693,10 +697,23 @@ func newAPIUpstreamCyberPolicyDecision(c *gin.Context) (newAPIPolicyDecisionMeta
 	return metadata, ok && metadata.DecisionID != ""
 }
 
+func upstreamCyberPolicyResponseMessage(c *gin.Context) string {
+	if metadata, ok := newAPIUpstreamCyberPolicyDecision(c); ok && metadata.ReasonCode == newAPIUpstreamCyberPolicyReasonCode {
+		return newAPIPolicyDecisionAPIError(metadata).Message
+	}
+	return upstreamCyberPolicyUserMessage
+}
+
 func newAPIPolicyDecisionAPIError(metadata newAPIPolicyDecisionMetadata) *api.APIError {
 	message := "请求违反安全策略，本次请求已被拒绝"
 	if metadata.ReasonCode == newAPIUpstreamCyberPolicyReasonCode {
-		message = upstreamCyberPolicyUserMessage
+		if metadata.ConversationLocked {
+			message = upstreamCyberPolicyLockedUserMessage
+		} else {
+			message = upstreamCyberPolicyUserMessage
+		}
+	} else if metadata.ReasonCode == promptConversationLockedReasonCode {
+		message = promptConversationLockedMessage
 	}
 	apiErr := api.NewAPIError(api.ErrorCode("request_policy_violation"), message, api.ErrorTypeInvalidRequest)
 	details := gin.H{
@@ -734,6 +751,10 @@ type newAPIPolicyDecisionMetadata struct {
 	EvidenceSHA256 string
 	EventSignature string
 	Signature      string
+	// ConversationLocked is local response state only. It is intentionally not
+	// included in the signed decision canonical form or forwarded as a policy
+	// punishment header.
+	ConversationLocked bool
 }
 
 func buildNewAPIPolicyDecisionMetadataWithSecret(identity newAPIIdentity, decision promptfilter.Decision, verdict promptfilter.Verdict, cfg promptfilter.Config, body []byte, endpoint string, model string, eventID string, verificationSecret string) newAPIPolicyDecisionMetadata {

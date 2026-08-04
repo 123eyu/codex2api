@@ -2702,6 +2702,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
 					AccountID: account.ID(), AttemptIndex: attempt + 1,
 				}))
+				if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
+					outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
+				}
 			}
 			if wsHTTPFallback.ForceHTTP() {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, totalDuration, firstTokenMs, outcome.logStatusCode)
@@ -3310,6 +3313,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
 				AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
+			if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
+				outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
+			}
 		}
 		if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 			wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, totalDuration, firstTokenMs, outcome.logStatusCode)
@@ -4571,6 +4577,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
 				AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
+			if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
+				outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
+			}
 		}
 		if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 			wsHTTPFallback.LogHTTPAttemptCompletion("/v1/chat/completions", account.ID(), attempt+1, totalDuration, firstTokenMs, outcome.logStatusCode)
@@ -5437,7 +5446,7 @@ func (h *Handler) sendUpstreamError(c *gin.Context, statusCode int, body []byte)
 	if isExplicitUpstreamCyberPolicy(body) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": gin.H{
-				"message": upstreamCyberPolicyUserMessage,
+				"message": upstreamCyberPolicyResponseMessage(c),
 				"type":    "upstream_error",
 				"code":    newAPIUpstreamCyberPolicyReasonCode,
 			},

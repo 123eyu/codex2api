@@ -1799,6 +1799,16 @@
       "allObjects": "All profile subjects",
       "peopleProfilesHint": "Shows identities traceable to a signed NewAPI user ID by default.",
       "nonPersonHint": "Sessions, keys, networks, and upstream accounts are environment subjects used for tracing; they are not people.",
+      "conversationLock": {
+        "title": "CYB conversation lock",
+        "active": "Conversation locked",
+        "description": "This session received an explicit upstream cyber_policy response. Rejected requests after the lock do not add strikes; an administrator may unlock it after confirming a false positive.",
+        "unlock": "Unlock conversation",
+        "confirm": "Unlock this conversation? Its original context remains present, so do this only after confirming a false positive.",
+        "unlocked": "Conversation unlocked",
+        "lockedAt": "Locked at",
+        "reason": "Lock reason"
+      },
       "trust": {
         "title": "Temporary adaptive trust",
         "description": "Skips synchronous DS review only for requests that local rules consider clean. Local high-risk rules, periodic profiles, and CY feedback remain active. Thresholds, expiry, or a new CY event restore synchronous review.",
@@ -2255,6 +2265,7 @@
     "terminalCategoriesHint": "Comma-separated. A category enters terminal handling only when its rule also forms a high-confidence violation above threshold. Do not add dual-use categories such as reverse engineering or vulnerabilities.",
     "terminalBypassModels": "Terminal Review-Bypass Models",
     "terminalBypassModelsHint": "Comma-separated exact requested model IDs. For these models only, a successful clean secondary review may clear a local terminal match. Review errors or flagged results remain blocked.",
+    "conversationLockEnabled": "Lock the current conversation after upstream CYB",
     "riskTitle": "User / IP / Session Risk Audit",
     "riskWindow": "Risk Window (seconds)",
     "blockThreshold": "High-Risk Reference Threshold",
@@ -2278,6 +2289,7 @@
       "decodeCompression": "Inspect Base64-wrapped gzip or zlib text within the configured size and pass limits.",
       "terminalCategories": "A listed category enters terminal handling only with independent high-confidence harmful intent above the block threshold. Keep this empty unless the whole category has very low false-positive risk.",
       "terminalBypassModels": "Use only for dedicated audit models whose prompts intentionally contain policy violations. Matching uses the requested model ID, not a mapped upstream model.",
+      "conversationLockEnabled": "Locks only after an explicit upstream cyber_policy response with a stable signed session fingerprint. Locked retries never add strikes, and requests without a reliable conversation identity are not guessed or locked.",
       "riskEnabled": "Track recent confirmed user, IP, and session risk for audit and review prioritization. Historical risk alone never blocks a later request.",
       "riskWindow": "How long risk history is retained before older scores decay.",
       "blockThreshold": "Reference line for high accumulated risk; it never blocks the current request without independent evidence.",

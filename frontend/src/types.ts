@@ -1277,6 +1277,30 @@ export interface PromptRiskProfile {
   account_id?: number
   account_name?: string
   trust_policy?: PromptRiskTrustPolicy
+  conversation_lock?: PromptConversationLock
+}
+
+export interface PromptConversationLock {
+  id: number
+  lock_key: string
+  status: 'active' | 'unlocked'
+  platform: string
+  newapi_user_id: string
+  session_fingerprint: string
+  session_hash: string
+  incident_id?: string
+  decision_id: string
+  request_id?: string
+  reason_code: string
+  endpoint?: string
+  model?: string
+  trigger_count: number
+  unlock_count: number
+  locked_at: ISODateString
+  unlocked_at?: ISODateString
+  unlock_reason?: string
+  created_at: ISODateString
+  updated_at: ISODateString
 }
 
 export interface PromptRiskEvent {

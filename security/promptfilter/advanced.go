@@ -133,8 +133,9 @@ type NewAPIConfig struct {
 }
 
 type EnforcementConfig struct {
-	TerminalCategories   []string `json:"terminal_categories"`
-	TerminalBypassModels []string `json:"terminal_bypass_models"`
+	TerminalCategories      []string `json:"terminal_categories"`
+	TerminalBypassModels    []string `json:"terminal_bypass_models"`
+	ConversationLockEnabled bool     `json:"conversation_lock_enabled"`
 }
 
 type NormalizationConfig struct {
@@ -270,7 +271,7 @@ func DefaultAdvancedConfig() AdvancedConfig {
 		Output:          OutputConfig{BufferBytes: 4096, OverlapBytes: 512, StrictOnly: true},
 		Intelligence:    IntelligenceConfig{IntervalHours: 24, Queries: DefaultIntelligenceQueries(), MaxSearchResults: 20, Model: "gpt-5.4", MaxModelCalls: 1},
 		NewAPI:          NewAPIConfig{MaxClockSkewSeconds: 120},
-		Enforcement:     EnforcementConfig{TerminalBypassModels: []string{"codex-auto-review"}},
+		Enforcement:     EnforcementConfig{TerminalBypassModels: []string{"codex-auto-review"}, ConversationLockEnabled: true},
 		Guard:           DefaultGuardConfig(),
 	}
 }

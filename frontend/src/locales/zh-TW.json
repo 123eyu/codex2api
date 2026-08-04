@@ -201,6 +201,16 @@
       "allObjects": "全部畫像對象",
       "peopleProfilesHint": "預設只顯示可追溯至 NewAPI 使用者 ID 的人員畫像。",
       "nonPersonHint": "工作階段、Key、網路與上游帳號是環境對象，用於定位鏈路，不代表特定人員。",
+      "conversationLock": {
+        "title": "CYB 會話鎖",
+        "active": "對話已鎖定",
+        "description": "此工作階段曾收到上游明確的 cyber_policy。鎖定後的重複請求不會再次累計處罰；管理員確認誤判後可以主動解鎖。",
+        "unlock": "解鎖此對話",
+        "confirm": "確認解鎖此對話？原視窗中的上下文仍會保留，僅應在確認誤判後操作。",
+        "unlocked": "對話已解鎖",
+        "lockedAt": "鎖定時間",
+        "reason": "鎖定原因"
+      },
       "trust": {
         "title": "臨時自適應信任",
         "description": "只對本地規則判定乾淨的請求略過同步 DS 複核；本地高風險規則、週期畫像和 CY 回饋始終生效。達到門檻、到期或再次出現 CY 會自動恢復同步審核。",
@@ -495,6 +505,7 @@
     "terminalCategoriesCollapsedDesc": "設定終局分類，以及二審通過後可放行的專用審計模型。",
     "terminalBypassModels": "終局二審豁免模型",
     "terminalBypassModelsHint": "以逗號分隔精確的請求模型 ID。僅對這些模型，二審明確通過後可以清除本地終局命中；二審錯誤或判定違規時仍會攔截。",
+    "conversationLockEnabled": "上游 CYB 後鎖定目前對話",
     "riskSimplifiedDesc": "依使用者、IP 與會話累計週期風險；預設關閉。",
     "outputSimplifiedDesc": "掃描串流輸出中的嚴格高風險訊號；預設關閉。",
     "extensions": {
@@ -580,6 +591,7 @@
     },
     "help": {
       "terminalBypassModels": "僅用於提示詞必然包含違規樣本的專用審計模型。依客戶端請求模型 ID 比對，不依映射後的上游模型比對。",
+      "conversationLockEnabled": "僅在上游明確回傳 cyber_policy 且簽名中繼資料含穩定會話指紋時鎖定。已鎖定請求不會重複累計 strike；沒有可靠視窗識別時不會猜測或誤鎖。",
       "normalizationPanel": "對常見編碼和壓縮片段進行有界還原；位元組、片段和輪數上限可避免解碼炸彈拖垮服務。",
       "maxDecodedBytes": "單次請求所有還原結果允許占用的最大位元組數，達到上限後停止繼續解碼。",
       "maxEncodedBlocks": "單次請求最多嘗試還原的獨立編碼片段數，限制惡意批量小片段消耗。",

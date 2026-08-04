@@ -1799,6 +1799,16 @@
       "allObjects": "全部画像对象",
       "peopleProfilesHint": "默认只展示可追溯到 NewAPI 用户 ID 的人员画像。",
       "nonPersonHint": "会话、Key、网络和上游账号是环境对象，用于定位链路，不代表某个具体人员。",
+      "conversationLock": {
+        "title": "CYB 会话锁",
+        "active": "对话已锁定",
+        "description": "该会话曾收到上游明确的 cyber_policy。锁定后的重复请求不会再次累计处罚；管理员确认误判后可以主动解锁。",
+        "unlock": "解锁此对话",
+        "confirm": "确认解锁此对话？原窗口中的上下文仍会保留，仅应在确认误判后操作。",
+        "unlocked": "对话已解锁",
+        "lockedAt": "锁定时间",
+        "reason": "锁定原因"
+      },
       "trust": {
         "title": "临时自适应信任",
         "description": "只对本地规则判定为干净的请求跳过同步 DS 复核；本地高危规则、周期画像和 CY 反馈始终生效。达到阈值、期限到期或再次出现 CY 会自动恢复同步审核。",
@@ -2255,6 +2265,7 @@
     "terminalCategoriesHint": "用逗号分隔。仅当该分类的规则同时形成高可信违规意图并达到阈值时，才进入终局流程；不要加入逆向、漏洞等双用途分类。",
     "terminalBypassModels": "终局二审豁免模型",
     "terminalBypassModelsHint": "用逗号分隔精确的请求模型 ID。仅对这些模型，二审明确通过后可以清除本地终局命中；二审报错或判定违规时仍会拦截。",
+    "conversationLockEnabled": "上游 CYB 后锁定当前对话",
     "riskTitle": "用户 / IP / 会话风险审计",
     "riskWindow": "累计窗口（秒）",
     "blockThreshold": "高风险参考阈值",
@@ -2278,6 +2289,7 @@
       "decodeCompression": "在大小和轮数限制内识别 Base64 包裹的 gzip 或 zlib 压缩文本。",
       "terminalCategories": "所列分类仅在规则同时形成高可信违规意图并达到拦截阈值时进入终局流程；建议保持为空，除非分类整体误报极低。",
       "terminalBypassModels": "仅用于提示词中必然包含违规样本的专用审计模型。按客户端请求模型 ID 匹配，不按映射后的上游模型匹配。",
+      "conversationLockEnabled": "仅在上游明确返回 cyber_policy 且签名元数据含稳定会话指纹时锁定。已锁定请求不会重复累计 strike；没有可靠窗口标识时不会猜测或误锁。",
       "riskEnabled": "按用户、IP 和会话记录近期已确认风险。累计值只用于审计和复核参考，不能单独拦截后续请求。",
       "riskWindow": "累计历史保留时间；窗口结束后旧风险会逐渐衰减。",
       "blockThreshold": "标记高累计风险的参考线；不会仅因历史累计值直接拦截当前请求。",

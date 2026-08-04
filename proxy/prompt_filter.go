@@ -13,7 +13,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const upstreamCyberPolicyUserMessage = "此内容因可能存在网络安全风险而被标记。如果你认为这是误判，请重新表述请求。再次触发可能会停用账号。"
+const (
+	upstreamCyberPolicyUserMessage       = "此内容因可能存在网络安全风险而被标记，本次已记录。请重新表述请求；再次触发可能会停用账号。如果确认是误判，请联系管理员。"
+	upstreamCyberPolicyLockedUserMessage = "此内容因可能存在网络安全风险而被标记，本次已记录并锁定当前对话。请新建对话后继续；再次触发可能会停用账号。如果确认是误判，请联系管理员解锁。"
+)
 
 // promptFilterFullTextMaxRunes limits the persisted redacted blocked-request text preview.
 const promptFilterFullTextMaxRunes = 32000
@@ -45,6 +48,9 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	cfg := h.promptFilterConfigForRequest(c)
 	signedBody := ingressRequestBody(c, rawBody)
 	if h.rejectRequiredNewAPIIdentity(c, cfg.Advanced.NewAPI, signedBody) {
+		return true
+	}
+	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
 	}
 	// Skip envelope construction and body traversal when neither the local
@@ -84,6 +90,9 @@ func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, end
 	if h.rejectRequiredNewAPIIdentity(c, cfg.Advanced.NewAPI, ingressRequestBody(c, nil)) {
 		return true
 	}
+	if h.rejectLockedPromptConversation(c, cfg, ingressRequestBody(c, nil), []byte(text), endpoint, model) {
+		return true
+	}
 	if !promptfilter.RequiresRequestText(cfg) {
 		return false
 	}
@@ -115,6 +124,9 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 	signedBody := ingressRequestBody(c, rawBody)
 	if apiErr := h.requiredNewAPIIdentityError(c, cfg.Advanced.NewAPI, signedBody); apiErr != nil {
 		sendAnthropicError(c, http.StatusUnauthorized, "authentication_error", apiErr.Message)
+		return true
+	}
+	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
 	}
 	if !promptfilter.RequiresRequestText(cfg) {
@@ -459,7 +471,11 @@ func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model 
 	// NewAPI owns strike counting and account punishment. Emission intentionally
 	// does not depend on the local async audit queue: a temporary Codex2API audit
 	// storage failure must not turn a verified upstream CYB into an untracked one.
-	_, _ = h.emitNewAPIUpstreamCyberPolicyDecision(c, endpoint, model, body)
+	metadata, delegated := h.emitNewAPIUpstreamCyberPolicyDecision(c, endpoint, model, body)
+	if delegated {
+		metadata.ConversationLocked = h.lockPromptConversationAfterUpstreamCYB(c, endpoint, model, incidentID, metadata)
+		c.Set(newAPIUpstreamCyberDecisionContextKey, metadata)
+	}
 	return incidentID, accepted
 }
 

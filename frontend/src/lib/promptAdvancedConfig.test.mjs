@@ -295,6 +295,9 @@ test('terminal enforcement exposes clean-review model exemptions', () => {
   assert.match(source, /terminalBypassModelsText/)
   assert.match(source, /update\('enforcement', \{ terminal_bypass_models:/)
   assert.match(zh.promptFilter.terminalBypassModelsHint, /二审明确通过后可以清除本地终局命中/)
+  assert.match(source, /conversation_lock_enabled: true/)
+  assert.match(source, /update\('enforcement', \{ conversation_lock_enabled: next \}\)/)
+  assert.match(zh.promptFilter.help.conversationLockEnabled, /上游明确返回 cyber_policy/)
 })
 
 test('Moderations review exposes sub2api-compatible category thresholds', () => {
