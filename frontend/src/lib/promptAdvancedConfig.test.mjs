@@ -297,6 +297,8 @@ test('terminal enforcement exposes clean-review model exemptions', () => {
   assert.match(zh.promptFilter.terminalBypassModelsHint, /二审明确通过后可以清除本地终局命中/)
   assert.match(source, /conversation_lock_enabled: true/)
   assert.match(source, /update\('enforcement', \{ conversation_lock_enabled: next \}\)/)
+  assert.match(source, /<SwitchField[^>]+conversationLockEnabled/)
+  assert.doesNotMatch(source, /<SwitchRow/)
   assert.match(zh.promptFilter.help.conversationLockEnabled, /上游明确返回 cyber_policy/)
 })
 
