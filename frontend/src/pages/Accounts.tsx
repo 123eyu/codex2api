@@ -7183,7 +7183,10 @@ export default function Accounts() {
             <AccountUsageModal
               account={usageAccount}
               onClose={() => setUsageAccount(null)}
-              onCreditsReset={() => void reload()}
+              // 必须静默重拉：reload() 会把 StateShell 切成整页 loading，
+              // 而这个弹窗就渲染在 StateShell 里 —— 一开积分开关整个界面连同弹窗
+              // 就被卸载重建（用量数据重新拉、滚动位置丢失），观感就是"闪一下全刷新"。
+              onCreditsReset={() => void reloadSilently()}
             />
           )}
 

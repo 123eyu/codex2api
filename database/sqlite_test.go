@@ -2044,18 +2044,20 @@ func TestUsageStatsIncludeCodex2APIBreakdowns(t *testing.T) {
 			APIKeyMasked:    "sk-...1111",
 		},
 		{
-			AccountID:      2,
-			Endpoint:       "/v1/chat/completions",
-			Model:          "gpt-5.4",
-			StatusCode:     500,
-			InputTokens:    100,
-			OutputTokens:   20,
-			TotalTokens:    120,
-			APIKeyID:       8,
-			APIKeyName:     "Cherry Studio",
-			APIKeyMasked:   "sk-...2222",
+			AccountID:    2,
+			Endpoint:     "/v1/chat/completions",
+			Model:        "gpt-5.4",
+			StatusCode:   500,
+			InputTokens:  100,
+			OutputTokens: 20,
+			TotalTokens:  120,
+			APIKeyID:     8,
+			APIKeyName:   "Cherry Studio",
+			APIKeyMasked: "sk-...2222",
+			// attempt_index 是 1-based：这条是「第二次尝试」，也就是真正重试出来的那一次。
+			// 写 1 的话它只是一次首发失败（哪怕 is_retry_attempt=true），不该计入重试数。
 			IsRetryAttempt: true,
-			AttemptIndex:   1,
+			AttemptIndex:   2,
 		},
 		{
 			AccountID:       3,
@@ -2854,7 +2856,8 @@ func TestGetAccountUsageStatsAggregatesRecentAccountSummary(t *testing.T) {
 	if _, err := db.conn.ExecContext(ctx, `UPDATE usage_logs SET first_token_ms = 1500, compact = 1 WHERE account_id = 7 AND total_tokens = 2000`); err != nil {
 		t.Fatalf("update second usage quality fields: %v", err)
 	}
-	if _, err := db.conn.ExecContext(ctx, `UPDATE usage_logs SET first_token_ms = 2500, stream = 1, compact = 1, is_retry_attempt = 1, attempt_index = 1 WHERE account_id = 7 AND model = 'gpt-4.1'`); err != nil {
+	// attempt_index = 2：真正重试出来的那一次尝试（1 是首发，计入重试数就等于把每个请求都算成重试）。
+	if _, err := db.conn.ExecContext(ctx, `UPDATE usage_logs SET first_token_ms = 2500, stream = 1, compact = 1, is_retry_attempt = 1, attempt_index = 2 WHERE account_id = 7 AND model = 'gpt-4.1'`); err != nil {
 		t.Fatalf("update third usage quality fields: %v", err)
 	}
 

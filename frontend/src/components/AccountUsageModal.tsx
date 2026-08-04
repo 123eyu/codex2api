@@ -121,16 +121,22 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset, sh
   const handleCreditToggle = async (value: boolean) => {
     setCreditError(null)
     setSavingCredit(true)
+    // 乐观更新：开关立刻滑过去，不等请求往返（后端这一步可能顺带释放冷却、耗时可观）。
+    // 失败再回滚到原值并显示错误。
+    const prevEnabled = creditEnabled
+    const prevSkipWindow = creditSkipWindow
+    setCreditEnabled(value)
+    setCreditSkipWindow(value)
     try {
       await api.updateAccountCredit(account.id, {
         credit_enabled: value,
         credit_skip_usage_window: value,
       })
-      setCreditEnabled(value)
-      setCreditSkipWindow(value)
       // 后端在积分门打开时可能释放了用量窗口冷却，让外层刷新以更新状态与徽章。
       onCreditsReset?.()
     } catch (err) {
+      setCreditEnabled(prevEnabled)
+      setCreditSkipWindow(prevSkipWindow)
       setCreditError(getErrorMessage(err))
     } finally {
       setSavingCredit(false)
