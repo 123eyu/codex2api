@@ -122,6 +122,9 @@ func TestRecommendedAdvancedConfigUsesExplicitCurrentPromptLayers(t *testing.T) 
 	if !cfg.Enforcement.ConversationLockEnabled {
 		t.Fatal("upstream CYB conversation lock must default to enabled")
 	}
+	if cfg.Enforcement.CYBStrikeEnabled {
+		t.Fatal("upstream CYB strike counting must default to disabled")
+	}
 	if len(cfg.Intelligence.Queries) == 0 {
 		t.Fatal("recommended intelligence queries must be a non-nil audit seed")
 	}

@@ -22,6 +22,7 @@ func newPromptConversationLockTestHandler(t *testing.T) (*Handler, *database.DB)
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := promptGuardTestConfig()
 	cfg.Advanced.Enforcement.ConversationLockEnabled = true
+	cfg.Advanced.Enforcement.CYBStrikeEnabled = true
 	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
 	store.SetPromptFilterConfig(cfg)
 	store.ReplacePromptFilterNewAPIBindings([]*database.PromptFilterNewAPIBinding{{

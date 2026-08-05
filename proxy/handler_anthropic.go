@@ -35,13 +35,17 @@ func sendAnthropicError(c *gin.Context, statusCode int, errType, message string)
 // 用于正文已下发、无法整段静默重试的上游失败：下游网关/客户端（Claude Code 等）
 // 能识别 error 事件并自行重试；伪造 stop_reason=end_turn 的干净收尾会让下游把
 // 截断/失败响应当成功，既无从感知也无从重试（issue #435）。
-func writeAnthropicStreamErrorEvent(w *streamFlushWriter, errType, message string) error {
+func writeAnthropicStreamErrorEvent(w *streamFlushWriter, errType, message string, details ...gin.H) error {
+	errorBody := gin.H{
+		"type":    errType,
+		"message": message,
+	}
+	if len(details) > 0 && details[0] != nil {
+		errorBody["details"] = details[0]
+	}
 	payload, err := json.Marshal(gin.H{
-		"type": "error",
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
+		"type":  "error",
+		"error": errorBody,
 	})
 	if err != nil {
 		payload = []byte(`{"type":"error","error":{"type":"api_error","message":"failed to encode stream error"}}`)
@@ -503,6 +507,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				// 与重试（issue #435）。按 Anthropic 协议改发流内 error 事件后中止转发。
 				if eventType == "response.failed" && wroteAnyBody && writeErr == nil {
 					failedOutcome := classifyResponseFailedOutcome(terminalFailurePayload)
+					var policyDetails gin.H
 					if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
 						promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/messages", model, responseFailedErrorBody(terminalFailurePayload), upstreamCyberPolicyAttempt{
 							Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: failedOutcome.logStatusCode,
@@ -510,8 +515,11 @@ func (h *Handler) Messages(c *gin.Context) {
 						}))
 						upstreamCyberPolicyLogged = true
 						failedOutcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
+						if metadata, delegated := newAPIUpstreamCyberPolicyDecision(c); delegated {
+							policyDetails = gin.H{"codex2api_policy": newAPIPolicyDecisionDetails(metadata)}
+						}
 					}
-					if err := writeAnthropicStreamErrorEvent(streamWriter, mapHTTPStatusToAnthropicError(failedOutcome.logStatusCode), failedOutcome.failureMessage); err != nil {
+					if err := writeAnthropicStreamErrorEvent(streamWriter, mapHTTPStatusToAnthropicError(failedOutcome.logStatusCode), failedOutcome.failureMessage, policyDetails); err != nil {
 						writeErr = err
 					}
 					return false

@@ -2589,6 +2589,8 @@ func (h *Handler) Responses(c *gin.Context) {
 			abortedForHTTPError := false
 			var imageLogInfo imageUsageLogInfo
 			var terminalFailurePayload []byte
+			promptPolicyIncidentID := ""
+			upstreamCyberPolicyLogged := false
 
 			if isStream {
 				c.Header("Content-Type", "text/event-stream")
@@ -2629,6 +2631,16 @@ func (h *Handler) Responses(c *gin.Context) {
 						gotTerminal = true
 					}
 					if eventType == "response.failed" {
+						var incidentID string
+						var logged bool
+						data, incidentID, logged = h.attachUpstreamCyberPolicyStreamDecision(c, "/v1/responses", logModel, data, upstreamCyberPolicyAttempt{
+							Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: classifyResponseFailedOutcome(data).logStatusCode,
+							AccountID: account.ID(), AttemptIndex: attempt + 1,
+						})
+						if logged {
+							upstreamCyberPolicyLogged = true
+							promptPolicyIncidentID = incidentID
+						}
 						terminalFailurePayload = append([]byte(nil), data...)
 						gotTerminal = true
 					}
@@ -2689,7 +2701,6 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.VerifyAccountAuthAsync(account)
 			}
 			var responseFailedDecision codex429Decision
-			promptPolicyIncidentID := ""
 			if len(terminalFailurePayload) > 0 {
 				outcome = classifyResponseFailedOutcome(terminalFailurePayload)
 				responseFailedDecision = h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, attemptEffectiveModel)
@@ -2698,10 +2709,12 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				// 流式 response.failed（HTTP 200）里的 cyber_policy 处罚也要记录，
 				// 否则只有非 2xx 错误体才会被记入提示词过滤日志。
-				promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/responses", logModel, responseFailedErrorBody(terminalFailurePayload), upstreamCyberPolicyAttempt{
-					Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
-					AccountID: account.ID(), AttemptIndex: attempt + 1,
-				}))
+				if !upstreamCyberPolicyLogged {
+					promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/responses", logModel, responseFailedErrorBody(terminalFailurePayload), upstreamCyberPolicyAttempt{
+						Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
+						AccountID: account.ID(), AttemptIndex: attempt + 1,
+					}))
+				}
 				if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
 					outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
 				}
@@ -3031,6 +3044,8 @@ func (h *Handler) Responses(c *gin.Context) {
 		var imageLogInfo imageUsageLogInfo
 		var terminalFailurePayload []byte
 		var streamedOutputItems []json.RawMessage
+		promptPolicyIncidentID := ""
+		upstreamCyberPolicyLogged := false
 
 		if isStream {
 			// 流式透传 + TTFT 跟踪
@@ -3108,6 +3123,16 @@ func (h *Handler) Responses(c *gin.Context) {
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
+					var incidentID string
+					var logged bool
+					data, incidentID, logged = h.attachUpstreamCyberPolicyStreamDecision(c, "/v1/responses", logModel, data, upstreamCyberPolicyAttempt{
+						Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: classifyResponseFailedOutcome(data).logStatusCode,
+						AccountID: account.ID(), AttemptIndex: attempt + 1,
+					})
+					if logged {
+						upstreamCyberPolicyLogged = true
+						promptPolicyIncidentID = incidentID
+					}
 					terminalFailurePayload = append([]byte(nil), data...)
 					gotTerminal = true
 				}
@@ -3300,7 +3325,6 @@ func (h *Handler) Responses(c *gin.Context) {
 			h.store.VerifyAccountAuthAsync(account)
 		}
 		var responseFailedDecision codex429Decision
-		promptPolicyIncidentID := ""
 		if len(terminalFailurePayload) > 0 {
 			outcome = classifyResponseFailedOutcome(terminalFailurePayload)
 			responseFailedDecision = h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, effectiveModel)
@@ -3309,10 +3333,12 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			// 流式 response.failed（HTTP 200）里的 cyber_policy 处罚也要记录，
 			// 否则只有非 2xx 错误体才会被记入提示词过滤日志。
-			promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/responses", logModel, responseFailedErrorBody(terminalFailurePayload), upstreamCyberPolicyAttempt{
-				Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
-				AccountID: account.ID(), AttemptIndex: attempt + 1,
-			}))
+			if !upstreamCyberPolicyLogged {
+				promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/responses", logModel, responseFailedErrorBody(terminalFailurePayload), upstreamCyberPolicyAttempt{
+					Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
+					AccountID: account.ID(), AttemptIndex: attempt + 1,
+				}))
+			}
 			if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
 				outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
 			}
@@ -4400,6 +4426,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		abortedForHTTPError := false
 		var compactResult []byte
 		var terminalFailurePayload []byte
+		promptPolicyIncidentID := ""
+		upstreamCyberPolicyLogged := false
 
 		chunkID := "chatcmpl-" + uuid.New().String()[:8]
 		created := time.Now().Unix()
@@ -4429,9 +4457,23 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			var pendingFirstTokenChunks bytes.Buffer
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
+				eventType := parsed.Get("type").String()
+				if eventType == "response.failed" {
+					statusCode := classifyResponseFailedOutcome(data).logStatusCode
+					var incidentID string
+					var logged bool
+					data, incidentID, logged = h.attachUpstreamCyberPolicyStreamDecision(c, "/v1/chat/completions", logModel, data, upstreamCyberPolicyAttempt{
+						Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: statusCode,
+						AccountID: account.ID(), AttemptIndex: attempt + 1,
+					})
+					if logged {
+						upstreamCyberPolicyLogged = true
+						promptPolicyIncidentID = incidentID
+						parsed = gjson.ParseBytes(data)
+					}
+				}
 				chunk, done := streamTranslator.TranslateParsed(parsed)
 
-				eventType := parsed.Get("type").String()
 				ttftGuard.MarkProgress(eventType)
 				isFirstToken := isFirstTokenResultForMode(parsed, currentFirstTokenMode())
 				if !ttftRecorded && isFirstToken {
@@ -4564,7 +4606,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			h.store.VerifyAccountAuthAsync(account)
 		}
 		var responseFailedDecision codex429Decision
-		promptPolicyIncidentID := ""
 		if len(terminalFailurePayload) > 0 {
 			outcome = classifyResponseFailedOutcome(terminalFailurePayload)
 			responseFailedDecision = h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, attemptEffectiveModel)
@@ -4573,10 +4614,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			}
 			// 流式 response.failed（HTTP 200）里的 cyber_policy 处罚也要记录，
 			// 否则只有非 2xx 错误体才会被记入提示词过滤日志。
-			promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/chat/completions", logModel, responseFailedErrorBody(terminalFailurePayload), upstreamCyberPolicyAttempt{
-				Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
-				AccountID: account.ID(), AttemptIndex: attempt + 1,
-			}))
+			if !upstreamCyberPolicyLogged {
+				promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/chat/completions", logModel, responseFailedErrorBody(terminalFailurePayload), upstreamCyberPolicyAttempt{
+					Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: outcome.logStatusCode,
+					AccountID: account.ID(), AttemptIndex: attempt + 1,
+				}))
+			}
 			if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
 				outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
 			}

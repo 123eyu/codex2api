@@ -479,6 +479,22 @@ func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model 
 	return incidentID, accepted
 }
 
+// attachUpstreamCyberPolicyStreamDecision records an explicit upstream CYB
+// before its terminal SSE frame is written, then embeds the signed NewAPI
+// decision in that frame. Callers use the boolean to avoid logging the same
+// terminal event again during stream cleanup.
+func (h *Handler) attachUpstreamCyberPolicyStreamDecision(c *gin.Context, endpoint string, model string, body []byte, attempt upstreamCyberPolicyAttempt) ([]byte, string, bool) {
+	if !isExplicitUpstreamCyberPolicy(body) {
+		return body, "", false
+	}
+	incidentID, accepted := h.logUpstreamCyberPolicy(c, endpoint, model, responseFailedErrorBody(body), attempt)
+	metadata, delegated := newAPIUpstreamCyberPolicyDecision(c)
+	if delegated {
+		body = attachNewAPIPolicyDecisionToResponseFailed(body, metadata)
+	}
+	return body, acceptedPromptPolicyIncidentID(incidentID, accepted), true
+}
+
 func upstreamCyberPolicyCode(body []byte) string {
 	if len(body) == 0 {
 		return ""
