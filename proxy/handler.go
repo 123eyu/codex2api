@@ -5139,6 +5139,37 @@ func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, res
 	if account != nil && account.IsGrokAPI() {
 		return applyGrokCooldown(store, account, http.StatusTooManyRequests, body, resp, model)
 	}
+	// OpenAI Responses/API relay 是直连上游，不是 OAuth 订阅账号。裸 429 通常只是
+	// 瞬时负载抑制，默认不应写入 Redis/DB 并把整个模型摘掉 5~30 分钟。
+	if account != nil && account.IsRelayStyle() {
+		reason := "rate_limited_model"
+		if isCodexModelCapacityError(body) {
+			reason = "model_capacity"
+		}
+		decision := codex429Decision{
+			Scope:  rateLimitScopeModel,
+			Reason: reason,
+			Model:  strings.TrimSpace(model),
+		}
+		if store == nil || decision.Model == "" {
+			return decision
+		}
+		policy := store.ResolveModelCooldownPolicy(account)
+		if policy.Mode == database.ModelCooldownModeOff || policy.Seconds <= 0 {
+			return decision
+		}
+		backoff := policy.Mode == database.ModelCooldownModeAdaptive && policy.BackoffEnabled
+		cooldown := store.MarkModelCooldownWithBackoff(
+			account,
+			decision.Model,
+			time.Duration(policy.Seconds)*time.Second,
+			decision.Reason,
+			backoff,
+		)
+		decision.ResetAt = cooldown.ResetAt
+		decision.Cooldown = time.Until(cooldown.ResetAt)
+		return decision
+	}
 	decision := classify429RateLimit(account, body, resp, time.Now(), model)
 	if store == nil || account == nil {
 		return decision
@@ -5147,7 +5178,20 @@ func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, res
 		store.ApplyUsageLimitMetadata(account, details.planType, decision.ResetAt)
 	}
 	if decision.Scope == rateLimitScopeModel {
-		cooldown := store.MarkModelCooldown(account, decision.Model, decision.Cooldown, decision.Reason)
+		policy := store.ResolveModelCooldownPolicy(account)
+		if policy.Mode == database.ModelCooldownModeOff || policy.Seconds <= 0 {
+			decision.ResetAt = time.Time{}
+			decision.Cooldown = 0
+			return decision
+		}
+		backoff := policy.Mode == database.ModelCooldownModeAdaptive && policy.BackoffEnabled
+		cooldown := store.MarkModelCooldownWithBackoff(
+			account,
+			decision.Model,
+			time.Duration(policy.Seconds)*time.Second,
+			decision.Reason,
+			backoff,
+		)
 		decision.ResetAt = cooldown.ResetAt
 		decision.Cooldown = time.Until(cooldown.ResetAt)
 		return decision
@@ -5194,7 +5238,11 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 	case http.StatusTooManyRequests:
 		decision := Apply429Cooldown(h.store, account, body, resp, model)
 		if decision.Scope == rateLimitScopeModel {
-			log.Printf("账号 %d 模型 %s 触发短时限流 (reason=%s)，冷却到 %s", account.ID(), decision.Model, decision.Reason, decision.ResetAt.Format(time.RFC3339))
+			if decision.ResetAt.IsZero() {
+				log.Printf("账号 %d 模型 %s 触发短时限流 (reason=%s)，按策略不持久化冷却", account.ID(), decision.Model, decision.Reason)
+			} else {
+				log.Printf("账号 %d 模型 %s 触发短时限流 (reason=%s)，冷却到 %s", account.ID(), decision.Model, decision.Reason, decision.ResetAt.Format(time.RFC3339))
+			}
 			return decision
 		}
 		log.Printf("账号 %d 被限速 (plan=%s, reason=%s)，冷却到 %s", account.ID(), account.GetPlanType(), decision.Reason, decision.ResetAt.Format(time.RFC3339))
@@ -5561,6 +5609,12 @@ func (h *Handler) sendFinalUpstreamError(c *gin.Context, statusCode int, body []
 			},
 		})
 		return
+	}
+
+	if statusCode == http.StatusTooManyRequests && c.Writer.Header().Get("Retry-After") == "" {
+		// 上游偶发 429 在重试池耗尽后仍应以标准限流语义返回，不能伪装成
+		// no_available_account/503。没有明确 reset 信息时给客户端一个最小退避提示。
+		c.Header("Retry-After", "1")
 	}
 
 	h.sendUpstreamError(c, statusCode, body)

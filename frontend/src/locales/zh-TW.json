@@ -1,5 +1,35 @@
 {
-  "common": {"success":"成功","failed":"失敗"},
+  "common": {"success":"成功","failed":"失敗","enabled":"開啟","disabled":"關閉"},
+  "accounts": {
+    "modelCooldownPolicy": "模型冷卻策略",
+    "clearAllModelCooldowns": "清除全部",
+    "modelCooldownEffective": "目前生效：{{mode}} · {{seconds}} 秒 · 退避{{backoff}}",
+    "modelCooldownModeOverride": "帳號覆蓋模式",
+    "modelCooldownInherit": "跟隨系統預設",
+    "saveModelCooldownPolicy": "儲存帳號冷卻策略",
+    "clearModelCooldown": "清除此模型冷卻",
+    "modelCooldownPolicySaved": "帳號模型冷卻策略已儲存",
+    "modelCooldownPolicySaveFailed": "儲存模型冷卻策略失敗：{{error}}",
+    "modelCooldownCleared": "已清除 {{model}} 的模型冷卻",
+    "allModelCooldownsCleared": "已清除 {{count}} 條模型冷卻"
+  },
+  "settings": {
+    "modelCooldownTitle": "模型 429 冷卻策略",
+    "modelCooldownDesc": "分別控制 API 直連上游與 OAuth 帳號池的模型級 429 冷卻。",
+    "relayModelCooldownTitle": "API 計畫 / 直連上游",
+    "relayModelCooldownDesc": "預設關閉持久化模型冷卻，偶發 429 只做換上游重試。",
+    "oauthModelCooldownTitle": "OAuth / 訂閱帳號池",
+    "oauthModelCooldownDesc": "可關閉、固定時長或使用指數退避。",
+    "modelCooldownMode": "冷卻模式",
+    "modelCooldownModeDesc": "關閉、固定或自適應。",
+    "modelCooldownModeOff": "關閉",
+    "modelCooldownModeFixed": "固定",
+    "modelCooldownModeAdaptive": "自適應",
+    "modelCooldownSeconds": "基礎時長",
+    "modelCooldownSecondsDesc": "範圍 1–1800 秒。",
+    "modelCooldownBackoff": "指數退避",
+    "modelCooldownBackoffDesc": "僅自適應模式生效。"
+  },
   "promptFilter": {
     "views": {"profiles":"風險畫像","intelligence":"CY 學習審核"},
     "coverageTitle": "目前防護涵蓋",

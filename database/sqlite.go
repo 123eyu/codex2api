@@ -280,7 +280,13 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 					response_cache_local_max_bytes INTEGER NOT NULL DEFAULT 67108864,
 					response_cache_local_max_entry_bytes INTEGER NOT NULL DEFAULT 8388608,
 					response_cache_reconstruct_max_bytes INTEGER NOT NULL DEFAULT 67108864,
-					response_cache_config_generation INTEGER NOT NULL DEFAULT 1
+					response_cache_config_generation INTEGER NOT NULL DEFAULT 1,
+					relay_model_cooldown_mode TEXT NOT NULL DEFAULT 'off',
+					relay_model_cooldown_seconds INTEGER NOT NULL DEFAULT 2,
+					relay_model_cooldown_backoff_enabled INTEGER NOT NULL DEFAULT 0,
+					oauth_model_cooldown_mode TEXT NOT NULL DEFAULT 'adaptive',
+					oauth_model_cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+					oauth_model_cooldown_backoff_enabled INTEGER NOT NULL DEFAULT 1
 				);`,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
@@ -527,6 +533,12 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "response_cache_local_max_entry_bytes", "INTEGER NOT NULL DEFAULT 8388608"},
 		{"system_settings", "response_cache_reconstruct_max_bytes", "INTEGER NOT NULL DEFAULT 67108864"},
 		{"system_settings", "response_cache_config_generation", "INTEGER NOT NULL DEFAULT 1"},
+		{"system_settings", "relay_model_cooldown_mode", "TEXT NOT NULL DEFAULT 'off'"},
+		{"system_settings", "relay_model_cooldown_seconds", "INTEGER NOT NULL DEFAULT 2"},
+		{"system_settings", "relay_model_cooldown_backoff_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"system_settings", "oauth_model_cooldown_mode", "TEXT NOT NULL DEFAULT 'adaptive'"},
+		{"system_settings", "oauth_model_cooldown_seconds", "INTEGER NOT NULL DEFAULT 300"},
+		{"system_settings", "oauth_model_cooldown_backoff_enabled", "INTEGER NOT NULL DEFAULT 1"},
 		{"system_settings", "max_retries", "INTEGER DEFAULT 2"},
 		{"system_settings", "max_rate_limit_retries", "INTEGER DEFAULT 1"},
 		{"system_settings", "allow_remote_migration", "INTEGER DEFAULT 0"},
