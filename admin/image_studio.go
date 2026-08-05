@@ -1,14 +1,12 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image"
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
@@ -25,6 +23,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/imageproc"
 	"github.com/codex2api/internal/imagestore"
+	"github.com/codex2api/internal/imageupscale"
 	"github.com/codex2api/internal/signedasset"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
@@ -1496,10 +1495,7 @@ func decodeImageDataItem(item gjson.Result) ([]byte, string, string, error) {
 }
 
 func imageDimensions(data []byte) (int, int) {
-	if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
-		return cfg.Width, cfg.Height
-	}
-	return 0, 0
+	return imageupscale.Dimensions(data)
 }
 
 func imageAssetDir() string {

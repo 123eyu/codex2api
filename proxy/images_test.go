@@ -592,7 +592,7 @@ func TestBuildImagesResponsesRequestIncludesEditImages(t *testing.T) {
 func TestCollectImagesResponseBuildsOpenAIImagePayload(t *testing.T) {
 	upstream := `data: {"type":"response.completed","response":{"created_at":1710000000,"usage":{"input_tokens":5,"output_tokens":9},"tool_usage":{"image_gen":{"images":1,"input_tokens":34,"output_tokens":1756}},"tools":[{"type":"image_generation","model":"gpt-image-2","output_format":"png","quality":"high","size":"1024x1024"}],"output":[{"type":"image_generation_call","result":"` + tinyPNGBase64 + `","revised_prompt":"draw a cat","output_format":"png"}]}}` + "\n\n"
 
-	out, usage, imageCount, imageLogInfo, err := collectImagesResponse(context.Background(), strings.NewReader(upstream), "b64_json", "gpt-image-2", nil)
+	out, usage, imageCount, imageLogInfo, err := collectImagesResponse(context.Background(), strings.NewReader(upstream), "b64_json", "gpt-image-2", nil, imageUpscalePlan{})
 	if err != nil {
 		t.Fatalf("collectImagesResponse returned error: %v", err)
 	}
@@ -628,7 +628,7 @@ func TestCollectImagesResponseBuildsOpenAIImagePayload(t *testing.T) {
 func TestCollectImagesResponseUsesUpstreamFailureMessage(t *testing.T) {
 	upstream := `data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"An error occurred while processing your request. Please include the request ID req-123."}}}` + "\n\n"
 
-	_, _, _, _, err := collectImagesResponse(context.Background(), strings.NewReader(upstream), "b64_json", "gpt-image-2", nil)
+	_, _, _, _, err := collectImagesResponse(context.Background(), strings.NewReader(upstream), "b64_json", "gpt-image-2", nil, imageUpscalePlan{})
 	if err == nil {
 		t.Fatal("collectImagesResponse returned nil error")
 	}
@@ -759,7 +759,7 @@ func TestStreamImagesResponseSendsConnectedComment(t *testing.T) {
 	c.Request = httptest.NewRequest("POST", "/v1/images/generations", nil)
 	handler := &Handler{}
 
-	usage, imageCount, _, imageLogInfo, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2", time.Now())
+	usage, imageCount, _, imageLogInfo, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2", time.Now(), imageUpscalePlan{})
 
 	if err != nil {
 		t.Fatalf("streamImagesResponse returned error: %v", err)
@@ -782,6 +782,31 @@ func TestStreamImagesResponseSendsConnectedComment(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: image_generation.completed\n") {
 		t.Fatalf("stream body missing completed event: %q", body)
+	}
+}
+
+// TestNextImageAccountSkipsNonCodexAccounts 生图上游目前只有 Codex 官方账号支持:
+// Grok/中转账号被调度到会对上游 401,还把自己误标 unauthorized(issue #477 实测发现)。
+func TestNextImageAccountSkipsNonCodexAccounts(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "grok-token", UpstreamType: auth.UpstreamGrok, PlanType: "plus"})
+	store.AddAccount(&auth.Account{DBID: 2, AccessToken: "codex-token", PlanType: "free"})
+	handler := &Handler{store: store}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	// Grok 账号是 plus、Codex 账号只是 free:preferred 档也不许把 plus 的 Grok 号放进来。
+	account, _ := handler.nextImageAccount(c, 0, nil, "gpt-image-2-2k", requestSessionIdentity{})
+	if account == nil || account.DBID != 2 {
+		t.Fatalf("nextImageAccount should pick the codex account, got %+v", account)
+	}
+	store.Release(account)
+
+	// 池里只有 Grok 账号时宁可拿不到账号,也不能把生图请求派给 Grok。
+	grokOnly := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	grokOnly.AddAccount(&auth.Account{DBID: 3, AccessToken: "grok-token", UpstreamType: auth.UpstreamGrok, PlanType: "plus"})
+	handler = &Handler{store: grokOnly}
+	if account, _ := handler.nextImageAccount(c, 0, nil, "gpt-image-2-2k", requestSessionIdentity{}); account != nil {
+		t.Fatalf("nextImageAccount must not return a Grok account, got DBID=%d", account.DBID)
 	}
 }
 

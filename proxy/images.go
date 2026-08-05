@@ -22,7 +22,9 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/codex2api/internal/imageproc"
 	"github.com/codex2api/internal/imagestore"
+	"github.com/codex2api/internal/imageupscale"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -1369,8 +1371,14 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 	return req
 }
 
+// imageCapableAccountFilter 生图上游目前只有 Codex 官方账号支持:中转/Grok
+// 账号拿到 image_generation 请求只会对上游 401/404,还会把自己误标成 unauthorized。
+func imageCapableAccountFilter(account *auth.Account) bool {
+	return account != nil && !account.IsRelayStyle()
+}
+
 func imagePreferredAccountFilter(account *auth.Account) bool {
-	if account == nil {
+	if !imageCapableAccountFilter(account) {
 		return false
 	}
 	return auth.IsPlusOrHigherPlan(account.GetPlanType())
@@ -1387,7 +1395,7 @@ func (h *Handler) nextImageAccount(c *gin.Context, apiKeyID int64, exclude map[i
 	if account != nil {
 		return account, stickyProxyURL
 	}
-	fallbackFilter := applyAffinityGroupRouting(c, identity, h.withModelCooldownFilter(model, nil))
+	fallbackFilter := applyAffinityGroupRouting(c, identity, h.withModelCooldownFilter(model, imageCapableAccountFilter))
 	return h.nextAccountForSessionWithFilter("", apiKeyID, exclude, h.applyScopeBudgetFilter(c, fallbackFilter))
 }
 
@@ -1419,6 +1427,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	if persister != nil {
 		urlFor = persister.buildURL
 	}
+	upscalePlan := imageUpscalePlanForRequest(requestModel, responsesBody)
 
 	for attempt := 0; attempt < maxImageAttempts; attempt++ {
 		if err := c.Request.Context().Err(); err != nil {
@@ -1426,7 +1435,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		}
 		account, stickyProxyURL := h.nextImageAccount(c, apiKeyID, excludeAccounts, requestModel, sessionIdentity)
 		if account == nil {
-			waitFilter := applyAffinityGroupRouting(c, sessionIdentity, h.withModelCooldownFilter(requestModel, nil))
+			waitFilter := applyAffinityGroupRouting(c, sessionIdentity, h.withModelCooldownFilter(requestModel, imageCapableAccountFilter))
 			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), "", 30*time.Second, apiKeyID, excludeAccounts, h.applyScopeBudgetFilter(c, waitFilter))
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
@@ -1524,7 +1533,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		var readErr error
 		promptPolicyIncidentID := ""
 		if stream {
-			usage, imageCount, firstTokenMs, imageLogInfo, readErr = h.streamImagesResponse(c, resp.Body, responseFormat, streamPrefix, requestModel, start)
+			usage, imageCount, firstTokenMs, imageLogInfo, readErr = h.streamImagesResponse(c, resp.Body, responseFormat, streamPrefix, requestModel, start, upscalePlan)
 			if payload := imageResponseFailedPayload(readErr); len(payload) > 0 {
 				promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, inboundEndpoint, logModel, responseFailedErrorBody(payload), upstreamCyberPolicyAttempt{
 					Transport: "sse", StatusCode: http.StatusBadGateway, AccountID: account.ID(), AttemptIndex: attempt + 1,
@@ -1532,7 +1541,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			}
 		} else {
 			var out []byte
-			out, usage, imageCount, imageLogInfo, readErr = collectImagesResponse(c.Request.Context(), resp.Body, responseFormat, requestModel, urlFor)
+			out, usage, imageCount, imageLogInfo, readErr = collectImagesResponse(c.Request.Context(), resp.Body, responseFormat, requestModel, urlFor, upscalePlan)
 			if payload := imageResponseFailedPayload(readErr); len(payload) > 0 {
 				promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, inboundEndpoint, logModel, responseFailedErrorBody(payload), upstreamCyberPolicyAttempt{
 					Transport: "http", StatusCode: http.StatusBadGateway, AccountID: account.ID(), AttemptIndex: attempt + 1,
@@ -1691,7 +1700,83 @@ func shouldRetryImageStreamError(err error, generalRetries *int, maxGeneralRetri
 	return true
 }
 
-func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, fallbackModel string, urlFor imageURLBuilder) ([]byte, *UsageInfo, int, imageUsageLogInfo, error) {
+// imageUpscaleTimeout 是单张图超分(含并发闸排队)的耗时上限,对齐生图台。
+const imageUpscaleTimeout = 3 * time.Minute
+
+// imageUpscalePlan 记录请求解析阶段确定的物理目标尺寸:-2k/-4k 别名承诺的是
+// 最终输出分辨率,上游只按 quality 返回基础图,差额由网关超分补齐(issue #477)。
+type imageUpscalePlan struct {
+	Scale         string
+	RequestedSize string
+}
+
+func (p imageUpscalePlan) enabled() bool {
+	return p.Scale != ""
+}
+
+// imageUpscalePlanForRequest 只对 -2k/-4k 别名生成计划;RequestedSize 取 tool
+// 里最终生效的 size(用户显式值优先,否则别名默认),它是权威目标尺寸。
+func imageUpscalePlanForRequest(requestModel string, responsesBody []byte) imageUpscalePlan {
+	var scale string
+	switch strings.ToLower(strings.TrimSpace(requestModel)) {
+	case imageModel2KAlias:
+		scale = imageproc.Upscale2K
+	case imageModel4KAlias:
+		scale = imageproc.Upscale4K
+	default:
+		return imageUpscalePlan{}
+	}
+	requestedSize := strings.TrimSpace(gjson.GetBytes(responsesBody, "tools.0.size").String())
+	if strings.EqualFold(requestedSize, "auto") {
+		requestedSize = ""
+	}
+	return imageUpscalePlan{Scale: scale, RequestedSize: requestedSize}
+}
+
+// applyImageUpscalePlan 对最终返回的每张图执行超分;失败时降级返回上游基础
+// 分辨率而不是让整个请求失败(图本身仍可用)。partial 预览帧不经过这里。
+func applyImageUpscalePlan(ctx context.Context, plan imageUpscalePlan, results []imageCallResult) []imageCallResult {
+	if !plan.enabled() {
+		return results
+	}
+	for i := range results {
+		data, ok := decodeImageBase64(results[i].Result)
+		if !ok {
+			continue
+		}
+		upscaleCtx, cancel := context.WithTimeout(ctx, imageUpscaleTimeout)
+		upscaled, err := imageupscale.EnsureSize(upscaleCtx, data, plan.Scale, plan.RequestedSize)
+		cancel()
+		if err != nil {
+			log.Printf("images 超分失败,按上游基础分辨率返回 (scale=%s size=%s backend=%s): %v",
+				plan.Scale, plan.RequestedSize, imageupscale.Backend(), err)
+			continue
+		}
+		if upscaled == nil {
+			continue
+		}
+		results[i].Result = base64.StdEncoding.EncodeToString(upscaled.Data)
+		results[i].OutputFormat = imageFormatFromContentType(upscaled.ContentType)
+		results[i].ByteSize = len(upscaled.Data)
+		results[i].Width = upscaled.Width
+		results[i].Height = upscaled.Height
+		results[i].Size = fmt.Sprintf("%dx%d", upscaled.Width, upscaled.Height)
+	}
+	return results
+}
+
+func imageFormatFromContentType(contentType string) string {
+	switch strings.ToLower(strings.TrimSpace(contentType)) {
+	case "image/jpeg", "image/jpg":
+		return "jpeg"
+	case "image/webp":
+		return "webp"
+	default:
+		return "png"
+	}
+}
+
+func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, fallbackModel string, urlFor imageURLBuilder, upscalePlan imageUpscalePlan) ([]byte, *UsageInfo, int, imageUsageLogInfo, error) {
 	var (
 		out            []byte
 		usage          *UsageInfo
@@ -1737,6 +1822,7 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 				readErr = fmt.Errorf("upstream did not return image output")
 				return false
 			}
+			results = applyImageUpscalePlan(ctx, upscalePlan, results)
 			out, readErr = buildImagesAPIResponse(ctx, results, createdAt, usageRaw, firstMeta, responseFormat, urlFor)
 			imageLogInfo = imageUsageLogInfoFromImages(results)
 			return false
@@ -1760,6 +1846,7 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 			for i := range pendingResults {
 				mergeImageMeta(&pendingResults[i], firstMeta)
 			}
+			pendingResults = applyImageUpscalePlan(ctx, upscalePlan, pendingResults)
 			out, readErr = buildImagesAPIResponse(ctx, pendingResults, createdAt, nil, firstMeta, responseFormat, urlFor)
 			if readErr != nil {
 				return nil, usage, 0, imageLogInfo, readErr
@@ -1772,7 +1859,7 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 	return out, usage, len(gjson.GetBytes(out, "data").Array()), imageLogInfo, nil
 }
 
-func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseFormat, streamPrefix, fallbackModel string, start time.Time) (*UsageInfo, int, int, imageUsageLogInfo, error) {
+func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseFormat, streamPrefix, fallbackModel string, start time.Time, upscalePlan imageUpscalePlan) (*UsageInfo, int, int, imageUsageLogInfo, error) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -1913,6 +2000,8 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 				setReadErr(err)
 				return false
 			}
+			// 超分期间 keepalive 注释帧仍在发送,下游连接不会因此空闲超时。
+			results = applyImageUpscalePlan(c.Request.Context(), upscalePlan, results)
 			eventName := streamPrefix + ".completed"
 			for _, image := range results {
 				mergeImageMeta(&image, streamMeta)
@@ -1950,6 +2039,7 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 		_ = writeRaw("", true)
 	}
 	if imageCount == 0 && len(pendingResults) > 0 && getReadErr() == nil {
+		pendingResults = applyImageUpscalePlan(c.Request.Context(), upscalePlan, pendingResults)
 		eventName := streamPrefix + ".completed"
 		for _, image := range pendingResults {
 			mergeImageMeta(&image, streamMeta)
