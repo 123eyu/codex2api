@@ -9724,6 +9724,10 @@ func (h *Handler) ExportAccounts(c *gin.Context) {
 	filter := c.DefaultQuery("filter", "healthy")
 	idsParam := c.Query("ids")
 	remote := c.Query("remote")
+	// channel=codex/grok 限定导出渠道:Codex 账号页导出传 codex,避免把 Grok
+	// 账号混进 codex 命名的导出文件(Grok 页有专属导出端点)。缺省仍导出全部,
+	// 远程迁移(remote=true)依赖全量语义。
+	channel := strings.ToLower(strings.TrimSpace(c.Query("channel")))
 
 	// 远程调用需检查 allow_remote_migration
 	if remote == "true" {
@@ -9740,7 +9744,7 @@ func (h *Handler) ExportAccounts(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
-	rows, err := h.db.ListActive(ctx)
+	rows, err := h.db.ListActiveByChannel(ctx, channel)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "查询账号失败: "+err.Error())
 		return

@@ -2441,6 +2441,69 @@ func TestExportAccountsIncludesATOnly(t *testing.T) {
 	}
 }
 
+// TestExportAccountsChannelScoped Codex 账号页导出必须能按渠道过滤:不带 channel
+// 时 Grok 账号会混进 codex 命名的导出文件(issue: 选 3 个 codex 导出得到 5 个)。
+func TestExportAccountsChannelScoped(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+
+	codexID, err := db.InsertAccount(context.Background(), "codex-account", "rt_codex", "")
+	if err != nil {
+		t.Fatalf("insert codex account: %v", err)
+	}
+	if err := db.UpdateCredentials(context.Background(), codexID, map[string]interface{}{
+		"email":        "codex@example.com",
+		"access_token": "at_codex",
+	}); err != nil {
+		t.Fatalf("update codex credentials: %v", err)
+	}
+
+	grokID, err := db.InsertAccount(context.Background(), "grok-account", "", "")
+	if err != nil {
+		t.Fatalf("insert grok account: %v", err)
+	}
+	if err := db.UpdateCredentials(context.Background(), grokID, map[string]interface{}{
+		"email":         "grok@example.com",
+		"upstream_type": "grok",
+		"api_key":       "xai-test-key",
+	}); err != nil {
+		t.Fatalf("update grok credentials: %v", err)
+	}
+
+	handler := &Handler{db: db}
+	export := func(query string) []map[string]any {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts/export?"+query, nil)
+		handler.ExportAccounts(ctx)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d for %q: %s", recorder.Code, query, recorder.Body.String())
+		}
+		var entries []map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &entries); err != nil {
+			t.Fatalf("decode response for %q: %v", query, err)
+		}
+		return entries
+	}
+
+	codexOnly := export("filter=all&channel=codex")
+	if len(codexOnly) != 1 || codexOnly[0]["email"] != "codex@example.com" {
+		t.Fatalf("channel=codex entries = %v, want only the codex account", codexOnly)
+	}
+
+	grokOnly := export("filter=all&channel=grok")
+	if len(grokOnly) != 1 || grokOnly[0]["email"] != "grok@example.com" {
+		t.Fatalf("channel=grok entries = %v, want only the grok account", grokOnly)
+	}
+
+	// 缺省仍导出全部渠道:远程迁移依赖全量语义。
+	if all := export("filter=all"); len(all) != 2 {
+		t.Fatalf("default export entries = %d, want 2", len(all))
+	}
+}
+
 func TestExportAccountsSkipsAccountsWithoutCredentials(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

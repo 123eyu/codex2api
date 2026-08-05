@@ -1046,9 +1046,10 @@ export const api = {
     request<{ message: string; cleaned: number }>('/accounts/grok/clean-banned', { method: 'POST' }),
   cleanGrokError: () =>
     request<{ message: string; cleaned: number }>('/accounts/grok/clean-error', { method: 'POST' }),
-  exportAccounts: (params: { filter: 'healthy' | 'all'; ids?: number[] }) => {
+  exportAccounts: (params: { filter: 'healthy' | 'all'; ids?: number[]; channel?: 'codex' | 'grok' }) => {
     const sp = new URLSearchParams({ filter: params.filter })
     if (params.ids && params.ids.length > 0) sp.set('ids', params.ids.join(','))
+    if (params.channel) sp.set('channel', params.channel)
     return request<CPAExportEntry[]>(`/accounts/export?${sp.toString()}`)
   },
   /** 导出回收站账号；ids 为空则导出回收站全部。 */

@@ -2962,8 +2962,15 @@ export default function Accounts() {
     setExporting(true);
     setShowExportPicker(false);
     try {
-      const params: { filter: "healthy" | "all"; ids?: number[] } = {
+      // Codex 账号页只导出 codex 渠道:不带 channel 时后端会把 Grok 账号一并
+      // 打进 codex 命名的导出文件(Grok 页有专属导出入口)。
+      const params: {
+        filter: "healthy" | "all";
+        ids?: number[];
+        channel: "codex";
+      } = {
         filter: scope === "healthy" ? "healthy" : "all",
+        channel: "codex",
       };
       if (scope === "selected") {
         params.ids = Array.from(selected);
