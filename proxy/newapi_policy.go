@@ -19,6 +19,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/sjson"
 )
 
 const newAPIReplayNamespace = "prompt-filter-newapi-replay"
@@ -657,7 +658,7 @@ func (h *Handler) emitNewAPIUpstreamCyberPolicyDecision(c *gin.Context, endpoint
 		Action:         promptfilter.ActionBlock,
 		Profile:        profile,
 		ReasonCode:     newAPIUpstreamCyberPolicyReasonCode,
-		StrikeEligible: true,
+		StrikeEligible: cfg.Advanced.Enforcement.CYBStrikeEnabled,
 		Terminal:       true,
 	}
 	verdict := promptfilter.Verdict{
@@ -716,6 +717,11 @@ func newAPIPolicyDecisionAPIError(metadata newAPIPolicyDecisionMetadata) *api.AP
 		message = promptConversationLockedMessage
 	}
 	apiErr := api.NewAPIError(api.ErrorCode("request_policy_violation"), message, api.ErrorTypeInvalidRequest)
+	apiErr.Details = newAPIPolicyDecisionDetails(metadata)
+	return apiErr
+}
+
+func newAPIPolicyDecisionDetails(metadata newAPIPolicyDecisionMetadata) gin.H {
 	details := gin.H{
 		"request_id":         metadata.RequestID,
 		"decision_id":        metadata.DecisionID,
@@ -734,8 +740,30 @@ func newAPIPolicyDecisionAPIError(metadata newAPIPolicyDecisionMetadata) *api.AP
 		details["event_signature_version"] = newAPIPolicyEventSignatureVersionV1
 		details["event_signature"] = metadata.EventSignature
 	}
-	apiErr.Details = details
-	return apiErr
+	return details
+}
+
+// attachNewAPIPolicyDecisionToResponseFailed carries the same signed decision
+// used by response headers inside an SSE terminal event. This is the fallback
+// for streams whose HTTP headers were committed before upstream returned CYB.
+func attachNewAPIPolicyDecisionToResponseFailed(body []byte, metadata newAPIPolicyDecisionMetadata) []byte {
+	if len(body) == 0 || metadata.DecisionID == "" {
+		return body
+	}
+	details, err := json.Marshal(newAPIPolicyDecisionDetails(metadata))
+	if err != nil {
+		return body
+	}
+	updated, err := sjson.SetRawBytes(body, "response.error.details.codex2api_policy", details)
+	if err != nil {
+		return body
+	}
+	if message := newAPIPolicyDecisionAPIError(metadata).Message; message != "" {
+		if withMessage, setErr := sjson.SetBytes(updated, "response.error.message", message); setErr == nil {
+			updated = withMessage
+		}
+	}
+	return updated
 }
 
 type newAPIPolicyDecisionMetadata struct {

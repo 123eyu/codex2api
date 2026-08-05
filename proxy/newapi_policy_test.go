@@ -361,6 +361,7 @@ func TestWebSocketPolicyDecisionIDUsesLogicalFrameSequence(t *testing.T) {
 
 func TestOnlyExplicitUpstreamCyberPolicyDecisionIsStrikeEligible(t *testing.T) {
 	cfg := promptGuardTestConfig()
+	cfg.Advanced.Enforcement.CYBStrikeEnabled = true
 	binding := database.PromptFilterNewAPIBinding{
 		APIKeyID: 101, PlatformCode: "gateway-a", Secret: "gateway-a-secret", Enabled: true,
 		PolicyMode: database.PromptFilterPolicyModeEnforce, PolicyProfile: database.PromptFilterPolicyProfileBalanced,
@@ -390,6 +391,64 @@ func TestOnlyExplicitUpstreamCyberPolicyDecisionIsStrikeEligible(t *testing.T) {
 	)
 	if localMetadata.StrikeEligible {
 		t.Fatalf("local prompt decision unexpectedly became strike eligible: %+v", localMetadata)
+	}
+}
+
+func TestUpstreamCyberPolicyStrikeRequiresExplicitCodex2APISwitch(t *testing.T) {
+	cfg := promptGuardTestConfig()
+	cfg.Advanced.Enforcement.CYBStrikeEnabled = false
+	binding := database.PromptFilterNewAPIBinding{
+		APIKeyID: 101, PlatformCode: "gateway-a", Secret: "gateway-a-secret", Enabled: true,
+		PolicyMode: database.PromptFilterPolicyModeEnforce, PolicyProfile: database.PromptFilterPolicyProfileBalanced,
+	}
+	handler := newPromptFilterBindingTestHandler(t, cfg, []database.PromptFilterNewAPIBinding{binding})
+	body := []byte(`{"model":"gpt-5.5","input":"ordinary request"}`)
+	c := signedBoundNewAPIPolicyContext(t, "upstream-cyb-audit-only", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, body, 101, "gateway-a", "gateway-a-secret", "")
+	setIngressRequestBodyIfAbsent(c, body)
+
+	_, _ = handler.logUpstreamCyberPolicy(c, "/v1/responses", "gpt-5.5", []byte(`{"error":{"code":"cyber_policy","message":"blocked"}}`))
+	metadata, delegated := newAPIUpstreamCyberPolicyDecision(c)
+	if !delegated || metadata.ReasonCode != newAPIUpstreamCyberPolicyReasonCode || metadata.StrikeEligible {
+		t.Fatalf("disabled CYB strike switch metadata = %+v delegated=%t", metadata, delegated)
+	}
+	if got := c.Writer.Header().Get("X-Codex2API-Policy-Strike-Eligible"); got != "false" {
+		t.Fatalf("strike eligibility header = %q, want false", got)
+	}
+	if message := newAPIPolicyDecisionAPIError(metadata).Message; !strings.Contains(message, "再次触发可能会停用账号") {
+		t.Fatalf("disabled CYB strike deterrence message = %q", message)
+	}
+}
+
+func TestResponseFailedCarriesSignedNewAPIPolicyDecisionWithoutDroppingUpstreamDetails(t *testing.T) {
+	cfg := promptGuardTestConfig()
+	metadata := buildNewAPIPolicyDecisionMetadataWithSecret(
+		newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8", RequestID: "stream-cyb-request"},
+		promptfilter.Decision{
+			Action: promptfilter.ActionBlock, Profile: promptfilter.GuardProfileBalanced,
+			ReasonCode: newAPIUpstreamCyberPolicyReasonCode, StrikeEligible: true, Terminal: true,
+		},
+		promptfilter.Verdict{Action: promptfilter.ActionBlock, FullText: "cyber_policy"},
+		cfg, []byte(`{"error":{"code":"cyber_policy"}}`), "/v1/responses", "gpt-5.5", "", "gateway-a-secret",
+	)
+	original := []byte(`{"type":"response.failed","response":{"error":{"code":"cyber_policy","message":"blocked","details":{"upstream_trace":"trace-1"}}}}`)
+	decorated := attachNewAPIPolicyDecisionToResponseFailed(original, metadata)
+
+	if got := gjson.GetBytes(decorated, "response.error.code").String(); got != "cyber_policy" {
+		t.Fatalf("upstream error code = %q", got)
+	}
+	if got := gjson.GetBytes(decorated, "response.error.details.upstream_trace").String(); got != "trace-1" {
+		t.Fatalf("upstream details were dropped: %s", decorated)
+	}
+	policy := gjson.GetBytes(decorated, "response.error.details.codex2api_policy")
+	if policy.Get("decision_id").String() != metadata.DecisionID || !policy.Get("strike_eligible").Bool() {
+		t.Fatalf("signed stream decision missing: %s", decorated)
+	}
+	if got := policy.Get("response_signature").String(); got != signNewAPIPolicyDecision("gateway-a-secret", metadata) {
+		t.Fatalf("stream decision signature = %q", got)
+	}
+	translated, done := TranslateStreamChunk(decorated, "gpt-5.5", "chatcmpl-test", time.Now().Unix())
+	if !done || gjson.GetBytes(translated, "error.details.codex2api_policy.decision_id").String() != metadata.DecisionID {
+		t.Fatalf("chat stream translation dropped signed decision: %s", translated)
 	}
 }
 
