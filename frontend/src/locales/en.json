@@ -839,6 +839,7 @@
     "detailBaseUrl": "Base URL",
     "detailProxy": "Proxy",
     "modelCooldown": "model {{model}}",
+    "detailCopyEmail": "Copy email",
     "detailPrev": "Previous account",
     "detailNext": "Next account",
     "openDetail": "View details",
