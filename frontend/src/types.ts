@@ -582,6 +582,7 @@ export interface AccountGroup {
   base_concurrency_override: number | null
   auto_pause_5h_threshold: number
   auto_pause_7d_threshold: number
+  proxy_urls: string[]
   created_at: ISODateString
   updated_at: ISODateString
 }
@@ -598,6 +599,7 @@ export interface CreateAccountGroupRequest {
   base_concurrency_override?: number | null
   auto_pause_5h_threshold?: number
   auto_pause_7d_threshold?: number
+  proxy_urls?: string[]
 }
 
 export interface UpdateAccountGroupRequest {
@@ -608,6 +610,7 @@ export interface UpdateAccountGroupRequest {
   base_concurrency_override?: number | null
   auto_pause_5h_threshold?: number
   auto_pause_7d_threshold?: number
+  proxy_urls?: string[]
 }
 
 export interface AccountModelStat {

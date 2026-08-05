@@ -203,6 +203,7 @@ type AccountGroupDraft = {
   baseConcurrencyInput: string;
   auto_pause_5h_threshold: number;
   auto_pause_7d_threshold: number;
+  proxyURLsInput: string;
 };
 
 function getDefaultAccountVisibleColumns(): Record<
@@ -1039,6 +1040,7 @@ export default function Accounts() {
     baseConcurrencyInput: "",
     auto_pause_5h_threshold: 0,
     auto_pause_7d_threshold: 0,
+    proxyURLsInput: "",
   });
   const [groupSubmitting, setGroupSubmitting] = useState(false);
   const [showBatchMetaEditor, setShowBatchMetaEditor] = useState(false);
@@ -4232,6 +4234,7 @@ export default function Accounts() {
       baseConcurrencyInput: "",
       auto_pause_5h_threshold: 0,
       auto_pause_7d_threshold: 0,
+      proxyURLsInput: "",
     });
   };
 
@@ -4248,6 +4251,7 @@ export default function Accounts() {
           : "",
       auto_pause_5h_threshold: group.auto_pause_5h_threshold ?? 0,
       auto_pause_7d_threshold: group.auto_pause_7d_threshold ?? 0,
+      proxyURLsInput: (group.proxy_urls ?? []).join("\n"),
     });
   };
 
@@ -4273,6 +4277,10 @@ export default function Accounts() {
             : parsedGroupBaseConcurrency,
         auto_pause_5h_threshold: groupDraft.auto_pause_5h_threshold,
         auto_pause_7d_threshold: groupDraft.auto_pause_7d_threshold,
+        proxy_urls: groupDraft.proxyURLsInput
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean),
       };
       if (groupDraft.id === null) {
         await api.createAccountGroup(payload);
@@ -8971,6 +8979,27 @@ export default function Accounts() {
                       {groupBaseConcurrencyInvalid
                         ? t("accounts.groupBaseConcurrencyRange")
                         : t("accounts.groupBaseConcurrencyHint")}
+                    </p>
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-semibold text-muted-foreground">
+                      {t("accounts.groupProxyURLsLabel")}
+                    </span>
+                    <textarea
+                      className="w-full min-h-[80px] p-3 border border-input rounded-xl bg-background text-sm resize-y font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                      value={groupDraft.proxyURLsInput}
+                      onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+                        setGroupDraft((draft) => ({
+                          ...draft,
+                          proxyURLsInput: event.target.value,
+                        }))
+                      }
+                      placeholder={t("accounts.groupProxyURLsPlaceholder")}
+                      rows={3}
+                      spellCheck={false}
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      {t("accounts.groupProxyURLsHint")}
                     </p>
                   </label>
                   <div className="space-y-1.5">

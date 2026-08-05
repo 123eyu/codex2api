@@ -2846,6 +2846,7 @@ type Store struct {
 	groupAutoPauseThresholds      sync.Map // int64 -> [2]float64 {5h, 7d}
 	groupBaseConcurrencyOverrides sync.Map // int64 -> int64; missing means inherit global
 	groupNames                    sync.Map // int64 -> string; 组 ID→名，供 payload 规则按组名匹配
+	groupProxyURLs                sync.Map // int64 -> []string; 组级代理列表(issue #479),missing = 未设置
 }
 
 // sessionAffinity 记录某个 sessionKey 当前粘附到哪个账号/代理。
@@ -3791,7 +3792,7 @@ func (s *Store) NextProxy() string {
 }
 
 // ResolveProxyForAccount returns the effective proxy for account-bound internal calls.
-// Priority: account proxy > sticky proxy pool > global proxy > direct.
+// Priority: account proxy > group proxy > sticky proxy pool > global proxy > direct.
 func (s *Store) ResolveProxyForAccount(acc *Account) string {
 	if s == nil {
 		return ""
@@ -3808,7 +3809,32 @@ func (s *Store) ResolveProxyForAccount(acc *Account) string {
 		acc.mu.RUnlock()
 	}
 
+	if groupProxy := s.resolveGroupProxyForAccount(acc); groupProxy != "" {
+		return groupProxy
+	}
+
 	return s.resolveFallbackProxyForAccount(accountID)
+}
+
+// resolveGroupProxyForAccount 返回账号按组继承的代理(issue #479):按 GroupIDs
+// 顺序取第一个配置了代理的组,组内按账号 ID 粘性选一条——free 号池最怕账号↔
+// 出口 IP 漂移互相牵连,粘性保证同账号稳定走同一条代理。未命中返回空串。
+func (s *Store) resolveGroupProxyForAccount(acc *Account) string {
+	if s == nil || acc == nil {
+		return ""
+	}
+	acc.mu.RLock()
+	accountID := acc.DBID
+	groupIDs := cloneInt64Slice(acc.GroupIDs)
+	acc.mu.RUnlock()
+	for _, groupID := range groupIDs {
+		urls := s.getGroupProxyURLs(groupID)
+		if len(urls) == 0 {
+			continue
+		}
+		return urls[stickyProxyIndex(accountID, len(urls))]
+	}
+	return ""
 }
 
 func (s *Store) resolveFallbackProxyForAccount(accountID int64) string {
@@ -4154,6 +4180,7 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 			if g.BaseConcurrencyOverride.Valid {
 				s.groupBaseConcurrencyOverrides.Store(g.ID, g.BaseConcurrencyOverride.Int64)
 			}
+			s.SetGroupProxyURLs(g.ID, g.ProxyURLs)
 			s.groupNames.Store(g.ID, strings.TrimSpace(g.Name))
 		}
 	}
@@ -5230,6 +5257,10 @@ func (s *Store) affinityProxyStillValid(accountID int64, proxyURL string) bool {
 	if accountProxy := account.GetProxyURL(); accountProxy != "" {
 		return proxyURL == accountProxy
 	}
+	// 组代理变更(改列表/移组/删组)时,粘住旧代理的会话在此判失效并重绑。
+	if groupProxy := s.resolveGroupProxyForAccount(account); groupProxy != "" {
+		return proxyURL == groupProxy
+	}
 	if poolEnabled && poolHasEntries {
 		return poolContainsProxy
 	}
@@ -6178,6 +6209,45 @@ func (s *Store) SetGroupBaseConcurrencyOverride(groupID int64, value *int64) {
 
 func (s *Store) DeleteGroupBaseConcurrencyOverride(groupID int64) {
 	s.SetGroupBaseConcurrencyOverride(groupID, nil)
+}
+
+// SetGroupProxyURLs 热更新组级代理列表;空列表(或全为空串)清除该组设置。
+// 改动即时生效:代理解析按请求进行,存量粘性会话由 affinityProxyStillValid
+// 在下次复用时判失效并重绑(issue #479)。
+func (s *Store) SetGroupProxyURLs(groupID int64, urls []string) {
+	if s == nil || groupID <= 0 {
+		return
+	}
+	cleaned := make([]string, 0, len(urls))
+	for _, u := range urls {
+		if u = strings.TrimSpace(u); u != "" {
+			cleaned = append(cleaned, u)
+		}
+	}
+	if len(cleaned) == 0 {
+		s.groupProxyURLs.Delete(groupID)
+		return
+	}
+	s.groupProxyURLs.Store(groupID, cleaned)
+}
+
+func (s *Store) DeleteGroupProxyURLs(groupID int64) {
+	if s == nil || groupID <= 0 {
+		return
+	}
+	s.groupProxyURLs.Delete(groupID)
+}
+
+func (s *Store) getGroupProxyURLs(groupID int64) []string {
+	if s == nil || groupID <= 0 {
+		return nil
+	}
+	value, ok := s.groupProxyURLs.Load(groupID)
+	if !ok {
+		return nil
+	}
+	urls, _ := value.([]string)
+	return urls
 }
 
 func (s *Store) GetGroupBaseConcurrencyOverride(groupID int64) (int64, bool) {

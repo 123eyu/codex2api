@@ -969,6 +969,7 @@ func (db *DB) migrate(ctx context.Context) error {
 		color                     VARCHAR(20) DEFAULT '',
 		sort_order                INT DEFAULT 0,
 		base_concurrency_override INT NULL,
+		proxy_urls                TEXT DEFAULT '[]',
 		created_at                TIMESTAMPTZ DEFAULT NOW(),
 		updated_at                TIMESTAMPTZ DEFAULT NOW()
 	);
@@ -976,6 +977,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS color VARCHAR(20) DEFAULT '';
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS sort_order INT DEFAULT 0;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS base_concurrency_override INT NULL;
+	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS proxy_urls TEXT DEFAULT '[]';
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
