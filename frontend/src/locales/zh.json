@@ -1258,7 +1258,18 @@
     "billed": "成本",
     "importGroupsLabel": "绑定账号分组",
     "importGroupsPlaceholder": "选择要绑定的分组（可不选）",
-    "importGroupsHint": "本次新增的账号会直接进入所选分组；命中重复的已有账号分组保持不变。不选则不绑定。"
+    "importGroupsHint": "本次新增的账号会直接进入所选分组；命中重复的已有账号分组保持不变。不选则不绑定。",
+    "modelCooldownPolicy": "模型冷却策略",
+    "clearAllModelCooldowns": "清除全部",
+    "modelCooldownEffective": "当前生效：{{mode}} · {{seconds}} 秒 · 退避{{backoff}}",
+    "modelCooldownModeOverride": "账号覆盖模式",
+    "modelCooldownInherit": "跟随系统默认",
+    "saveModelCooldownPolicy": "保存账号冷却策略",
+    "clearModelCooldown": "清除此模型冷却",
+    "modelCooldownPolicySaved": "账号模型冷却策略已保存",
+    "modelCooldownPolicySaveFailed": "保存模型冷却策略失败：{{error}}",
+    "modelCooldownCleared": "已清除 {{model}} 的模型冷却",
+    "allModelCooldownsCleared": "已清除 {{count}} 条模型冷却"
   },
   "invite": {
     "entry": "Codex 邀请",
@@ -3377,7 +3388,22 @@
     "codexPreflightSSEPassthrough": "前置元数据事件立即透传（旧版兼容）",
     "codexPreflightSSEPassthroughDesc": "把内容生成前的上游元数据事件（codex.rate_limits / codex.response.metadata / response.metadata）立即转发给下游，而不是缓冲到首个真实内容事件。适配把“首条 SSE 数据帧”当作首响应时间的多层网关。",
     "codexPreflightSSEPassthroughEnabled": "启用立即透传",
-    "codexPreflightSSEPassthroughEnabledDesc": "警告：旧版兼容模式，默认关闭。开启后首个内容事件之前就会提交 HTTP 200，此窗口内的上游失败只能以 200 + SSE failed 帧下发——真实 HTTP 错误码、首包前静默换号重试、超窗自动压缩在该窗口内全部失效。热更新即时生效，无需重启。"
+    "codexPreflightSSEPassthroughEnabledDesc": "警告：旧版兼容模式，默认关闭。开启后首个内容事件之前就会提交 HTTP 200，此窗口内的上游失败只能以 200 + SSE failed 帧下发——真实 HTTP 错误码、首包前静默换号重试、超窗自动压缩在该窗口内全部失效。热更新即时生效，无需重启。",
+    "modelCooldownTitle": "模型 429 冷却策略",
+    "modelCooldownDesc": "分别控制 API 直连上游与 OAuth 账号池的模型级 429 冷却。明确的 5h/7d 用量窗口仍按真实重置时间处理。",
+    "relayModelCooldownTitle": "API 计划 / 直连上游",
+    "relayModelCooldownDesc": "默认关闭持久化模型冷却。偶发 429 会换上游重试，重试耗尽后向客户端返回标准 429。",
+    "oauthModelCooldownTitle": "OAuth / 订阅账号池",
+    "oauthModelCooldownDesc": "保留账号池保护，但允许关闭、固定时长或使用指数退避。",
+    "modelCooldownMode": "冷却模式",
+    "modelCooldownModeDesc": "关闭不写入模型冷却；固定使用恒定时长；自适应可按重复 429 退避。",
+    "modelCooldownModeOff": "关闭",
+    "modelCooldownModeFixed": "固定",
+    "modelCooldownModeAdaptive": "自适应",
+    "modelCooldownSeconds": "基础时长",
+    "modelCooldownSecondsDesc": "模型冷却基础秒数，范围 1–1800 秒。",
+    "modelCooldownBackoff": "指数退避",
+    "modelCooldownBackoffDesc": "仅自适应模式生效；重复 429 会逐步延长，最长 30 分钟。"
   },
   "proxies": {
     "description": "管理代理池，支持轮询分配给账号使用；也可将指定代理绑定到账号池中的账号",

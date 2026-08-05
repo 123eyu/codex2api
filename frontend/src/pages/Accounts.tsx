@@ -3362,6 +3362,53 @@ export default function Accounts() {
     }
   };
 
+  const handleSaveModelCooldownPolicy = async (
+    account: AccountRow,
+    data: {
+      mode: "off" | "fixed" | "adaptive" | null;
+      seconds: number | null;
+      backoff_enabled: boolean | null;
+    },
+  ) => {
+    try {
+      await api.updateAccountModelCooldownPolicy(account.id, data);
+      showToast(t("accounts.modelCooldownPolicySaved"));
+      void reloadSilently();
+    } catch (error) {
+      showToast(
+        t("accounts.modelCooldownPolicySaveFailed", {
+          error: getErrorMessage(error),
+        }),
+        "error",
+      );
+    }
+  };
+
+  const handleClearModelCooldown = async (
+    account: AccountRow,
+    model: string,
+  ) => {
+    try {
+      await api.clearAccountModelCooldown(account.id, model);
+      showToast(t("accounts.modelCooldownCleared", { model }));
+      void reloadSilently();
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+    }
+  };
+
+  const handleClearAllModelCooldowns = async (account: AccountRow) => {
+    try {
+      const result = await api.clearAllAccountModelCooldowns(account.id);
+      showToast(
+        t("accounts.allModelCooldownsCleared", { count: result.cleared }),
+      );
+      void reloadSilently();
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+    }
+  };
+
   // 主动重置额度：消耗 1 次「主动重置次数」立即重置该账号额度（带二次确认）。
   const handleResetCredits = async (account: AccountRow) => {
     const confirmed = await confirm({
@@ -7263,6 +7310,18 @@ export default function Accounts() {
             onResetStatus={() => {
               if (!detailAccount) return;
               void handleResetStatus(detailAccount);
+            }}
+            onSaveModelCooldownPolicy={(data) => {
+              if (!detailAccount) return;
+              void handleSaveModelCooldownPolicy(detailAccount, data);
+            }}
+            onClearModelCooldown={(model) => {
+              if (!detailAccount) return;
+              void handleClearModelCooldown(detailAccount, model);
+            }}
+            onClearAllModelCooldowns={() => {
+              if (!detailAccount) return;
+              void handleClearAllModelCooldowns(detailAccount);
             }}
             onResetCredits={() => {
               if (!detailAccount) return;

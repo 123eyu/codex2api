@@ -581,6 +581,31 @@ export const api = {
     request<{ message: string; success: number; failed: number }>('/accounts/batch-update', { method: 'POST', body: JSON.stringify(data) }),
   resetAccountStatus: (id: number) =>
     request<MessageResponse>(`/accounts/${id}/reset-status`, { method: 'POST' }),
+  updateAccountModelCooldownPolicy: (
+    id: number,
+    data: {
+      mode?: 'off' | 'fixed' | 'adaptive' | null
+      seconds?: number | null
+      backoff_enabled?: boolean | null
+    },
+  ) =>
+    request<{
+      message: string
+      mode_effective: 'off' | 'fixed' | 'adaptive'
+      seconds_effective: number
+      backoff_enabled_effective: boolean
+    }>(`/accounts/${id}/model-cooldown-policy`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  clearAccountModelCooldown: (id: number, model: string) =>
+    request<MessageResponse>(`/accounts/${id}/model-cooldowns/${encodeURIComponent(model)}`, {
+      method: 'DELETE',
+    }),
+  clearAllAccountModelCooldowns: (id: number) =>
+    request<{ message: string; cleared: number }>(`/accounts/${id}/model-cooldowns`, {
+      method: 'DELETE',
+    }),
   // usage_refreshed 表示重置后的用量探针是否在响应前跑完；false 时调用方应稍后补刷一次。
   resetCredits: (id: number) =>
     request<{

@@ -1244,6 +1244,12 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_local_max_entry_bytes BIGINT NOT NULL DEFAULT 8388608;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_reconstruct_max_bytes BIGINT NOT NULL DEFAULT 67108864;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_config_generation BIGINT NOT NULL DEFAULT 1;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS relay_model_cooldown_mode VARCHAR(20) NOT NULL DEFAULT 'off';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS relay_model_cooldown_seconds INT NOT NULL DEFAULT 2;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS relay_model_cooldown_backoff_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS oauth_model_cooldown_mode VARCHAR(20) NOT NULL DEFAULT 'adaptive';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS oauth_model_cooldown_seconds INT NOT NULL DEFAULT 300;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS oauth_model_cooldown_backoff_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_5h_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_7d_threshold DOUBLE PRECISION DEFAULT 0;
@@ -2050,7 +2056,13 @@ type SystemSettings struct {
 	// custom/synced 覆盖代码默认；空为 "{}"。
 	ModelPricingOverrides string
 	// ModelPricingSyncURL 是「从 JSON URL 同步定价」的来源地址，空时用内置默认。
-	ModelPricingSyncURL string
+	ModelPricingSyncURL              string
+	RelayModelCooldownMode           string
+	RelayModelCooldownSeconds        int
+	RelayModelCooldownBackoffEnabled bool
+	OAuthModelCooldownMode           string
+	OAuthModelCooldownSeconds        int
+	OAuthModelCooldownBackoffEnabled bool
 
 	// PreservePromptFilterCustomPatterns is an update-only concurrency guard.
 	// When true, an existing row keeps its current custom-pattern value instead
@@ -5690,6 +5702,14 @@ func (db *DB) ClearModelCooldown(ctx context.Context, accountID int64, model str
 		return nil
 	}
 	_, err := db.conn.ExecContext(ctx, `DELETE FROM account_model_cooldowns WHERE account_id = $1 AND model = $2`, accountID, model)
+	return err
+}
+
+func (db *DB) ClearAllModelCooldowns(ctx context.Context, accountID int64) error {
+	if accountID == 0 {
+		return nil
+	}
+	_, err := db.conn.ExecContext(ctx, `DELETE FROM account_model_cooldowns WHERE account_id = $1`, accountID)
 	return err
 }
 

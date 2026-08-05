@@ -71,6 +71,7 @@ import {
   Save,
   Shield,
   Trash2,
+  Timer,
   Upload,
   Wifi,
   Wrench,
@@ -1121,6 +1122,11 @@ export default function Settings() {
     { label: t('settings.transportRetryPolicyRotate'), value: 'rotate' },
     { label: t('settings.transportRetryPolicySticky'), value: 'sticky' },
   ]
+  const modelCooldownModeOptions = [
+    { label: t('settings.modelCooldownModeOff'), value: 'off' },
+    { label: t('settings.modelCooldownModeFixed'), value: 'fixed' },
+    { label: t('settings.modelCooldownModeAdaptive'), value: 'adaptive' },
+  ]
   const affinityModeOptions = [
     { label: t('settings.affinityModeBounded'), value: 'bounded' },
     { label: t('settings.affinityModeOff'), value: 'off' },
@@ -1241,6 +1247,12 @@ export default function Settings() {
     response_cache_local_max_entry_bytes: DEFAULT_RESPONSE_CACHE_ENTRY_BYTES,
     response_cache_reconstruct_max_bytes: DEFAULT_RESPONSE_CACHE_RECONSTRUCT_BYTES,
     response_cache_config_generation: 0,
+    relay_model_cooldown_mode: 'off',
+    relay_model_cooldown_seconds: 2,
+    relay_model_cooldown_backoff_enabled: false,
+    oauth_model_cooldown_mode: 'adaptive',
+    oauth_model_cooldown_seconds: 300,
+    oauth_model_cooldown_backoff_enabled: true,
     model_mapping: '{}',
     codex_model_mapping: '{}',
     payload_rules: '{}',
@@ -2112,6 +2124,104 @@ export default function Settings() {
               </div>
             </SettingsCard>
           </div>
+
+          <SettingsCard
+            title={t('settings.modelCooldownTitle')}
+            description={t('settings.modelCooldownDesc')}
+            icon={<Timer className="size-4" />}
+          >
+            <div className="grid gap-4 lg:grid-cols-2">
+              <div className="space-y-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3.5">
+                <div>
+                  <h3 className="text-sm font-semibold">{t('settings.relayModelCooldownTitle')}</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    {t('settings.relayModelCooldownDesc')}
+                  </p>
+                </div>
+                <div className={SETTINGS_FIELD_GRID}>
+                  <SettingField label={t('settings.modelCooldownMode')} description={t('settings.modelCooldownModeDesc')}>
+                    <Select
+                      value={settingsForm.relay_model_cooldown_mode}
+                      onValueChange={(value) => autoSaveStringField('relay_model_cooldown_mode', value)}
+                      options={modelCooldownModeOptions}
+                    />
+                  </SettingField>
+                  <SettingField
+                    label={t('settings.modelCooldownSeconds')}
+                    description={t('settings.modelCooldownSecondsDesc')}
+                    suffix={t('settings.unit.sec')}
+                    className={cn(settingsForm.relay_model_cooldown_mode === 'off' && 'opacity-60')}
+                  >
+                    <DraftNumberInput
+                      min={1}
+                      max={1800}
+                      disabled={settingsForm.relay_model_cooldown_mode === 'off'}
+                      value={settingsForm.relay_model_cooldown_seconds}
+                      onValueChange={(value) => setSettingsForm(f => ({ ...f, relay_model_cooldown_seconds: value }))}
+                      onValueCommit={(value) => void autoSaveSettingsPatch({ relay_model_cooldown_seconds: value })}
+                    />
+                  </SettingField>
+                </div>
+                <SettingField
+                  label={t('settings.modelCooldownBackoff')}
+                  description={t('settings.modelCooldownBackoffDesc')}
+                  layout="switch"
+                  className={cn(settingsForm.relay_model_cooldown_mode !== 'adaptive' && 'opacity-60')}
+                >
+                  <Switch
+                    checked={settingsForm.relay_model_cooldown_backoff_enabled}
+                    disabled={settingsForm.relay_model_cooldown_mode !== 'adaptive'}
+                    onCheckedChange={(checked) => autoSaveBooleanField('relay_model_cooldown_backoff_enabled', checked)}
+                  />
+                </SettingField>
+              </div>
+
+              <div className="space-y-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3.5">
+                <div>
+                  <h3 className="text-sm font-semibold">{t('settings.oauthModelCooldownTitle')}</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    {t('settings.oauthModelCooldownDesc')}
+                  </p>
+                </div>
+                <div className={SETTINGS_FIELD_GRID}>
+                  <SettingField label={t('settings.modelCooldownMode')} description={t('settings.modelCooldownModeDesc')}>
+                    <Select
+                      value={settingsForm.oauth_model_cooldown_mode}
+                      onValueChange={(value) => autoSaveStringField('oauth_model_cooldown_mode', value)}
+                      options={modelCooldownModeOptions}
+                    />
+                  </SettingField>
+                  <SettingField
+                    label={t('settings.modelCooldownSeconds')}
+                    description={t('settings.modelCooldownSecondsDesc')}
+                    suffix={t('settings.unit.sec')}
+                    className={cn(settingsForm.oauth_model_cooldown_mode === 'off' && 'opacity-60')}
+                  >
+                    <DraftNumberInput
+                      min={1}
+                      max={1800}
+                      disabled={settingsForm.oauth_model_cooldown_mode === 'off'}
+                      value={settingsForm.oauth_model_cooldown_seconds}
+                      onValueChange={(value) => setSettingsForm(f => ({ ...f, oauth_model_cooldown_seconds: value }))}
+                      onValueCommit={(value) => void autoSaveSettingsPatch({ oauth_model_cooldown_seconds: value })}
+                    />
+                  </SettingField>
+                </div>
+                <SettingField
+                  label={t('settings.modelCooldownBackoff')}
+                  description={t('settings.modelCooldownBackoffDesc')}
+                  layout="switch"
+                  className={cn(settingsForm.oauth_model_cooldown_mode !== 'adaptive' && 'opacity-60')}
+                >
+                  <Switch
+                    checked={settingsForm.oauth_model_cooldown_backoff_enabled}
+                    disabled={settingsForm.oauth_model_cooldown_mode !== 'adaptive'}
+                    onCheckedChange={(checked) => autoSaveBooleanField('oauth_model_cooldown_backoff_enabled', checked)}
+                  />
+                </SettingField>
+              </div>
+            </div>
+          </SettingsCard>
 
           <SettingsCard
             title={t('settings.autoResetCreditsTitle')}

@@ -248,6 +248,9 @@ type Account struct {
 	Tags                           []string
 	GroupIDs                       []int64
 	ModelCooldowns                 map[string]ModelCooldown
+	ModelCooldownModeOverride      *string
+	ModelCooldownSecondsOverride   *int
+	ModelCooldownBackoffOverride   *bool
 
 	SubscriptionExpiresAt time.Time
 }
@@ -2434,6 +2437,50 @@ func (a *Account) ClearModelCooldown(model string) bool {
 	return true
 }
 
+func (a *Account) ClearAllModelCooldowns() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.ModelCooldowns) == 0 {
+		return nil
+	}
+	models := make([]string, 0, len(a.ModelCooldowns))
+	for model := range a.ModelCooldowns {
+		models = append(models, model)
+	}
+	clear(a.ModelCooldowns)
+	sort.Strings(models)
+	return models
+}
+
+func (a *Account) SetModelCooldownPolicyOverride(mode *string, seconds *int, backoff *bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.ModelCooldownModeOverride = mode
+	a.ModelCooldownSecondsOverride = seconds
+	a.ModelCooldownBackoffOverride = backoff
+}
+
+func (a *Account) GetModelCooldownPolicyOverride() (*string, *int, *bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	var mode *string
+	var seconds *int
+	var backoff *bool
+	if a.ModelCooldownModeOverride != nil {
+		value := *a.ModelCooldownModeOverride
+		mode = &value
+	}
+	if a.ModelCooldownSecondsOverride != nil {
+		value := *a.ModelCooldownSecondsOverride
+		seconds = &value
+	}
+	if a.ModelCooldownBackoffOverride != nil {
+		value := *a.ModelCooldownBackoffOverride
+		backoff = &value
+	}
+	return mode, seconds, backoff
+}
+
 // GetDynamicConcurrencyLimit 获取当前动态并发上限
 func (a *Account) GetDynamicConcurrencyLimit() int64 {
 	a.mu.RLock()
@@ -2784,6 +2831,7 @@ type Store struct {
 	grokProbeEnabled      atomic.Bool  // 定期探测 Grok 账号状态是否开启（默认关）
 	grokProbeIntervalMin  atomic.Int64 // 定期探测间隔（分钟，默认 30，下限 grokProbeMinIntervalMinutes）
 	grokMaxRateLimitRetry atomic.Int64 // Grok 请求限流(429)专属换号重试上限（0=跟随全局）
+	modelCooldownSettings atomic.Value // database.ModelCooldownSettings
 	promptFilterConfig    atomic.Value // promptFilterConfigState
 	sessionMu             sync.RWMutex
 	sessionBindings       map[string]sessionAffinity
@@ -3299,6 +3347,14 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.ignoreUsageLimitStatus.Store(settings.IgnoreUsageLimitStatus)
 	s.retryIntervalMS.Store(int64(normalizeRetryIntervalMS(settings.RetryIntervalMS)))
 	s.transportRetryPolicy.Store(database.NormalizeTransportRetryPolicy(settings.TransportRetryPolicy))
+	s.SetModelCooldownSettings(database.ModelCooldownSettings{
+		RelayMode:           settings.RelayModelCooldownMode,
+		RelaySeconds:        settings.RelayModelCooldownSeconds,
+		RelayBackoffEnabled: settings.RelayModelCooldownBackoffEnabled,
+		OAuthMode:           settings.OAuthModelCooldownMode,
+		OAuthSeconds:        settings.OAuthModelCooldownSeconds,
+		OAuthBackoffEnabled: settings.OAuthModelCooldownBackoffEnabled,
+	})
 
 	s.globalAutoPause5hThreshold = normalizeQuotaAutoPauseThreshold(settings.AutoPause5hThreshold)
 	s.globalAutoPause7dThreshold = normalizeQuotaAutoPauseThreshold(settings.AutoPause7dThreshold)
@@ -4223,6 +4279,19 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	account.CreditEnabled = row.CreditEnabled
 	account.CreditSkipUsageWindow = row.CreditSkipUsageWindow
 	account.IgnoreUsageLimitStatusOverride = row.GetCredentialOptionalBool("ignore_usage_limit_status_override")
+	if rawMode := strings.TrimSpace(row.GetCredential("model_cooldown_mode_override")); rawMode != "" {
+		if database.IsValidModelCooldownMode(rawMode) {
+			mode := database.NormalizeModelCooldownMode(rawMode, database.ModelCooldownModeAdaptive)
+			account.ModelCooldownModeOverride = &mode
+		}
+	}
+	if seconds, ok := row.GetCredentialInt64("model_cooldown_seconds_override"); ok {
+		if seconds >= 1 && seconds <= database.MaxModelCooldownSeconds {
+			value := int(seconds)
+			account.ModelCooldownSecondsOverride = &value
+		}
+	}
+	account.ModelCooldownBackoffOverride = row.GetCredentialOptionalBool("model_cooldown_backoff_override")
 	account.recomputeEffectiveIgnoreUsageLimitStatus(s.IgnoreUsageLimitStatus())
 	account.SkipWarmTier = row.SkipWarmTier
 	if row.Status == "error" {
@@ -6972,6 +7041,10 @@ func (s *Store) markCooldown(acc *Account, duration time.Duration, reason string
 }
 
 func (s *Store) MarkModelCooldown(acc *Account, model string, duration time.Duration, reason string) ModelCooldown {
+	return s.MarkModelCooldownWithBackoff(acc, model, duration, reason, true)
+}
+
+func (s *Store) MarkModelCooldownWithBackoff(acc *Account, model string, duration time.Duration, reason string, backoffEnabled bool) ModelCooldown {
 	if acc == nil {
 		return ModelCooldown{}
 	}
@@ -6993,7 +7066,7 @@ func (s *Store) MarkModelCooldown(acc *Account, model string, duration time.Dura
 	}
 	current := acc.ModelCooldowns[key]
 	level := current.BackoffLevel
-	if current.ResetAt.After(now) {
+	if backoffEnabled && current.ResetAt.After(now) {
 		level++
 		duration *= 2
 		for i := 0; i < level-1; i++ {
@@ -7002,6 +7075,8 @@ func (s *Store) MarkModelCooldown(acc *Account, model string, duration time.Dura
 		if duration > 30*time.Minute {
 			duration = 30 * time.Minute
 		}
+	} else if !backoffEnabled {
+		level = 0
 	}
 	resetAt := now.Add(duration)
 	if reason == "" {
@@ -7092,6 +7167,92 @@ func (s *Store) ClearModelCooldown(acc *Account, model string) {
 	if err := s.db.ClearModelCooldown(ctx, acc.DBID, key); err != nil {
 		log.Printf("[账号 %d] 清理模型冷却失败 model=%s: %v", acc.DBID, key, err)
 	}
+}
+
+func (s *Store) ClearAllModelCooldowns(acc *Account) int {
+	if acc == nil {
+		return 0
+	}
+	models := acc.ClearAllModelCooldowns()
+	for _, model := range models {
+		s.deleteCachedModelCooldown(acc.DBID, model)
+	}
+	s.fastSchedulerUpdate(acc)
+	if s.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.db.ClearAllModelCooldowns(ctx, acc.DBID); err != nil {
+			log.Printf("[账号 %d] 清理全部模型冷却失败: %v", acc.DBID, err)
+		}
+	}
+	return len(models)
+}
+
+type ModelCooldownPolicy struct {
+	Mode           string
+	Seconds        int
+	BackoffEnabled bool
+	Source         string
+}
+
+func (s *Store) SetModelCooldownSettings(settings database.ModelCooldownSettings) {
+	if s == nil {
+		return
+	}
+	s.modelCooldownSettings.Store(database.NormalizeModelCooldownSettings(settings))
+}
+
+func (s *Store) GetModelCooldownSettings() database.ModelCooldownSettings {
+	if s == nil {
+		return database.DefaultModelCooldownSettings()
+	}
+	if value := s.modelCooldownSettings.Load(); value != nil {
+		if settings, ok := value.(database.ModelCooldownSettings); ok {
+			return database.NormalizeModelCooldownSettings(settings)
+		}
+	}
+	return database.DefaultModelCooldownSettings()
+}
+
+func (s *Store) ResolveModelCooldownPolicy(acc *Account) ModelCooldownPolicy {
+	settings := s.GetModelCooldownSettings()
+	policy := ModelCooldownPolicy{
+		Mode:           settings.OAuthMode,
+		Seconds:        settings.OAuthSeconds,
+		BackoffEnabled: settings.OAuthBackoffEnabled,
+		Source:         "oauth",
+	}
+	if acc != nil && acc.IsRelayStyle() && !acc.IsGrokAPI() {
+		policy.Mode = settings.RelayMode
+		policy.Seconds = settings.RelaySeconds
+		policy.BackoffEnabled = settings.RelayBackoffEnabled
+		policy.Source = "relay"
+	}
+	if acc != nil {
+		mode, seconds, backoff := acc.GetModelCooldownPolicyOverride()
+		if mode != nil {
+			policy.Mode = database.NormalizeModelCooldownMode(*mode, policy.Mode)
+			policy.Source = "account"
+		}
+		if seconds != nil {
+			policy.Seconds = database.NormalizeModelCooldownSeconds(*seconds, policy.Seconds)
+			policy.Source = "account"
+		}
+		if backoff != nil {
+			policy.BackoffEnabled = *backoff
+			policy.Source = "account"
+		}
+	}
+	return policy
+}
+
+func (s *Store) ApplyAccountModelCooldownPolicyOverride(dbID int64, mode *string, seconds *int, backoff *bool) bool {
+	acc := s.FindByID(dbID)
+	if acc == nil {
+		return false
+	}
+	acc.SetModelCooldownPolicyOverride(mode, seconds, backoff)
+	return true
 }
 
 // MarkError 标记账号为错误状态，并持久化到数据库。

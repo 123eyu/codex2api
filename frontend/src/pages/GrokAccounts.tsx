@@ -2763,6 +2763,47 @@ export default function GrokAccounts({
           if (!detailAccount) return;
           void handleResetStatus(detailAccount);
         }}
+        onSaveModelCooldownPolicy={(data) => {
+          if (!detailAccount) return;
+          void api
+            .updateAccountModelCooldownPolicy(detailAccount.id, data)
+            .then(() => {
+              showToast(t("accounts.modelCooldownPolicySaved"));
+              return reload();
+            })
+            .catch((error) =>
+              showToast(
+                t("accounts.modelCooldownPolicySaveFailed", {
+                  error: getErrorMessage(error),
+                }),
+                "error",
+              ),
+            );
+        }}
+        onClearModelCooldown={(model) => {
+          if (!detailAccount) return;
+          void api
+            .clearAccountModelCooldown(detailAccount.id, model)
+            .then(() => {
+              showToast(t("accounts.modelCooldownCleared", { model }));
+              return reload();
+            })
+            .catch((error) => showToast(getErrorMessage(error), "error"));
+        }}
+        onClearAllModelCooldowns={() => {
+          if (!detailAccount) return;
+          void api
+            .clearAllAccountModelCooldowns(detailAccount.id)
+            .then((result) => {
+              showToast(
+                t("accounts.allModelCooldownsCleared", {
+                  count: result.cleared,
+                }),
+              );
+              return reload();
+            })
+            .catch((error) => showToast(getErrorMessage(error), "error"));
+        }}
         onResetCredits={() => {
           // Grok 无额度券；Sheet 内已隐藏。
         }}

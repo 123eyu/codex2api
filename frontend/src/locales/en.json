@@ -1258,7 +1258,18 @@
     "billed": "Cost",
     "importGroupsLabel": "Bind to account groups",
     "importGroupsPlaceholder": "Pick groups (optional)",
-    "importGroupsHint": "Accounts created by this run join the selected groups. Existing accounts matched as duplicates keep their current groups. Leave empty to skip binding."
+    "importGroupsHint": "Accounts created by this run join the selected groups. Existing accounts matched as duplicates keep their current groups. Leave empty to skip binding.",
+    "modelCooldownPolicy": "Model cooldown policy",
+    "clearAllModelCooldowns": "Clear all",
+    "modelCooldownEffective": "Effective: {{mode}} · {{seconds}} sec · backoff {{backoff}}",
+    "modelCooldownModeOverride": "Account override",
+    "modelCooldownInherit": "Inherit system default",
+    "saveModelCooldownPolicy": "Save cooldown policy",
+    "clearModelCooldown": "Clear this model cooldown",
+    "modelCooldownPolicySaved": "Account model cooldown policy saved",
+    "modelCooldownPolicySaveFailed": "Failed to save model cooldown policy: {{error}}",
+    "modelCooldownCleared": "Cleared model cooldown for {{model}}",
+    "allModelCooldownsCleared": "Cleared {{count}} model cooldowns"
   },
   "invite": {
     "entry": "Codex Invite",
@@ -3377,7 +3388,22 @@
     "codexPreflightSSEPassthrough": "Preflight SSE Passthrough (Legacy Compat)",
     "codexPreflightSSEPassthroughDesc": "Forward pre-content upstream metadata events (codex.rate_limits / codex.response.metadata / response.metadata) to the downstream immediately instead of buffering them until the first real content event. For multi-tier gateways that treat the first SSE data frame as time-to-first-response.",
     "codexPreflightSSEPassthroughEnabled": "Enable immediate passthrough",
-    "codexPreflightSSEPassthroughEnabledDesc": "Warning: legacy compatibility mode, off by default. When enabled, HTTP 200 is committed before the first content event; upstream failures in that window can only be delivered as 200 + SSE failed frames — real HTTP error codes, pre-first-token silent account rotation, and overflow auto-compact are all unavailable in that window. Hot-reloads without restart."
+    "codexPreflightSSEPassthroughEnabledDesc": "Warning: legacy compatibility mode, off by default. When enabled, HTTP 200 is committed before the first content event; upstream failures in that window can only be delivered as 200 + SSE failed frames — real HTTP error codes, pre-first-token silent account rotation, and overflow auto-compact are all unavailable in that window. Hot-reloads without restart.",
+    "modelCooldownTitle": "Model 429 cooldown policy",
+    "modelCooldownDesc": "Control model-level 429 cooldowns separately for direct API upstreams and OAuth account pools. Explicit 5h/7d usage windows still follow their real reset times.",
+    "relayModelCooldownTitle": "API plan / direct upstream",
+    "relayModelCooldownDesc": "Persistent model cooldown is off by default. Transient 429s rotate upstreams and return a standard 429 only after retries are exhausted.",
+    "oauthModelCooldownTitle": "OAuth / subscription pool",
+    "oauthModelCooldownDesc": "Keep account-pool protection while allowing cooldowns to be disabled, fixed, or adaptive.",
+    "modelCooldownMode": "Cooldown mode",
+    "modelCooldownModeDesc": "Off stores no model cooldown; fixed uses a constant duration; adaptive can back off on repeated 429s.",
+    "modelCooldownModeOff": "Off",
+    "modelCooldownModeFixed": "Fixed",
+    "modelCooldownModeAdaptive": "Adaptive",
+    "modelCooldownSeconds": "Base duration",
+    "modelCooldownSecondsDesc": "Base model cooldown duration from 1 to 1800 seconds.",
+    "modelCooldownBackoff": "Exponential backoff",
+    "modelCooldownBackoffDesc": "Adaptive mode only. Repeated 429s extend the cooldown up to 30 minutes."
   },
   "proxies": {
     "description": "Manage the proxy pool for round-robin use, or bind a proxy to accounts in the account pool",

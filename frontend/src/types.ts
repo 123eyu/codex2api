@@ -8,6 +8,7 @@ export interface ToastState {
 
 export type AccountStatus = 'active' | 'ready' | 'cooldown' | 'error' | 'refreshing' | 'paused' | 'quota_paused' | string
 export type CodexClientMetadataMode = 'auto' | 'always' | 'off'
+export type ModelCooldownMode = 'off' | 'fixed' | 'adaptive'
 
 export interface StatsChannelCounts {
   total: number
@@ -185,6 +186,12 @@ export interface AccountRow {
     reset_at: ISODateString
     remaining_seconds: number
   }>
+  model_cooldown_mode_override?: ModelCooldownMode | null
+  model_cooldown_seconds_override?: number | null
+  model_cooldown_backoff_override?: boolean | null
+  model_cooldown_mode_effective?: ModelCooldownMode
+  model_cooldown_seconds_effective?: number
+  model_cooldown_backoff_effective?: boolean
   enabled?: boolean
   locked?: boolean
   credit_enabled?: boolean
@@ -1007,6 +1014,12 @@ export interface SystemSettings {
   response_cache_local_max_entry_bytes: number
   response_cache_reconstruct_max_bytes: number
   readonly response_cache_config_generation: number
+  relay_model_cooldown_mode: ModelCooldownMode
+  relay_model_cooldown_seconds: number
+  relay_model_cooldown_backoff_enabled: boolean
+  oauth_model_cooldown_mode: ModelCooldownMode
+  oauth_model_cooldown_seconds: number
+  oauth_model_cooldown_backoff_enabled: boolean
   expired_cleaned?: number
   model_mapping: string
   codex_model_mapping: string

@@ -603,6 +603,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PATCH("/accounts/:id/note", h.UpdateAccountNote)
 	api.POST("/accounts/:id/lock", h.ToggleAccountLock)
 	api.POST("/accounts/:id/reset-status", h.ResetAccountStatus)
+	api.PATCH("/accounts/:id/model-cooldown-policy", h.UpdateAccountModelCooldownPolicy)
+	api.DELETE("/accounts/:id/model-cooldowns", h.ClearAllAccountModelCooldowns)
+	api.DELETE("/accounts/:id/model-cooldowns/:model", h.ClearAccountModelCooldown)
 	api.POST("/accounts/:id/reset-credits", h.ResetCredits)
 	api.GET("/accounts/:id/reset-credits", h.GetResetCredits)
 	api.POST("/accounts/:id/invite", h.SendInvite)
@@ -944,84 +947,90 @@ type accountResponse struct {
 	CreditSkipUsageWindow bool   `json:"credit_skip_usage_window"`
 	// UsingCredits 是与 Status 并列的独立信号：用量窗口已打满但积分顶着，
 	// 状态仍是 active（可调度），前端据此在状态徽章旁并列一个「使用积分」徽章。
-	UsingCredits               bool                        `json:"using_credits,omitempty"`
-	SkipWarmTier               bool                        `json:"skip_warm_tier"`
-	AccountType                string                      `json:"account_type,omitempty"`
-	AccessTokenType            string                      `json:"access_token_type,omitempty"`
-	OpenAIResponsesAPI         bool                        `json:"openai_responses_api,omitempty"`
-	GrokAPI                    bool                        `json:"grok_api,omitempty"`
-	AgentIdentity              bool                        `json:"agent_identity,omitempty"`
-	GrokAuthKind               string                      `json:"grok_auth_kind,omitempty"`
-	GrokPlan                   *auth.GrokPlan              `json:"grok_plan,omitempty"`
-	GrokBilling                json.RawMessage             `json:"grok_billing,omitempty"`
-	GrokRateLimit              *auth.GrokRateLimitSnapshot `json:"grok_rate_limit,omitempty"`
-	GrokFreeQuota              *auth.GrokFreeQuotaSnapshot `json:"grok_free_quota,omitempty"`
-	BaseURL                    string                      `json:"base_url,omitempty"`
-	Models                     []string                    `json:"models,omitempty"`
-	ModelMapping               string                      `json:"model_mapping,omitempty"`
-	CodexClientMetadataMode    string                      `json:"codex_client_metadata_mode,omitempty"`
-	CustomHeaders              map[string]string           `json:"custom_headers,omitempty"`
-	HealthTier                 string                      `json:"health_tier"`
-	SchedulerScore             float64                     `json:"scheduler_score"`
-	DispatchScore              float64                     `json:"dispatch_score"`
-	ScoreBiasOverride          *int64                      `json:"score_bias_override"`
-	ScoreBiasEffective         int64                       `json:"score_bias_effective"`
-	BaseConcurrencyOverride    *int64                      `json:"base_concurrency_override"`
-	BaseConcurrencyEffective   int64                       `json:"base_concurrency_effective"`
-	ConcurrencyCap             int64                       `json:"dynamic_concurrency_limit"`
-	ProxyURL                   string                      `json:"proxy_url"`
-	CreatedAt                  string                      `json:"created_at"`
-	UpdatedAt                  string                      `json:"updated_at"`
-	CodexUsageUpdatedAt        string                      `json:"codex_usage_updated_at,omitempty"`
-	Codex5HUsageUpdatedAt      string                      `json:"codex_5h_usage_updated_at,omitempty"`
-	ActiveRequests             int64                       `json:"active_requests"`
-	TotalRequests              int64                       `json:"total_requests"`
-	LastUsedAt                 string                      `json:"last_used_at"`
-	SuccessRequests            int64                       `json:"success_requests"`
-	ErrorRequests              int64                       `json:"error_requests"`
-	RetryErrorRequests         int64                       `json:"retry_error_requests"`
-	RateLimitAttempts          int64                       `json:"rate_limit_attempts"`
-	UsagePercent7d             *float64                    `json:"usage_percent_7d"`
-	UsagePercent5h             *float64                    `json:"usage_percent_5h"`
-	RateLimitResetCredits      *int                        `json:"rate_limit_reset_credits"`
-	ApplicableResetCredits     *int                        `json:"applicable_reset_credits"`
-	CreditsBalance             *string                     `json:"credits_balance"`
-	CreditsHasCredits          *bool                       `json:"credits_has_credits"`
-	CreditsUnlimited           *bool                       `json:"credits_unlimited"`
-	CreditsOverageLimitReached *bool                       `json:"credits_overage_limit_reached"`
-	AutoPause5hThreshold       *float64                    `json:"auto_pause_5h_threshold"`
-	AutoPause7dThreshold       *float64                    `json:"auto_pause_7d_threshold"`
-	AutoPause5hDisabled        bool                        `json:"auto_pause_5h_disabled"`
-	AutoPause7dDisabled        bool                        `json:"auto_pause_7d_disabled"`
-	UsageLimitOverride         *bool                       `json:"ignore_usage_limit_status_override"`
-	UsageLimitEffective        bool                        `json:"ignore_usage_limit_status_effective"`
-	DispatchCountLimit         *int64                      `json:"dispatch_count_limit"`
-	DispatchCountUsed          int64                       `json:"dispatch_count_used,omitempty"`
-	DispatchCountResetAt       string                      `json:"dispatch_count_reset_at,omitempty"`
-	DispatchCountLimited       bool                        `json:"dispatch_count_limited,omitempty"`
-	SchedulerPriority          *int64                      `json:"scheduler_priority"`
-	Usage5hDetail              *accountUsageWindow         `json:"usage_5h_detail,omitempty"`
-	Usage7dDetail              *accountUsageWindow         `json:"usage_7d_detail,omitempty"`
-	Reset5hAt                  string                      `json:"reset_5h_at,omitempty"`
-	Reset7dAt                  string                      `json:"reset_7d_at,omitempty"`
-	Window7dKind               string                      `json:"usage_window_7d_kind,omitempty"`    // "monthly"(team 月窗)/"weekly"/""；供前端标「30天」而非误标「7天」
-	Window7dSeconds            *int64                      `json:"usage_window_7d_seconds,omitempty"` // 长窗口真实周期秒数
-	Billed5h                   *float64                    `json:"billed_5h"`
-	Billed7d                   *float64                    `json:"billed_7d"`
-	ScoreBreakdown             schedulerBreakdownResponse  `json:"scheduler_breakdown"`
-	LastUnauthorizedAt         string                      `json:"last_unauthorized_at,omitempty"`
-	LastRateLimitedAt          string                      `json:"last_rate_limited_at,omitempty"`
-	LastTimeoutAt              string                      `json:"last_timeout_at,omitempty"`
-	LastServerErrorAt          string                      `json:"last_server_error_at,omitempty"`
-	CooldownReason             string                      `json:"cooldown_reason,omitempty"`
-	CooldownUntil              string                      `json:"cooldown_until,omitempty"`
-	ModelCooldowns             []modelCooldownResponse     `json:"model_cooldowns,omitempty"`
-	Enabled                    bool                        `json:"enabled"`
-	Locked                     bool                        `json:"locked"`
-	AllowedAPIKeyIDs           []int64                     `json:"allowed_api_key_ids"`
-	Tags                       []string                    `json:"tags"`
-	GroupIDs                   []int64                     `json:"group_ids"`
-	Note                       string                      `json:"note"`
+	UsingCredits                  bool                        `json:"using_credits,omitempty"`
+	SkipWarmTier                  bool                        `json:"skip_warm_tier"`
+	AccountType                   string                      `json:"account_type,omitempty"`
+	AccessTokenType               string                      `json:"access_token_type,omitempty"`
+	OpenAIResponsesAPI            bool                        `json:"openai_responses_api,omitempty"`
+	GrokAPI                       bool                        `json:"grok_api,omitempty"`
+	AgentIdentity                 bool                        `json:"agent_identity,omitempty"`
+	GrokAuthKind                  string                      `json:"grok_auth_kind,omitempty"`
+	GrokPlan                      *auth.GrokPlan              `json:"grok_plan,omitempty"`
+	GrokBilling                   json.RawMessage             `json:"grok_billing,omitempty"`
+	GrokRateLimit                 *auth.GrokRateLimitSnapshot `json:"grok_rate_limit,omitempty"`
+	GrokFreeQuota                 *auth.GrokFreeQuotaSnapshot `json:"grok_free_quota,omitempty"`
+	BaseURL                       string                      `json:"base_url,omitempty"`
+	Models                        []string                    `json:"models,omitempty"`
+	ModelMapping                  string                      `json:"model_mapping,omitempty"`
+	CodexClientMetadataMode       string                      `json:"codex_client_metadata_mode,omitempty"`
+	CustomHeaders                 map[string]string           `json:"custom_headers,omitempty"`
+	HealthTier                    string                      `json:"health_tier"`
+	SchedulerScore                float64                     `json:"scheduler_score"`
+	DispatchScore                 float64                     `json:"dispatch_score"`
+	ScoreBiasOverride             *int64                      `json:"score_bias_override"`
+	ScoreBiasEffective            int64                       `json:"score_bias_effective"`
+	BaseConcurrencyOverride       *int64                      `json:"base_concurrency_override"`
+	BaseConcurrencyEffective      int64                       `json:"base_concurrency_effective"`
+	ConcurrencyCap                int64                       `json:"dynamic_concurrency_limit"`
+	ProxyURL                      string                      `json:"proxy_url"`
+	CreatedAt                     string                      `json:"created_at"`
+	UpdatedAt                     string                      `json:"updated_at"`
+	CodexUsageUpdatedAt           string                      `json:"codex_usage_updated_at,omitempty"`
+	Codex5HUsageUpdatedAt         string                      `json:"codex_5h_usage_updated_at,omitempty"`
+	ActiveRequests                int64                       `json:"active_requests"`
+	TotalRequests                 int64                       `json:"total_requests"`
+	LastUsedAt                    string                      `json:"last_used_at"`
+	SuccessRequests               int64                       `json:"success_requests"`
+	ErrorRequests                 int64                       `json:"error_requests"`
+	RetryErrorRequests            int64                       `json:"retry_error_requests"`
+	RateLimitAttempts             int64                       `json:"rate_limit_attempts"`
+	UsagePercent7d                *float64                    `json:"usage_percent_7d"`
+	UsagePercent5h                *float64                    `json:"usage_percent_5h"`
+	RateLimitResetCredits         *int                        `json:"rate_limit_reset_credits"`
+	ApplicableResetCredits        *int                        `json:"applicable_reset_credits"`
+	CreditsBalance                *string                     `json:"credits_balance"`
+	CreditsHasCredits             *bool                       `json:"credits_has_credits"`
+	CreditsUnlimited              *bool                       `json:"credits_unlimited"`
+	CreditsOverageLimitReached    *bool                       `json:"credits_overage_limit_reached"`
+	AutoPause5hThreshold          *float64                    `json:"auto_pause_5h_threshold"`
+	AutoPause7dThreshold          *float64                    `json:"auto_pause_7d_threshold"`
+	AutoPause5hDisabled           bool                        `json:"auto_pause_5h_disabled"`
+	AutoPause7dDisabled           bool                        `json:"auto_pause_7d_disabled"`
+	UsageLimitOverride            *bool                       `json:"ignore_usage_limit_status_override"`
+	UsageLimitEffective           bool                        `json:"ignore_usage_limit_status_effective"`
+	DispatchCountLimit            *int64                      `json:"dispatch_count_limit"`
+	DispatchCountUsed             int64                       `json:"dispatch_count_used,omitempty"`
+	DispatchCountResetAt          string                      `json:"dispatch_count_reset_at,omitempty"`
+	DispatchCountLimited          bool                        `json:"dispatch_count_limited,omitempty"`
+	SchedulerPriority             *int64                      `json:"scheduler_priority"`
+	Usage5hDetail                 *accountUsageWindow         `json:"usage_5h_detail,omitempty"`
+	Usage7dDetail                 *accountUsageWindow         `json:"usage_7d_detail,omitempty"`
+	Reset5hAt                     string                      `json:"reset_5h_at,omitempty"`
+	Reset7dAt                     string                      `json:"reset_7d_at,omitempty"`
+	Window7dKind                  string                      `json:"usage_window_7d_kind,omitempty"`    // "monthly"(team 月窗)/"weekly"/""；供前端标「30天」而非误标「7天」
+	Window7dSeconds               *int64                      `json:"usage_window_7d_seconds,omitempty"` // 长窗口真实周期秒数
+	Billed5h                      *float64                    `json:"billed_5h"`
+	Billed7d                      *float64                    `json:"billed_7d"`
+	ScoreBreakdown                schedulerBreakdownResponse  `json:"scheduler_breakdown"`
+	LastUnauthorizedAt            string                      `json:"last_unauthorized_at,omitempty"`
+	LastRateLimitedAt             string                      `json:"last_rate_limited_at,omitempty"`
+	LastTimeoutAt                 string                      `json:"last_timeout_at,omitempty"`
+	LastServerErrorAt             string                      `json:"last_server_error_at,omitempty"`
+	CooldownReason                string                      `json:"cooldown_reason,omitempty"`
+	CooldownUntil                 string                      `json:"cooldown_until,omitempty"`
+	ModelCooldowns                []modelCooldownResponse     `json:"model_cooldowns,omitempty"`
+	ModelCooldownModeOverride     *string                     `json:"model_cooldown_mode_override"`
+	ModelCooldownSecondsOverride  *int                        `json:"model_cooldown_seconds_override"`
+	ModelCooldownBackoffOverride  *bool                       `json:"model_cooldown_backoff_override"`
+	ModelCooldownModeEffective    string                      `json:"model_cooldown_mode_effective"`
+	ModelCooldownSecondsEffective int                         `json:"model_cooldown_seconds_effective"`
+	ModelCooldownBackoffEffective bool                        `json:"model_cooldown_backoff_effective"`
+	Enabled                       bool                        `json:"enabled"`
+	Locked                        bool                        `json:"locked"`
+	AllowedAPIKeyIDs              []int64                     `json:"allowed_api_key_ids"`
+	Tags                          []string                    `json:"tags"`
+	GroupIDs                      []int64                     `json:"group_ids"`
+	Note                          string                      `json:"note"`
 	// 图片配额信息
 	ImageQuotaRemaining *int   `json:"image_quota_remaining,omitempty"`
 	ImageQuotaTotal     *int   `json:"image_quota_total,omitempty"`
@@ -1221,6 +1230,11 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 		resp.DispatchCountLimit = accountDispatchCountLimit(row)
 		resp.SchedulerPriority = accountSchedulerPriority(row)
 		if acc, ok := accountMap[row.ID]; ok {
+			resp.ModelCooldownModeOverride, resp.ModelCooldownSecondsOverride, resp.ModelCooldownBackoffOverride = acc.GetModelCooldownPolicyOverride()
+			effectiveCooldownPolicy := h.store.ResolveModelCooldownPolicy(acc)
+			resp.ModelCooldownModeEffective = effectiveCooldownPolicy.Mode
+			resp.ModelCooldownSecondsEffective = effectiveCooldownPolicy.Seconds
+			resp.ModelCooldownBackoffEffective = effectiveCooldownPolicy.BackoffEnabled
 			resp.UsageLimitOverride = acc.GetIgnoreUsageLimitStatusOverride()
 			resp.UsageLimitEffective = acc.IgnoresUsageLimitStatus()
 			if isGrokAccount {
@@ -5546,6 +5560,7 @@ func (h *Handler) ResetAccountStatus(c *gin.Context) {
 	}
 
 	h.store.ClearCooldown(acc)
+	h.store.ClearAllModelCooldowns(acc)
 	acc.ClearUsageCache()
 	h.syncAccountPlanAfterReset(c.Request.Context(), acc)
 	writeMessage(c, http.StatusOK, "账号状态已重置")
@@ -5570,6 +5585,7 @@ func (h *Handler) BatchResetStatus(c *gin.Context) {
 			continue
 		}
 		h.store.ClearCooldown(acc)
+		h.store.ClearAllModelCooldowns(acc)
 		acc.ClearUsageCache()
 		h.syncAccountPlanAfterReset(c.Request.Context(), acc)
 		success++
@@ -5579,6 +5595,146 @@ func (h *Handler) BatchResetStatus(c *gin.Context) {
 		"message": fmt.Sprintf("已重置 %d 个账号状态", success),
 		"success": success,
 		"failed":  fail,
+	})
+}
+
+func (h *Handler) UpdateAccountModelCooldownPolicy(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效的账号 ID")
+		return
+	}
+	acc := h.store.FindByID(id)
+	if acc == nil {
+		writeError(c, http.StatusNotFound, "账号不存在")
+		return
+	}
+
+	var raw map[string]json.RawMessage
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&raw); err != nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	allowed := map[string]bool{
+		"mode": true, "seconds": true, "backoff_enabled": true,
+	}
+	for key := range raw {
+		if !allowed[key] {
+			writeError(c, http.StatusBadRequest, "未知字段: "+key)
+			return
+		}
+	}
+	if len(raw) == 0 {
+		writeError(c, http.StatusBadRequest, "至少提供一个策略字段")
+		return
+	}
+
+	currentMode, currentSeconds, currentBackoff := acc.GetModelCooldownPolicyOverride()
+	mode, seconds, backoff := currentMode, currentSeconds, currentBackoff
+	updates := make(map[string]interface{})
+	if value, ok := raw["mode"]; ok {
+		if string(value) == "null" {
+			mode = nil
+			updates["model_cooldown_mode_override"] = nil
+		} else {
+			var parsed string
+			if json.Unmarshal(value, &parsed) != nil || !database.IsValidModelCooldownMode(parsed) {
+				writeError(c, http.StatusBadRequest, "mode 必须是 off、fixed、adaptive 或 null")
+				return
+			}
+			parsed = database.NormalizeModelCooldownMode(parsed, database.ModelCooldownModeAdaptive)
+			mode = &parsed
+			updates["model_cooldown_mode_override"] = parsed
+		}
+	}
+	if value, ok := raw["seconds"]; ok {
+		if string(value) == "null" {
+			seconds = nil
+			updates["model_cooldown_seconds_override"] = nil
+		} else {
+			var parsed int
+			if json.Unmarshal(value, &parsed) != nil || parsed < 1 || parsed > database.MaxModelCooldownSeconds {
+				writeError(c, http.StatusBadRequest, fmt.Sprintf("seconds 必须在 1-%d 之间或为 null", database.MaxModelCooldownSeconds))
+				return
+			}
+			seconds = &parsed
+			updates["model_cooldown_seconds_override"] = parsed
+		}
+	}
+	if value, ok := raw["backoff_enabled"]; ok {
+		if string(value) == "null" {
+			backoff = nil
+			updates["model_cooldown_backoff_override"] = nil
+		} else {
+			var parsed bool
+			if json.Unmarshal(value, &parsed) != nil {
+				writeError(c, http.StatusBadRequest, "backoff_enabled 必须是布尔值或 null")
+				return
+			}
+			backoff = &parsed
+			updates["model_cooldown_backoff_override"] = parsed
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	if err := h.db.UpdateCredentials(ctx, id, updates); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(c, http.StatusNotFound, "账号不存在")
+			return
+		}
+		writeError(c, http.StatusInternalServerError, "保存模型冷却策略失败: "+err.Error())
+		return
+	}
+	h.store.ApplyAccountModelCooldownPolicyOverride(id, mode, seconds, backoff)
+	effective := h.store.ResolveModelCooldownPolicy(acc)
+	c.JSON(http.StatusOK, gin.H{
+		"message":                   "模型冷却策略已更新",
+		"mode_override":             mode,
+		"seconds_override":          seconds,
+		"backoff_enabled_override":  backoff,
+		"mode_effective":            effective.Mode,
+		"seconds_effective":         effective.Seconds,
+		"backoff_enabled_effective": effective.BackoffEnabled,
+	})
+}
+
+func (h *Handler) ClearAccountModelCooldown(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效的账号 ID")
+		return
+	}
+	acc := h.store.FindByID(id)
+	if acc == nil {
+		writeError(c, http.StatusNotFound, "账号不存在")
+		return
+	}
+	model := strings.TrimSpace(c.Param("model"))
+	if model == "" {
+		writeError(c, http.StatusBadRequest, "模型不能为空")
+		return
+	}
+	h.store.ClearModelCooldown(acc, model)
+	writeMessage(c, http.StatusOK, "模型冷却已清除")
+}
+
+func (h *Handler) ClearAllAccountModelCooldowns(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效的账号 ID")
+		return
+	}
+	acc := h.store.FindByID(id)
+	if acc == nil {
+		writeError(c, http.StatusNotFound, "账号不存在")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"message": "账号全部模型冷却已清除",
+		"cleared": h.store.ClearAllModelCooldowns(acc),
 	})
 }
 
@@ -7265,6 +7421,12 @@ type settingsResponse struct {
 	ResponseCacheLocalMaxEntryBytes    int64                            `json:"response_cache_local_max_entry_bytes"`
 	ResponseCacheReconstructMaxBytes   int64                            `json:"response_cache_reconstruct_max_bytes"`
 	ResponseCacheConfigGeneration      int64                            `json:"response_cache_config_generation"`
+	RelayModelCooldownMode             string                           `json:"relay_model_cooldown_mode"`
+	RelayModelCooldownSeconds          int                              `json:"relay_model_cooldown_seconds"`
+	RelayModelCooldownBackoffEnabled   bool                             `json:"relay_model_cooldown_backoff_enabled"`
+	OAuthModelCooldownMode             string                           `json:"oauth_model_cooldown_mode"`
+	OAuthModelCooldownSeconds          int                              `json:"oauth_model_cooldown_seconds"`
+	OAuthModelCooldownBackoffEnabled   bool                             `json:"oauth_model_cooldown_backoff_enabled"`
 }
 
 type rawJSON = json.RawMessage
@@ -7391,6 +7553,12 @@ type updateSettingsReq struct {
 	ResponseCacheLocalMaxEntryBytes     *int64   `json:"response_cache_local_max_entry_bytes"`
 	ResponseCacheReconstructMaxBytes    *int64   `json:"response_cache_reconstruct_max_bytes"`
 	ResponseCacheConfigGeneration       rawJSON  `json:"response_cache_config_generation"`
+	RelayModelCooldownMode              *string  `json:"relay_model_cooldown_mode"`
+	RelayModelCooldownSeconds           *int     `json:"relay_model_cooldown_seconds"`
+	RelayModelCooldownBackoffEnabled    *bool    `json:"relay_model_cooldown_backoff_enabled"`
+	OAuthModelCooldownMode              *string  `json:"oauth_model_cooldown_mode"`
+	OAuthModelCooldownSeconds           *int     `json:"oauth_model_cooldown_seconds"`
+	OAuthModelCooldownBackoffEnabled    *bool    `json:"oauth_model_cooldown_backoff_enabled"`
 }
 
 func updateSettingsHasFieldsOtherThanCustomPatterns(req updateSettingsReq) bool {
@@ -7971,6 +8139,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	if dbSettings != nil {
 		bgCfg = decodeBackgroundConfig(dbSettings.BackgroundConfig)
 	}
+	modelCooldownSettings := h.store.GetModelCooldownSettings()
 	c.JSON(http.StatusOK, settingsResponse{
 		SiteName:                            branding.SiteName,
 		SiteLogo:                            branding.SiteLogo,
@@ -7988,6 +8157,12 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		ResponseCacheLocalMaxEntryBytes:     responseCacheSettings.LocalMaxEntryBytes,
 		ResponseCacheReconstructMaxBytes:    responseCacheSettings.ReconstructMaxBytes,
 		ResponseCacheConfigGeneration:       responseCacheSettings.Generation,
+		RelayModelCooldownMode:              modelCooldownSettings.RelayMode,
+		RelayModelCooldownSeconds:           modelCooldownSettings.RelaySeconds,
+		RelayModelCooldownBackoffEnabled:    modelCooldownSettings.RelayBackoffEnabled,
+		OAuthModelCooldownMode:              modelCooldownSettings.OAuthMode,
+		OAuthModelCooldownSeconds:           modelCooldownSettings.OAuthSeconds,
+		OAuthModelCooldownBackoffEnabled:    modelCooldownSettings.OAuthBackoffEnabled,
 		BackgroundRefreshIntervalMinutes:    h.store.GetBackgroundRefreshIntervalMinutes(),
 		UsageProbeMaxAgeMinutes:             h.store.GetUsageProbeMaxAgeMinutes(),
 		UsageProbeConcurrency:               h.store.GetUsageProbeConcurrency(),
@@ -8226,6 +8401,29 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if req.ResponseCacheConfigGeneration != nil {
 		writeError(c, http.StatusBadRequest, "response_cache_config_generation 为只读字段")
 		return
+	}
+	modelCooldownUpdateRequested := req.RelayModelCooldownMode != nil ||
+		req.RelayModelCooldownSeconds != nil ||
+		req.RelayModelCooldownBackoffEnabled != nil ||
+		req.OAuthModelCooldownMode != nil ||
+		req.OAuthModelCooldownSeconds != nil ||
+		req.OAuthModelCooldownBackoffEnabled != nil
+	if req.RelayModelCooldownMode != nil && !database.IsValidModelCooldownMode(*req.RelayModelCooldownMode) {
+		writeError(c, http.StatusBadRequest, "relay_model_cooldown_mode 必须是 off、fixed 或 adaptive")
+		return
+	}
+	if req.OAuthModelCooldownMode != nil && !database.IsValidModelCooldownMode(*req.OAuthModelCooldownMode) {
+		writeError(c, http.StatusBadRequest, "oauth_model_cooldown_mode 必须是 off、fixed 或 adaptive")
+		return
+	}
+	for field, value := range map[string]*int{
+		"relay_model_cooldown_seconds": req.RelayModelCooldownSeconds,
+		"oauth_model_cooldown_seconds": req.OAuthModelCooldownSeconds,
+	} {
+		if value != nil && (*value < 1 || *value > database.MaxModelCooldownSeconds) {
+			writeError(c, http.StatusBadRequest, fmt.Sprintf("%s 必须在 1-%d 之间", field, database.MaxModelCooldownSeconds))
+			return
+		}
 	}
 	var submittedPromptFilterCustomPatterns []promptfilter.PatternConfig
 	var promptFilterPatternQuarantines []promptfilter.PatternQuarantine
@@ -9307,6 +9505,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
+		if modelCooldownUpdateRequested {
+			writeError(c, http.StatusInternalServerError, "保存模型冷却设置前无法持久化系统设置")
+			return
+		}
 		if responseCacheUpdateRequested {
 			writeError(c, http.StatusInternalServerError, "保存响应缓存设置前无法持久化系统设置")
 			return
@@ -9358,6 +9560,22 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 	}
 
+	if modelCooldownUpdateRequested {
+		committed, updateErr := h.db.UpdateModelCooldownSettings(c.Request.Context(), database.ModelCooldownSettingsUpdate{
+			RelayMode:           req.RelayModelCooldownMode,
+			RelaySeconds:        req.RelayModelCooldownSeconds,
+			RelayBackoffEnabled: req.RelayModelCooldownBackoffEnabled,
+			OAuthMode:           req.OAuthModelCooldownMode,
+			OAuthSeconds:        req.OAuthModelCooldownSeconds,
+			OAuthBackoffEnabled: req.OAuthModelCooldownBackoffEnabled,
+		})
+		if updateErr != nil {
+			writeError(c, http.StatusInternalServerError, updateErr.Error())
+			return
+		}
+		h.store.SetModelCooldownSettings(committed)
+	}
+
 	if responseCacheUpdateRequested {
 		committed, updateErr := cacheSettingsStore.UpdateResponseCacheSettings(
 			c.Request.Context(),
@@ -9394,6 +9612,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if adminAuthSource == "env" {
 		adminSecretForDisplay = ""
 	}
+	modelCooldownSettings := h.store.GetModelCooldownSettings()
 
 	c.JSON(http.StatusOK, settingsResponse{
 		SiteName:                            siteName,
@@ -9412,6 +9631,12 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		ResponseCacheLocalMaxEntryBytes:     responseCacheSettings.LocalMaxEntryBytes,
 		ResponseCacheReconstructMaxBytes:    responseCacheSettings.ReconstructMaxBytes,
 		ResponseCacheConfigGeneration:       responseCacheSettings.Generation,
+		RelayModelCooldownMode:              modelCooldownSettings.RelayMode,
+		RelayModelCooldownSeconds:           modelCooldownSettings.RelaySeconds,
+		RelayModelCooldownBackoffEnabled:    modelCooldownSettings.RelayBackoffEnabled,
+		OAuthModelCooldownMode:              modelCooldownSettings.OAuthMode,
+		OAuthModelCooldownSeconds:           modelCooldownSettings.OAuthSeconds,
+		OAuthModelCooldownBackoffEnabled:    modelCooldownSettings.OAuthBackoffEnabled,
 		BackgroundRefreshIntervalMinutes:    h.store.GetBackgroundRefreshIntervalMinutes(),
 		UsageProbeMaxAgeMinutes:             h.store.GetUsageProbeMaxAgeMinutes(),
 		UsageProbeConcurrency:               h.store.GetUsageProbeConcurrency(),

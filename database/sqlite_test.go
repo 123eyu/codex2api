@@ -1159,6 +1159,49 @@ func TestSQLiteModelCooldownPersistence(t *testing.T) {
 	}
 }
 
+func TestModelCooldownSettingsDefaultsAndUpdate(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	defaults, err := db.GetModelCooldownSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetModelCooldownSettings defaults: %v", err)
+	}
+	if defaults.RelayMode != ModelCooldownModeOff || defaults.RelaySeconds != 2 || defaults.RelayBackoffEnabled {
+		t.Fatalf("relay defaults = %#v", defaults)
+	}
+	if defaults.OAuthMode != ModelCooldownModeAdaptive || defaults.OAuthSeconds != 300 || !defaults.OAuthBackoffEnabled {
+		t.Fatalf("oauth defaults = %#v", defaults)
+	}
+
+	mode := ModelCooldownModeFixed
+	seconds := 7
+	backoff := false
+	updated, err := db.UpdateModelCooldownSettings(ctx, ModelCooldownSettingsUpdate{
+		RelayMode:           &mode,
+		RelaySeconds:        &seconds,
+		RelayBackoffEnabled: &backoff,
+	})
+	if err != nil {
+		t.Fatalf("UpdateModelCooldownSettings: %v", err)
+	}
+	if updated.RelayMode != mode || updated.RelaySeconds != seconds || updated.RelayBackoffEnabled {
+		t.Fatalf("updated relay settings = %#v", updated)
+	}
+	reloaded, err := db.GetModelCooldownSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetModelCooldownSettings reload: %v", err)
+	}
+	if reloaded != updated {
+		t.Fatalf("reloaded = %#v, want %#v", reloaded, updated)
+	}
+}
+
 func TestAccountRequestCountsSeparateRetryAttempts(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")

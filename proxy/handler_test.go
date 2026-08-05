@@ -3092,8 +3092,8 @@ func TestSendFinalUpstreamError_FallsBackForNonUsageLimit(t *testing.T) {
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
 	}
-	if got := recorder.Header().Get("Retry-After"); got != "" {
-		t.Fatalf("Retry-After = %q, want empty", got)
+	if got := recorder.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
 	}
 }
 
@@ -3565,6 +3565,35 @@ func TestApply429CooldownUnknown429UsesModelCooldown(t *testing.T) {
 	}
 	if !account.IsModelRateLimited("gpt-5.4") {
 		t.Fatal("expected model cooldown")
+	}
+}
+
+func TestApply429CooldownRelayDefaultDoesNotPersistCooldown(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	account := &auth.Account{
+		DBID:         103,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "https://api.example.test",
+		APIKey:       "test-key",
+		PlanType:     "api",
+	}
+
+	decision := Apply429Cooldown(
+		store,
+		account,
+		[]byte(`{"detail":"Rate limit exceeded"}`),
+		&http.Response{Header: make(http.Header)},
+		"gpt-5.6-sol",
+	)
+
+	if decision.Scope != rateLimitScopeModel || decision.Reason != "rate_limited_model" {
+		t.Fatalf("decision = %#v, want non-persistent model rate limit", decision)
+	}
+	if !decision.ResetAt.IsZero() || decision.Cooldown != 0 {
+		t.Fatalf("decision cooldown = %v reset=%v, want no persistent cooldown", decision.Cooldown, decision.ResetAt)
+	}
+	if account.IsModelRateLimited("gpt-5.6-sol") {
+		t.Fatal("relay account should remain schedulable after a transient 429")
 	}
 }
 
