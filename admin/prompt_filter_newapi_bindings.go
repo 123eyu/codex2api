@@ -28,6 +28,7 @@ type promptFilterNewAPIBindingCreateRequest struct {
 	PlatformName          string `json:"platform_name"`
 	Enabled               *bool  `json:"enabled"`
 	RequireSignedIdentity *bool  `json:"require_signed_identity"`
+	PromptFilterScope     string `json:"prompt_filter_scope"`
 }
 
 type promptFilterNewAPIBindingUpdateRequest struct {
@@ -35,6 +36,7 @@ type promptFilterNewAPIBindingUpdateRequest struct {
 	PlatformName          *string `json:"platform_name"`
 	Enabled               *bool   `json:"enabled"`
 	RequireSignedIdentity *bool   `json:"require_signed_identity"`
+	PromptFilterScope     *string `json:"prompt_filter_scope"`
 }
 
 type promptFilterNewAPIBindingSecretRequest struct {
@@ -48,6 +50,7 @@ type promptFilterNewAPIBindingResponse struct {
 	PlatformName            string     `json:"platform_name"`
 	Enabled                 bool       `json:"enabled"`
 	RequireSignedIdentity   bool       `json:"require_signed_identity"`
+	PromptFilterScope       string     `json:"prompt_filter_scope"`
 	SecretConfigured        bool       `json:"secret_configured"`
 	SecretMasked            string     `json:"secret_masked"`
 	PreviousSecretActive    bool       `json:"previous_secret_active"`
@@ -115,7 +118,15 @@ func (h *Handler) CreatePromptFilterNewAPIBinding(c *gin.Context) {
 	if req.RequireSignedIdentity != nil {
 		requireSigned = *req.RequireSignedIdentity
 	}
-	binding := &database.PromptFilterNewAPIBinding{APIKeyID: req.APIKeyID, PlatformCode: code, PlatformName: name, Secret: secret, Enabled: enabled, RequireSignedIdentity: requireSigned}
+	scope, validScope := database.NormalizePromptFilterScope(req.PromptFilterScope)
+	if !validScope {
+		writeError(c, http.StatusBadRequest, "Prompt 检查范围仅支持 inherit、local_only 或 off")
+		return
+	}
+	binding := &database.PromptFilterNewAPIBinding{
+		APIKeyID: req.APIKeyID, PlatformCode: code, PlatformName: name, Secret: secret,
+		Enabled: enabled, RequireSignedIdentity: requireSigned, PromptFilterScope: scope,
+	}
 	mutationCtx, cancelMutation := promptFilterBindingMutationContext(c)
 	defer cancelMutation()
 	h.settingsUpdateMu.Lock()
@@ -171,6 +182,15 @@ func (h *Handler) UpdatePromptFilterNewAPIBinding(c *gin.Context) {
 	}
 	if req.RequireSignedIdentity != nil {
 		binding.RequireSignedIdentity = *req.RequireSignedIdentity
+	}
+	if req.PromptFilterScope != nil {
+		scope, validScope := database.NormalizePromptFilterScope(*req.PromptFilterScope)
+		if !validScope {
+			h.settingsUpdateMu.Unlock()
+			writeError(c, http.StatusBadRequest, "Prompt 检查范围仅支持 inherit、local_only 或 off")
+			return
+		}
+		binding.PromptFilterScope = scope
 	}
 	binding.PlatformCode, binding.PlatformName, ok = validatePromptFilterBindingFields(c, binding.PlatformCode, binding.PlatformName)
 	if !ok {
@@ -374,7 +394,7 @@ func newPromptFilterNewAPIBindingResponse(binding *database.PromptFilterNewAPIBi
 	previousActive := binding.PreviousSecret != "" && binding.PreviousSecretExpiresAt != nil && binding.PreviousSecretExpiresAt.After(time.Now())
 	return promptFilterNewAPIBindingResponse{
 		APIKeyID: binding.APIKeyID, PlatformCode: binding.PlatformCode, PlatformName: binding.PlatformName,
-		Enabled: binding.Enabled, RequireSignedIdentity: binding.RequireSignedIdentity,
+		Enabled: binding.Enabled, RequireSignedIdentity: binding.RequireSignedIdentity, PromptFilterScope: binding.PromptFilterScope,
 		SecretConfigured: binding.Secret != "", SecretMasked: maskPromptFilterBindingSecret(binding.Secret),
 		PreviousSecretActive: previousActive, PreviousSecretExpiresAt: binding.PreviousSecretExpiresAt,
 		UpdatedAt: binding.UpdatedAt, Secret: reveal,

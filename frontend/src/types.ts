@@ -2300,12 +2300,15 @@ export interface APIKeyRow {
 
 export type APIKeysResponse = ApiListResponse<'keys', APIKeyRow>
 
+export type PromptFilterScope = 'inherit' | 'local_only' | 'off'
+
 export interface PromptFilterNewAPIBinding {
   api_key_id: number
   platform_code: string
   platform_name: string
   enabled: boolean
   require_signed_identity: boolean
+  prompt_filter_scope: PromptFilterScope
   secret_configured: boolean
   secret_masked: string
   previous_secret_active: boolean
@@ -2325,6 +2328,7 @@ export interface CreatePromptFilterNewAPIBindingRequest {
   platform_name: string
   enabled?: boolean
   require_signed_identity?: boolean
+  prompt_filter_scope?: PromptFilterScope
 }
 
 export type UpdatePromptFilterNewAPIBindingRequest = Partial<

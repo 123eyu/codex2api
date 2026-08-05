@@ -46,7 +46,7 @@ func TestPromptFilterNewAPIBindingAdminLifecycleMasksSecretsAndReloadsStore(t *t
 		t.Fatalf("overlong platform code response=%d body=%s", invalid.Code, invalid.Body.String())
 	}
 
-	createBody := `{"api_key_id":` + jsonNumber(apiKeyID) + `,"platform_code":"gateway-a","platform_name":"示例平台 NewAPI"}`
+	createBody := `{"api_key_id":` + jsonNumber(apiKeyID) + `,"platform_code":"gateway-a","platform_name":"示例平台 NewAPI","prompt_filter_scope":"local_only"}`
 	created := do(http.MethodPost, "/api/admin/prompt-filter/newapi-bindings", createBody)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
@@ -61,6 +61,9 @@ func TestPromptFilterNewAPIBindingAdminLifecycleMasksSecretsAndReloadsStore(t *t
 	if createResponse.RequireSignedIdentity {
 		t.Fatal("create default require_signed_identity = true, want safe migration default false")
 	}
+	if createResponse.PromptFilterScope != database.PromptFilterScopeLocalOnly {
+		t.Fatalf("create prompt filter scope = %q", createResponse.PromptFilterScope)
+	}
 	runtimeBinding, ok := store.GetPromptFilterNewAPIBinding(apiKeyID)
 	if !ok || runtimeBinding.Secret != createResponse.Secret {
 		t.Fatalf("runtime create binding=%#v ok=%v", runtimeBinding, ok)
@@ -74,12 +77,17 @@ func TestPromptFilterNewAPIBindingAdminLifecycleMasksSecretsAndReloadsStore(t *t
 		t.Fatalf("list leaked secret: %s", listed.Body.String())
 	}
 
-	patched := do(http.MethodPatch, "/api/admin/prompt-filter/newapi-bindings/"+jsonNumber(apiKeyID), `{"platform_name":"示例平台生产站","enabled":false}`)
+	invalidScope := do(http.MethodPatch, "/api/admin/prompt-filter/newapi-bindings/"+jsonNumber(apiKeyID), `{"prompt_filter_scope":"remote_only"}`)
+	if invalidScope.Code != http.StatusBadRequest {
+		t.Fatalf("invalid scope status=%d body=%s", invalidScope.Code, invalidScope.Body.String())
+	}
+
+	patched := do(http.MethodPatch, "/api/admin/prompt-filter/newapi-bindings/"+jsonNumber(apiKeyID), `{"platform_name":"示例平台生产站","enabled":false,"prompt_filter_scope":"off"}`)
 	if patched.Code != http.StatusOK {
 		t.Fatalf("patch status=%d body=%s", patched.Code, patched.Body.String())
 	}
 	runtimeBinding, _ = store.GetPromptFilterNewAPIBinding(apiKeyID)
-	if runtimeBinding.PlatformName != "示例平台生产站" || runtimeBinding.Enabled {
+	if runtimeBinding.PlatformName != "示例平台生产站" || runtimeBinding.Enabled || runtimeBinding.PromptFilterScope != database.PromptFilterScopeOff {
 		t.Fatalf("runtime patch binding=%#v", runtimeBinding)
 	}
 	if strings.Contains(patched.Body.String(), "policy_mode") || strings.Contains(patched.Body.String(), "policy_profile") {
