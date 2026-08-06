@@ -904,7 +904,13 @@ func (h *Handler) streamResponsesWSUpstream(
 		return newResponsesWSCloseError(websocket.CloseTryAgainLater, clientErr.Message, apiErr)
 	}
 	if outcome.logStatusCode != http.StatusOK && len(terminalFailurePayload) == 0 {
-		apiErr := api.NewAPIError(api.ErrCodeUpstreamError, outcome.failureMessage, api.ErrorTypeUpstream)
+		errCode := api.ErrCodeUpstreamError
+		if outcome.logStatusCode == logStatusUpstreamStreamBreak {
+			// 断流(598)用稳定错误码 upstream_stream_break，下游可编程识别并重试
+			// (issue #473)；其余上游异常保持通用 upstream_error。
+			errCode = api.ErrorCode(ErrorCodeUpstreamStreamBreak)
+		}
+		apiErr := api.NewAPIError(errCode, outcome.failureMessage, api.ErrorTypeUpstream)
 		clientErr := responsesWSClientUpstreamAPIError(apiErr, hideUpstreamErrors)
 		_ = writeResponsesWSError(conn, clientErr)
 		return newResponsesWSCloseError(websocket.CloseInternalServerErr, clientErr.Message, apiErr)

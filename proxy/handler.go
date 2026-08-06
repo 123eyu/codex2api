@@ -1947,6 +1947,41 @@ const (
 	logStatusUpstreamStreamBreak = 598
 )
 
+// upstreamStreamBreakMessage 是断流反馈给下游的稳定可读消息；机器识别用
+// 稳定错误码 ErrorCodeUpstreamStreamBreak，下游网关/客户端可据此自动重试。
+const upstreamStreamBreakMessage = "Upstream stream ended prematurely; safe to retry"
+
+// writeResponsesStreamBreakEvent 在已写出正文的 Responses SSE 流上合成
+// response.failed 终止事件。首包后断流无法整段静默重试，又不能让 SSE 静默
+// EOF——下游会把截断响应当正常 200 收尾，既无从感知失败也无从重试
+// (issue #473)。不发 response.completed，避免截断响应被当成功计费。
+func writeResponsesStreamBreakEvent(w *streamFlushWriter) error {
+	payload := []byte(`{"type":"response.failed","response":{"status":"failed","error":{"code":"` +
+		ErrorCodeUpstreamStreamBreak + `","message":"` + upstreamStreamBreakMessage + `"}}}`)
+	if err := w.WriteSSEData(payload); err != nil {
+		return err
+	}
+	return w.Flush()
+}
+
+// writeChatCompletionsStreamBreakEvent 同上，OpenAI Chat 协议形态：流内 error
+// 对象，且不补 [DONE]——缺失 [DONE] 本身也是下游可识别的失败信号。
+func writeChatCompletionsStreamBreakEvent(w *streamFlushWriter) error {
+	payload := []byte(`{"error":{"message":"` + upstreamStreamBreakMessage +
+		`","type":"` + ErrorTypeUpstreamError + `","code":"` + ErrorCodeUpstreamStreamBreak + `"}}`)
+	if err := w.WriteSSEData(payload); err != nil {
+		return err
+	}
+	return w.Flush()
+}
+
+// shouldWriteStreamBreakEvent 判断是否需要向下游写合成断流终止事件：
+// 已写过正文、上游未给终态、客户端还在线。写过正文意味着透明重试窗口
+// 已关闭（shouldTransparentRetryStream 要求零写入），这是最后的失败信号出口。
+func shouldWriteStreamBreakEvent(gotTerminal, wroteAnyBody bool, ctxErr, writeErr error) bool {
+	return !gotTerminal && wroteAnyBody && ctxErr == nil && writeErr == nil
+}
+
 // isRetryableStatus 检查是否可重试的上游状态码。
 // 403 也视为可重试：Codex 上游 403 全是账号侧问题（payment_required /
 // deactivated_workspace / codex_access_restricted 等 OAuth/套餐/工作区维度），
@@ -2675,6 +2710,13 @@ func (h *Handler) Responses(c *gin.Context) {
 				if writeErr == nil && wroteAnyBody {
 					writeErr = streamWriter.Flush()
 				}
+				// 已写正文后的上游断流：合成 response.failed 终态（code=
+				// upstream_stream_break），避免下游收到静默 EOF 的"假 200"(issue #473)。
+				if shouldWriteStreamBreakEvent(gotTerminal, wroteAnyBody, c.Request.Context().Err(), writeErr) {
+					if err := writeResponsesStreamBreakEvent(streamWriter); err != nil {
+						log.Printf("写入合成 response.failed 断流事件失败 (OpenAI Responses relay): %v", err)
+					}
+				}
 			} else {
 				var respBody []byte
 				respBody, readErr = io.ReadAll(resp.Body)
@@ -2753,6 +2795,15 @@ func (h *Handler) Responses(c *gin.Context) {
 				c.Header("Content-Type", "application/json; charset=utf-8")
 				c.JSON(outcome.logStatusCode, gin.H{
 					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
+				})
+			} else if isStream && !wroteAnyBody && outcome.logStatusCode == logStatusUpstreamStreamBreak &&
+				c.Request.Context().Err() == nil && writeErr == nil {
+				// 首包前断流/首字超时且重试耗尽：原先没有任何写出分支命中，下游
+				// 收到空 body 的"假 200"，失败完全不可感知 (issue #473)。598 是内部
+				// 日志状态，对外按真实 502 + 稳定错误码返回，下游可编程识别并重试。
+				c.Header("Content-Type", "application/json; charset=utf-8")
+				c.JSON(http.StatusBadGateway, gin.H{
+					"error": gin.H{"message": outcome.failureMessage, "type": ErrorTypeUpstreamError, "code": ErrorCodeUpstreamStreamBreak},
 				})
 			}
 			if !isStream && readErr != nil {
@@ -3258,6 +3309,15 @@ func (h *Handler) Responses(c *gin.Context) {
 			if writeErr == nil && wroteAnyBody {
 				writeErr = streamWriter.Flush()
 			}
+			// 流结束但未收到终止事件（上游断流）：已写过正文时无法整段静默重试，
+			// 合成 response.failed（code=upstream_stream_break）给下游一个可编程
+			// 识别的失败终态，而不是静默 EOF 的"假 200"(issue #473)。续想折叠
+			// 路径的 EOF 已自带合成终态（gotTerminal=true），不会走到这里。
+			if shouldWriteStreamBreakEvent(gotTerminal, wroteAnyBody, c.Request.Context().Err(), writeErr) {
+				if err := writeResponsesStreamBreakEvent(streamWriter); err != nil {
+					log.Printf("写入合成 response.failed 断流事件失败 (/v1/responses): %v", err)
+				}
+			}
 		} else {
 			// 非流式收集
 			var lastResponseData []byte
@@ -3421,6 +3481,15 @@ func (h *Handler) Responses(c *gin.Context) {
 			c.Header("Content-Type", "application/json; charset=utf-8")
 			c.JSON(logStatusCode, gin.H{
 				"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
+			})
+		} else if isStream && !wroteAnyBody && logStatusCode == logStatusUpstreamStreamBreak &&
+			c.Request.Context().Err() == nil && writeErr == nil {
+			// 首包前断流/首字超时且重试耗尽：原先没有任何写出分支命中，下游
+			// 收到空 body 的"假 200"，失败完全不可感知 (issue #473)。598 是内部
+			// 日志状态，对外按真实 502 + 稳定错误码返回，下游可编程识别并重试。
+			c.Header("Content-Type", "application/json; charset=utf-8")
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error": gin.H{"message": outcome.failureMessage, "type": ErrorTypeUpstreamError, "code": ErrorCodeUpstreamStreamBreak},
 			})
 		} else if !isStream {
 			if len(terminalFailurePayload) > 0 {
@@ -4553,6 +4622,14 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if writeErr == nil && wroteAnyBody {
 				writeErr = streamWriter.Flush()
 			}
+			// 已写正文后的上游断流：合成流内 error 对象（code=upstream_stream_break）
+			// 且不补 [DONE]，让下游可编程识别失败并重试，而不是把截断流当成功
+			// (issue #473)。
+			if shouldWriteStreamBreakEvent(gotTerminal, wroteAnyBody, c.Request.Context().Err(), writeErr) {
+				if err := writeChatCompletionsStreamBreakEvent(streamWriter); err != nil {
+					log.Printf("写入合成 error 断流事件失败 (/v1/chat/completions): %v", err)
+				}
+			}
 		} else {
 			var fullContent strings.Builder
 			var fullReasoning strings.Builder
@@ -4683,6 +4760,15 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			c.Header("Content-Type", "application/json; charset=utf-8")
 			c.JSON(logStatusCode, gin.H{
 				"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
+			})
+		} else if isStream && !wroteAnyBody && logStatusCode == logStatusUpstreamStreamBreak &&
+			c.Request.Context().Err() == nil && writeErr == nil {
+			// 首包前断流/首字超时且重试耗尽：原先没有任何写出分支命中，下游
+			// 收到空 body 的"假 200"，失败完全不可感知 (issue #473)。598 是内部
+			// 日志状态，对外按真实 502 + 稳定错误码返回，下游可编程识别并重试。
+			c.Header("Content-Type", "application/json; charset=utf-8")
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error": gin.H{"message": outcome.failureMessage, "type": ErrorTypeUpstreamError, "code": ErrorCodeUpstreamStreamBreak},
 			})
 		} else if !isStream {
 			if len(terminalFailurePayload) > 0 {
