@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"math"
 	"math/rand"
@@ -2827,6 +2828,7 @@ type Store struct {
 	reasoningEffortModels atomic.Value // 带思考强度的模型别名 JSON 数组
 	schedulerMode         atomic.Value // string: "round_robin" or "remaining_quota"
 	affinityMode          atomic.Value // string: "bounded" / "off" / "strict"
+	affinitySpreadEnabled atomic.Bool  // 新亲和键按 HRW 哈希散列选号(issue #484)
 	grokAffinityMode      atomic.Value // string: "follow" / "bounded" / "off" / "strict"（"follow"=跟随全局）
 	grokProbeEnabled      atomic.Bool  // 定期探测 Grok 账号状态是否开启（默认关）
 	grokProbeIntervalMin  atomic.Int64 // 定期探测间隔（分钟，默认 30，下限 grokProbeMinIntervalMinutes）
@@ -3294,6 +3296,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.allowRemoteMigration.Store(settings.AllowRemoteMigration)
 	s.schedulerMode.Store(settings.SchedulerMode)
 	s.SetAffinityMode(settings.AffinityMode)
+	s.SetSessionAffinitySpread(settings.SessionAffinitySpread)
 	s.SetGrokAffinityMode(grokAffinityModeFromConfig(settings.GrokConfig))
 	s.SetGrokProbeConfig(grokProbeConfigFromConfig(settings.GrokConfig))
 	s.SetGrokMaxRateLimitRetries(grokMaxRateLimitRetriesFromConfig(settings.GrokConfig))
@@ -5197,7 +5200,7 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 	if binding, ok := s.getCachedSessionAffinity(key); ok {
 		if !s.affinityProxyStillValid(binding.accountID, binding.proxyURL) {
 			s.UnbindSessionAffinity(key, binding.accountID)
-			return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
+			return s.nextAccountForFreshAffinity(key, apiKeyID, exclude, filter), ""
 		}
 		// 跨进程缓存的 binding 也按 bounded 逻辑校验账号健康；Grok 账号套用 Grok 专属模式。
 		cacheMode := mode
@@ -5217,7 +5220,99 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		}
 	}
 
-	return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
+	return s.nextAccountForFreshAffinity(key, apiKeyID, exclude, filter), ""
+}
+
+// nextAccountForFreshAffinity 为"新亲和键首次绑定"选号(issue #484)。
+//
+// 关闭散列开关时沿用调度器"最高分优先"语义——但那正是聚集根因:新键到来时
+// 号池大多空闲,dispatchScore 的细微差异让每个新键都独立选中同一个第一名。
+// 开启后改为 rendezvous(HRW)哈希:在最高调度优先级+健康档位的候选层内,对
+// 每个账号计算 hash(亲和键, 账号ID) 取最大——同一亲和键在号池不变时恒命中
+// 同一账号(幂等一一绑定),不同键均匀摊开,首选不可用时确定性顺延到哈希序
+// 下一名,账号增删只迁移受影响的键。层间仍严格尊重运营者设置的调度优先级
+// 与健康档位,层内才忽略分数差异。
+func (s *Store) nextAccountForFreshAffinity(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
+	if s == nil {
+		return nil
+	}
+	if !s.GetSessionAffinitySpread() || strings.TrimSpace(key) == "" {
+		return s.NextExcludingWithFilter(apiKeyID, exclude, filter)
+	}
+
+	type affinityCandidate struct {
+		acc               *Account
+		schedulerPriority int64
+		tierPriority      int
+		limit             int64
+		weight            uint64
+	}
+	maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
+
+	s.mu.RLock()
+	candidates := make([]affinityCandidate, 0, len(s.accounts))
+	for _, acc := range s.accounts {
+		if exclude != nil && exclude[acc.DBID] {
+			continue
+		}
+		if !acc.IsAvailable() {
+			continue
+		}
+		if !s.accountAllowedForAPIKey(acc, apiKeyID) {
+			continue
+		}
+		if filter != nil && !filter(acc) {
+			continue
+		}
+		load := atomic.LoadInt64(&acc.ActiveRequests)
+		tier, _, _, limit := acc.schedulerSnapshot(maxConcurrency)
+		if limit <= 0 || load >= limit {
+			continue
+		}
+		hasher := fnv.New64a()
+		_, _ = hasher.Write([]byte(key))
+		_, _ = hasher.Write([]byte{':'})
+		_, _ = hasher.Write([]byte(strconv.FormatInt(acc.DBID, 10)))
+		candidates = append(candidates, affinityCandidate{
+			acc:               acc,
+			schedulerPriority: acc.schedulerPriority(),
+			tierPriority:      tierPriority(tier),
+			limit:             limit,
+			weight:            hasher.Sum64(),
+		})
+	}
+	s.mu.RUnlock()
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// 只保留最高的 (调度优先级, 健康档位) 层。
+	bestSchedPrio, bestTier := candidates[0].schedulerPriority, candidates[0].tierPriority
+	for _, c := range candidates[1:] {
+		if c.schedulerPriority > bestSchedPrio ||
+			(c.schedulerPriority == bestSchedPrio && c.tierPriority > bestTier) {
+			bestSchedPrio, bestTier = c.schedulerPriority, c.tierPriority
+		}
+	}
+	layer := candidates[:0]
+	for _, c := range candidates {
+		if c.schedulerPriority == bestSchedPrio && c.tierPriority == bestTier {
+			layer = append(layer, c)
+		}
+	}
+	sort.Slice(layer, func(i, j int) bool { return layer[i].weight > layer[j].weight })
+
+	for _, c := range layer {
+		if s.accountHasCachedCooldown(c.acc) {
+			continue
+		}
+		if s.tryAcquireAccount(c.acc, c.limit, true) {
+			return c.acc
+		}
+	}
+	// 整层都拿不下(并发/冷却)时回退到常规调度,宁可暂时聚集也不拒绝请求。
+	return s.NextExcludingWithFilter(apiKeyID, exclude, filter)
 }
 
 // affinityProxyStillValid verifies that a sticky proxy still matches the
@@ -5726,6 +5821,22 @@ func (s *Store) SetAffinityMode(mode string) {
 		mode = AffinityModeBounded
 	}
 	s.affinityMode.Store(mode)
+}
+
+// GetSessionAffinitySpread 报告新亲和键是否按 HRW 哈希散列选号(issue #484)。
+func (s *Store) GetSessionAffinitySpread() bool {
+	if s == nil {
+		return false
+	}
+	return s.affinitySpreadEnabled.Load()
+}
+
+// SetSessionAffinitySpread 热更新散列绑定开关。
+func (s *Store) SetSessionAffinitySpread(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.affinitySpreadEnabled.Store(enabled)
 }
 
 // AffinityModeFollow 表示 Grok 会话粘性跟随全局 affinity_mode（不做 Grok 专属覆盖）。

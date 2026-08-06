@@ -7436,6 +7436,7 @@ type settingsResponse struct {
 	CodexSyncedCLIVersion               string `json:"codex_synced_cli_version"`
 	SchedulerMode                       string `json:"scheduler_mode"`
 	AffinityMode                        string `json:"affinity_mode"`
+	SessionAffinitySpread               bool   `json:"session_affinity_spread"`
 	GrokAffinityMode                    string `json:"grok_affinity_mode"`
 	GrokProbeEnabled                    bool   `json:"grok_probe_enabled"`
 	GrokProbeIntervalMinutes            int    `json:"grok_probe_interval_minutes"`
@@ -7578,6 +7579,7 @@ type updateSettingsReq struct {
 	CodexCLIVersionSyncIntervalHours    *int     `json:"codex_cli_version_sync_interval_hours"`
 	SchedulerMode                       *string  `json:"scheduler_mode"`
 	AffinityMode                        *string  `json:"affinity_mode"`
+	SessionAffinitySpread               *bool    `json:"session_affinity_spread"`
 	GrokAffinityMode                    *string  `json:"grok_affinity_mode"`
 	GrokProbeEnabled                    *bool    `json:"grok_probe_enabled"`
 	GrokProbeIntervalMinutes            *int     `json:"grok_probe_interval_minutes"`
@@ -8299,6 +8301,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexSyncedCLIVersion:               proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
+		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		GrokAffinityMode:                    h.store.GetGrokAffinityMode(),
 		GrokProbeEnabled:                    h.store.GrokProbeEnabled(),
 		GrokProbeIntervalMinutes:            h.store.GrokProbeIntervalMinutes(),
@@ -9038,6 +9041,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetAffinityMode(*req.AffinityMode)
 		log.Printf("设置已更新: affinity_mode = %s", *req.AffinityMode)
 	}
+	if req.SessionAffinitySpread != nil {
+		h.store.SetSessionAffinitySpread(*req.SessionAffinitySpread)
+		log.Printf("设置已更新: session_affinity_spread = %t", *req.SessionAffinitySpread)
+	}
 
 	if req.GrokAffinityMode != nil {
 		h.store.SetGrokAffinityMode(*req.GrokAffinityMode)
@@ -9539,6 +9546,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexSyncedCLIVersion:               proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
+		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		MaxRetries:                          h.store.GetMaxRetries(),
 		MaxRateLimitRetries:                 h.store.GetMaxRateLimitRetries(),
 		RetryIntervalMS:                     h.store.GetRetryIntervalMS(),
@@ -9773,6 +9781,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexSyncedCLIVersion:               proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
+		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		GrokAffinityMode:                    h.store.GetGrokAffinityMode(),
 		GrokProbeEnabled:                    h.store.GrokProbeEnabled(),
 		GrokProbeIntervalMinutes:            h.store.GrokProbeIntervalMinutes(),

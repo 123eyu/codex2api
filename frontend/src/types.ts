@@ -995,6 +995,7 @@ export interface SystemSettings {
   utls_shutdown_timeout_minutes: number
   scheduler_mode: string
   affinity_mode?: string
+  session_affinity_spread?: boolean
   grok_affinity_mode?: string
   grok_probe_enabled?: boolean
   grok_probe_interval_minutes?: number
