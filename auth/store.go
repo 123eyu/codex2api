@@ -324,6 +324,35 @@ type SchedulerDebugSnapshot struct {
 	LastServerErrorAt        time.Time
 }
 
+// AccountListRuntimeSnapshot is the inexpensive runtime projection used by
+// the admin account list. Unlike SchedulerDebugSnapshot it never recomputes
+// scheduler state; the scheduler already keeps these fields current on every
+// state transition. Reading them under one lock keeps large-pool list rebuilds
+// bounded without weakening the status shown to operators.
+type AccountListRuntimeSnapshot struct {
+	Status                  string
+	UsingCredits            bool
+	GroupIDs                []int64
+	PlanType                string
+	UsagePercent5h          float64
+	UsagePercent5hValid     bool
+	UsagePercent7d          float64
+	UsagePercent7dValid     bool
+	HealthTier              string
+	DispatchScore           float64
+	LatencyPenalty          float64
+	LastUnauthorizedAt      time.Time
+	LastRateLimitedAt       time.Time
+	LastTimeoutAt           time.Time
+	ActiveRequests          int64
+	DynamicConcurrencyLimit int64
+	Reset5hAt               time.Time
+	Reset7dAt               time.Time
+	Window7dSeconds         int64
+	CooldownReason          string
+	CooldownUntil           time.Time
+}
+
 // ID 返回数据库 ID
 func (a *Account) ID() int64 {
 	return a.DBID
@@ -1730,7 +1759,12 @@ func (a *Account) IsBanned() bool {
 func (a *Account) RuntimeStatus() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	now := time.Now()
+	return a.runtimeStatusLocked(time.Now())
+}
+
+// runtimeStatusLocked returns the public runtime status while the caller
+// holds a.mu for reading or writing.
+func (a *Account) runtimeStatusLocked(now time.Time) string {
 	if a.healthTierLocked() == HealthTierBanned {
 		return "unauthorized"
 	}
@@ -1781,6 +1815,43 @@ func (a *Account) RuntimeStatus() string {
 			return "refreshing"
 		}
 		return "error"
+	}
+}
+
+// GetAccountListRuntimeSnapshot returns every runtime field needed by the
+// cached admin list under a single read lock. It intentionally consumes the
+// scheduler's maintained values rather than invoking recomputeSchedulerLocked
+// for every account during a list-cache rebuild.
+func (a *Account) GetAccountListRuntimeSnapshot() AccountListRuntimeSnapshot {
+	if a == nil {
+		return AccountListRuntimeSnapshot{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	now := time.Now()
+	return AccountListRuntimeSnapshot{
+		Status:                  a.runtimeStatusLocked(now),
+		UsingCredits:            a.usingCreditsLocked(now),
+		GroupIDs:                cloneInt64Slice(a.GroupIDs),
+		PlanType:                a.PlanType,
+		UsagePercent5h:          a.UsagePercent5h,
+		UsagePercent5hValid:     a.UsagePercent5hValid,
+		UsagePercent7d:          a.UsagePercent7d,
+		UsagePercent7dValid:     a.UsagePercent7dValid,
+		HealthTier:              string(a.HealthTier),
+		DispatchScore:           a.DispatchScore,
+		LatencyPenalty:          a.schedulerBreakdownLocked(now).LatencyPenalty,
+		LastUnauthorizedAt:      a.LastUnauthorizedAt,
+		LastRateLimitedAt:       a.LastRateLimitedAt,
+		LastTimeoutAt:           a.LastTimeoutAt,
+		ActiveRequests:          atomic.LoadInt64(&a.ActiveRequests),
+		DynamicConcurrencyLimit: a.DynamicConcurrencyLimit,
+		Reset5hAt:               a.Reset5hAt,
+		Reset7dAt:               a.Reset7dAt,
+		Window7dSeconds:         a.Window7dSeconds,
+		CooldownReason:          a.CooldownReason,
+		CooldownUntil:           a.CooldownUtil,
 	}
 }
 
