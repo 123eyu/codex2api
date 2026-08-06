@@ -7099,7 +7099,19 @@ func (db *DB) FindActiveAccountByOAuthIdentity(ctx context.Context, email, works
 		}
 	}
 
-	rows, err := db.conn.QueryContext(ctx, `SELECT id, credentials FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`)
+	query := `SELECT id, credentials
+		FROM accounts
+		WHERE status <> 'deleted'
+		  AND COALESCE(error_message, '') <> 'deleted'
+		  AND LOWER(TRIM(json_extract(credentials, '$.email'))) = ?`
+	if db.driver == "postgres" {
+		query = `SELECT id, credentials
+			FROM accounts
+			WHERE status <> 'deleted'
+			  AND COALESCE(error_message, '') <> 'deleted'
+			  AND LOWER(BTRIM(COALESCE(credentials->>'email', ''))) = $1`
+	}
+	rows, err := db.conn.QueryContext(ctx, query, email)
 	if err != nil {
 		return 0, err
 	}
@@ -7118,6 +7130,67 @@ func (db *DB) FindActiveAccountByOAuthIdentity(ctx context.Context, email, works
 			continue
 		}
 		if openaiidentity.NormalizeWorkspaceID(credentialString(raw, "workspace_id")) == workspaceID {
+			return id, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return 0, sql.ErrNoRows
+}
+
+// FindActiveAccountByOAuthRouteIdentity returns the first non-deleted account
+// that targets the same effective workspace. A per-account
+// Chatgpt-Account-Id header represents a distinct workspace route even when
+// multiple routes share the same OAuth token identity.
+func (db *DB) FindActiveAccountByOAuthRouteIdentity(ctx context.Context, email, effectiveWorkspaceID string, excludeIDs ...int64) (int64, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	effectiveWorkspaceID = strings.TrimSpace(effectiveWorkspaceID)
+	if email == "" || effectiveWorkspaceID == "" {
+		return 0, sql.ErrNoRows
+	}
+	excluded := make(map[int64]struct{}, len(excludeIDs))
+	for _, id := range excludeIDs {
+		if id > 0 {
+			excluded[id] = struct{}{}
+		}
+	}
+
+	query := `SELECT id, credentials
+		FROM accounts
+		WHERE status <> 'deleted'
+		  AND COALESCE(error_message, '') <> 'deleted'
+		  AND LOWER(TRIM(json_extract(credentials, '$.email'))) = ?`
+	if db.driver == "postgres" {
+		query = `SELECT id, credentials
+			FROM accounts
+			WHERE status <> 'deleted'
+			  AND COALESCE(error_message, '') <> 'deleted'
+			  AND LOWER(BTRIM(COALESCE(credentials->>'email', ''))) = $1`
+	}
+	rows, err := db.conn.QueryContext(ctx, query, email)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var raw interface{}
+		if err := rows.Scan(&id, &raw); err != nil {
+			return 0, err
+		}
+		if _, ok := excluded[id]; ok {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(credentialString(raw, "email"))) != email {
+			continue
+		}
+		candidateWorkspaceID := openaiidentity.EffectiveWorkspaceID(
+			credentialString(raw, "workspace_id"),
+			credentialStringMap(raw, "custom_headers"),
+		)
+		if candidateWorkspaceID == effectiveWorkspaceID {
 			return id, nil
 		}
 	}

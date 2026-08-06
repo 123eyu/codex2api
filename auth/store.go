@@ -505,7 +505,7 @@ func (a *Account) EffectiveAccountID() string {
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if v := strings.TrimSpace(a.CustomHeaders["Chatgpt-Account-Id"]); v != "" {
+	if v := openaiidentity.WorkspaceOverrideFromHeaders(a.CustomHeaders); v != "" {
 		return v
 	}
 	return strings.TrimSpace(a.AccountID)
@@ -518,7 +518,7 @@ func (a *Account) AccountIDOverridden() bool {
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	v := strings.TrimSpace(a.CustomHeaders["Chatgpt-Account-Id"])
+	v := openaiidentity.WorkspaceOverrideFromHeaders(a.CustomHeaders)
 	return v != "" && v != strings.TrimSpace(a.AccountID)
 }
 
@@ -2732,6 +2732,8 @@ type Store struct {
 	testContent                        atomic.Value // 测试连接使用的输入内容（string）
 	db                                 *database.DB
 	tokenCache                         cache.TokenCache
+	oauthRefreshLocksMu                sync.Mutex
+	oauthRefreshLocks                  map[string]*oauthRefreshLocalLock
 	apiKeyGroupsMu                     sync.RWMutex
 	apiKeyAllowedGroups                map[int64][]int64
 	apiKeyAllowedGroupSets             map[int64]map[int64]struct{}
@@ -3266,6 +3268,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		proxyPoolEnabled:           settings.ProxyPoolEnabled,
 		sessionBindings:            make(map[string]sessionAffinity),
 		promptFilterNewAPIBindings: make(map[int64]database.PromptFilterNewAPIBinding),
+		oauthRefreshLocks:          make(map[string]*oauthRefreshLocalLock),
 	}
 	if db != nil {
 		s.proxyPoolLoader = db.ListEnabledProxies
@@ -8661,6 +8664,40 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	expiredCooldown := acc.Status == StatusCooldown && !now.Before(acc.CooldownUtil)
 	acc.mu.RUnlock()
 
+	// 同一个 OAuth 登录凭据可以派生多个工作区路由。先按 RT 获取跨实例
+	// lease，再重新读库；等待期间其他实例可能已经完成 RT 轮换。
+	var activeOAuthRefreshLease *oauthRefreshLease
+	for strings.TrimSpace(rt) != "" {
+		lockedRT := strings.TrimSpace(rt)
+		acc.mu.RLock()
+		lockedAccessToken := acc.AccessToken
+		acc.mu.RUnlock()
+		lease, lockErr := s.acquireOAuthRefreshLease(ctx, lockedRT)
+		if lockErr != nil {
+			return lockErr
+		}
+		changed, usable, reloadErr := s.reloadOAuthCredentialsAfterLock(ctx, acc, lockedRT, lockedAccessToken)
+		if reloadErr != nil {
+			log.Printf("[账号 %d] 获取共享 OAuth 刷新锁后重新读取凭据失败: %v", dbID, reloadErr)
+		}
+		acc.mu.RLock()
+		rt = acc.RefreshToken
+		st = acc.SessionToken
+		acc.mu.RUnlock()
+		if changed {
+			lease.Release()
+			if !forceRefresh && usable {
+				s.finishReloadedOAuthRefresh(ctx, acc, activeCooldown, expiredCooldown, cooldownUntil, cooldownReason)
+				return nil
+			}
+			continue
+		}
+		activeOAuthRefreshLease = lease
+		defer activeOAuthRefreshLease.Release()
+		ctx = activeOAuthRefreshLease.Context()
+		break
+	}
+
 	// 1. 尝试从缓存读取 AT
 	cachedToken := ""
 	var err error
@@ -8779,6 +8816,21 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 		}
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("OAuth 刷新超过共享 lease 的安全时限: %w", err)
+	}
+
+	// 在公开轮换后的 RT 前也持有新 RT 的 lease，封住旧 RT 到新 RT 的切换窗口。
+	var rotatedOAuthRefreshLease *oauthRefreshLease
+	newRefreshToken := strings.TrimSpace(td.RefreshToken)
+	if activeOAuthRefreshLease != nil && newRefreshToken != "" &&
+		oauthRefreshTokenFingerprint(newRefreshToken) != activeOAuthRefreshLease.fingerprint {
+		rotatedOAuthRefreshLease, err = s.acquireOAuthRefreshLease(ctx, newRefreshToken)
+		if err != nil {
+			return fmt.Errorf("锁定轮换后的 OAuth 凭据失败: %w", err)
+		}
+		defer rotatedOAuthRefreshLease.Release()
+	}
 
 	// 4. 更新内存状态
 	appliedPlanType := ""
@@ -8882,6 +8934,7 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	if err := s.db.UpdateCredentials(ctx, dbID, credentials); err != nil {
 		log.Printf("[账号 %d] 更新数据库失败: %v", dbID, err)
 	}
+	s.propagateSharedOAuthCredentials(ctx, acc, rt, td, credentials, ttl)
 	if err := s.db.ClearError(ctx, dbID); err != nil {
 		log.Printf("[账号 %d] 清理错误状态失败: %v", dbID, err)
 	}
@@ -8903,4 +8956,71 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	}
 
 	return nil
+}
+
+// propagateSharedOAuthCredentials 将一次成功刷新得到的新凭据同步给使用同一旧 RT
+// 的兄弟工作区路由。只同步认证材料和 Token 原生身份；每条路由自己的
+// Chatgpt-Account-Id、代理、分组、用量、冷却和调度配置保持不变。
+func (s *Store) propagateSharedOAuthCredentials(
+	ctx context.Context,
+	source *Account,
+	previousRefreshToken string,
+	td *TokenData,
+	credentials map[string]interface{},
+	ttl time.Duration,
+) {
+	if s == nil || source == nil || td == nil || strings.TrimSpace(previousRefreshToken) == "" {
+		return
+	}
+	source.mu.RLock()
+	sourceID := source.DBID
+	sourceAccountID := source.AccountID
+	sourceEmail := source.Email
+	sourcePlanType := source.PlanType
+	sourceSubscriptionExpiresAt := source.SubscriptionExpiresAt
+	source.mu.RUnlock()
+
+	for _, sibling := range s.Accounts() {
+		if sibling == nil || sibling.DBID == sourceID || sibling.IsGrokAPI() || sibling.IsOpenAIResponsesAPI() {
+			continue
+		}
+
+		sibling.mu.Lock()
+		if strings.TrimSpace(sibling.RefreshToken) != strings.TrimSpace(previousRefreshToken) {
+			sibling.mu.Unlock()
+			continue
+		}
+		sibling.AccessToken = td.AccessToken
+		if td.RefreshToken != "" {
+			sibling.RefreshToken = td.RefreshToken
+		}
+		if sessionToken, ok := credentials["session_token"].(string); ok {
+			sibling.SessionToken = sessionToken
+		}
+		sibling.ExpiresAt = td.ExpiresAt
+		sibling.ErrorMsg = ""
+		if sourceAccountID != "" {
+			sibling.AccountID = sourceAccountID
+		}
+		if sourceEmail != "" {
+			sibling.Email = sourceEmail
+		}
+		if sourcePlanType != "" {
+			sibling.PlanType = sourcePlanType
+		}
+		sibling.SubscriptionExpiresAt = sourceSubscriptionExpiresAt
+		sibling.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+		sibling.mu.Unlock()
+		s.fastSchedulerUpdate(sibling)
+
+		if s.db != nil {
+			if err := s.db.UpdateCredentials(ctx, sibling.DBID, credentials); err != nil {
+				log.Printf("[账号 %d] 同步共享 OAuth 凭据失败: %v", sibling.DBID, err)
+			}
+		}
+		if s.tokenCache != nil && ttl > 0 {
+			_ = s.tokenCache.SetAccessToken(ctx, sibling.DBID, td.AccessToken, ttl)
+		}
+		log.Printf("[账号 %d] 已同步账号 %d 刷新的共享 OAuth 凭据，工作区路由保持独立", sibling.DBID, sourceID)
+	}
 }

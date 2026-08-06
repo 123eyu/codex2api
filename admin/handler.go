@@ -259,11 +259,11 @@ func (h *Handler) probeImportedAccountUsage(ctx context.Context, accountID int64
 	if account.IsCodexAgentIdentity() {
 		return
 	}
-	// AT / codex_at 账号的 OAuth 身份（email + workspace_id）在插入时无法从
+	// AT / codex_at 账号的 OAuth 身份（email + 有效工作区）在插入时无法从
 	// JWT 解出，由上面的 wham 探针补齐并落库。身份既已可知，此刻回查是否与
 	// 已有账号同一身份：若重复则把凭证合并进旧账号并软删本账号——与 RT 路径
 	// refreshImportedAccountAndProbe 对称，补上 AT 导入/添加事后无法去重的缺口。
-	// 合并按 email + workspace_id 身份进行（workspace_identity v3），并沿用
+	// 合并按 email + 有效工作区身份进行；Chatgpt-Account-Id 覆盖代表独立路由。
 	// 数据库生命周期 ctx 与串行合并锁（防并发导入互相软删）。
 	h.mergeRefreshedDuplicateIntoExistingContext(ctx, accountID, source)
 }
@@ -363,12 +363,19 @@ func (h *Handler) mergeRefreshedDuplicateIntoExistingContext(parent context.Cont
 		return false
 	}
 	email := strings.TrimSpace(newRow.GetCredential("email"))
-	workspaceID := openaiidentity.NormalizeWorkspaceID(newRow.GetCredential("workspace_id"))
-	if email == "" || workspaceID == "" {
+	effectiveWorkspaceID := openaiidentity.EffectiveWorkspaceID(
+		newRow.GetCredential("workspace_id"),
+		newRow.GetCredentialStringMap("custom_headers"),
+	)
+	if email == "" || effectiveWorkspaceID == "" {
 		return false
 	}
-	oldID, err := h.db.FindActiveAccountByOAuthIdentity(ctx, email, workspaceID, newID)
+	oldID, err := h.db.FindActiveAccountByOAuthRouteIdentity(ctx, email, effectiveWorkspaceID, newID)
 	if err != nil || oldID <= 0 {
+		return false
+	}
+	oldRow, err := h.db.GetAccountByID(ctx, oldID)
+	if err != nil || oldRow == nil {
 		return false
 	}
 
@@ -378,14 +385,22 @@ func (h *Handler) mergeRefreshedDuplicateIntoExistingContext(parent context.Cont
 			updates[key] = v
 		}
 	}
+	oldHeaders := oldRow.GetCredentialStringMap("custom_headers")
+	oldOverride := openaiidentity.WorkspaceOverrideFromHeaders(oldHeaders)
+	newOverride := openaiidentity.WorkspaceOverrideFromHeaders(newRow.GetCredentialStringMap("custom_headers"))
+	newTokenWorkspaceID := openaiidentity.NormalizeWorkspaceID(newRow.GetCredential("workspace_id"))
+	if oldOverride == "" && newOverride != "" && newTokenWorkspaceID != effectiveWorkspaceID {
+		// The duplicate is the same effective route only because the new row
+		// carries an explicit override. Preserve that route on the survivor
+		// before copying token-native identity fields from the new credentials.
+		updates["custom_headers"] = customHeadersWithWorkspaceOverride(oldHeaders, newOverride)
+	}
 	if len(updates) == 0 {
 		return false
 	}
 	proxyURL := strings.TrimSpace(newRow.ProxyURL)
 	if proxyURL == "" {
-		if oldRow, err := h.db.GetAccountByID(ctx, oldID); err == nil && oldRow != nil {
-			proxyURL = strings.TrimSpace(oldRow.ProxyURL)
-		}
+		proxyURL = strings.TrimSpace(oldRow.ProxyURL)
 	}
 	if err := h.db.UpdateOAuthAccountCredentials(ctx, oldID, updates, proxyURL); err != nil {
 		log.Printf("合并导入账号 %d 凭证到已有账号 %d 失败: %v", newID, oldID, err)
@@ -939,6 +954,9 @@ type accountResponse struct {
 	Email                 string `json:"email"`
 	EmailDomain           string `json:"email_domain,omitempty"`
 	ChatGPTAccountID      string `json:"chatgpt_account_id,omitempty"`
+	TokenWorkspaceID      string `json:"token_workspace_id,omitempty"`
+	WorkspaceIDOverride   string `json:"workspace_id_override,omitempty"`
+	EffectiveWorkspaceID  string `json:"effective_workspace_id,omitempty"`
 	PlanType              string `json:"plan_type"`
 	SubscriptionExpiresAt string `json:"subscription_expires_at,omitempty"`
 	Status                string `json:"status"`
@@ -1180,12 +1198,19 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 		if ignoreUsageLimitStatusOverride != nil {
 			ignoreUsageLimitStatusEffective = *ignoreUsageLimitStatusOverride
 		}
+		customHeaders := row.GetCredentialStringMap("custom_headers")
+		tokenWorkspaceID := openaiidentity.NormalizeWorkspaceID(row.GetCredential("workspace_id"))
+		workspaceIDOverride := openaiidentity.WorkspaceOverrideFromHeaders(customHeaders)
+		effectiveWorkspaceID := openaiidentity.EffectiveWorkspaceID(tokenWorkspaceID, customHeaders)
 		resp := accountResponse{
 			ID:                       row.ID,
 			Name:                     row.Name,
 			Email:                    email,
 			EmailDomain:              accountEmailDomain(email),
 			ChatGPTAccountID:         row.GetCredential("account_id"),
+			TokenWorkspaceID:         tokenWorkspaceID,
+			WorkspaceIDOverride:      workspaceIDOverride,
+			EffectiveWorkspaceID:     effectiveWorkspaceID,
 			PlanType:                 planType,
 			SubscriptionExpiresAt:    row.GetCredential("subscription_expires_at"),
 			Status:                   row.Status,
@@ -1206,7 +1231,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			Models:                   row.GetCredentialStringSlice("models"),
 			ModelMapping:             row.GetCredential("model_mapping"),
 			CodexClientMetadataMode:  codexClientMetadataMode,
-			CustomHeaders:            row.GetCredentialStringMap("custom_headers"),
+			CustomHeaders:            customHeaders,
 			ProxyURL:                 row.ProxyURL,
 			Enabled:                  row.Enabled,
 			Locked:                   row.Locked,
@@ -1672,7 +1697,8 @@ func (u accountSchedulerUpdate) hasChanges() bool {
 		u.UsageLimitOverride.Set ||
 		u.DispatchCountLimit.Set ||
 		u.SchedulerPriority.Set ||
-		u.ProxyURL.Set
+		u.ProxyURL.Set ||
+		u.CustomHeaders.Set
 }
 
 func optionalBoolFromPtr(value *bool) database.OptionalBool {
@@ -1783,6 +1809,49 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 			}
 			writeError(c, http.StatusBadRequest, "group_ids 包含不存在的分组 ID: "+strings.Join(values, ", "))
 			return
+		}
+	}
+
+	if update.CustomHeaders.Set {
+		h.mergeDuplicateMu.Lock()
+		defer h.mergeDuplicateMu.Unlock()
+
+		row, err := h.db.GetAccountByID(ctx, id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(c, http.StatusNotFound, "账号不存在")
+				return
+			}
+			writeError(c, http.StatusInternalServerError, "查询账号失败: "+err.Error())
+			return
+		}
+		seed := tokenCredentialSeedFromAccountRow(row)
+		previousOverride := openaiidentity.WorkspaceOverrideFromHeaders(seed.customHeaders)
+		seed.customHeaders = cloneCustomHeaders(update.CustomHeaders.Values)
+		seed = normalizeTokenCredentialSeed(seed)
+		nextOverride := openaiidentity.WorkspaceOverrideFromHeaders(seed.customHeaders)
+
+		if previousOverride != nextOverride {
+			if seed.email != "" && effectiveWorkspaceIDFromSeed(seed) != "" {
+				duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, id)
+				if err != nil {
+					writeError(c, http.StatusInternalServerError, "校验工作区路由失败: "+err.Error())
+					return
+				}
+				if duplicateID > 0 {
+					writeError(c, http.StatusConflict, fmt.Sprintf("该登录身份的目标工作区已存在 (id=%d)", duplicateID))
+					return
+				}
+			}
+			duplicateID, err := h.findCredentialWorkspaceRouteDuplicate(ctx, seed, id)
+			if err != nil {
+				writeError(c, http.StatusInternalServerError, "校验凭证工作区路由失败: "+err.Error())
+				return
+			}
+			if duplicateID > 0 {
+				writeError(c, http.StatusConflict, fmt.Sprintf("相同凭证的目标工作区已存在 (id=%d)", duplicateID))
+				return
+			}
 		}
 	}
 
@@ -1899,7 +1968,11 @@ func normalizeCustomHeaders(headers map[string]string) (map[string]string, error
 		if len(value) > 8192 {
 			return nil, fmt.Errorf("custom_headers.%s 不能超过 8192 字符", name)
 		}
-		out[http.CanonicalHeaderKey(name)] = value
+		canonicalName := http.CanonicalHeaderKey(name)
+		if previous, exists := out[canonicalName]; exists && previous != value {
+			return nil, fmt.Errorf("custom_headers 包含大小写重复且值冲突的请求头: %s", canonicalName)
+		}
+		out[canonicalName] = value
 	}
 	if len(out) == 0 {
 		return nil, nil
@@ -1988,6 +2061,99 @@ func cloneCustomHeaders(headers map[string]string) map[string]string {
 		out[name] = value
 	}
 	return out
+}
+
+func customHeadersWithWorkspaceOverride(headers map[string]string, workspaceID string) map[string]string {
+	out := make(map[string]string, len(headers)+1)
+	for name, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(name), openaiidentity.ChatGPTAccountIDHeader) {
+			continue
+		}
+		out[name] = value
+	}
+	if workspaceID = strings.TrimSpace(workspaceID); workspaceID != "" {
+		out[openaiidentity.ChatGPTAccountIDHeader] = workspaceID
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func credentialWorkspaceRouteKey(kind, token string, customHeaders map[string]string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	return kind + "\x00" + token + "\x00" + openaiidentity.WorkspaceOverrideFromHeaders(customHeaders)
+}
+
+func tokenCredentialSeedWorkspaceRouteKeys(seed tokenCredentialSeed) []string {
+	seed = normalizeTokenCredentialSeed(seed)
+	keys := make([]string, 0, 3)
+	for _, credential := range []struct {
+		kind  string
+		token string
+	}{
+		{kind: "rt", token: seed.refreshToken},
+		{kind: "st", token: seed.sessionToken},
+		{kind: "at", token: seed.accessToken},
+	} {
+		if key := credentialWorkspaceRouteKey(credential.kind, credential.token, seed.customHeaders); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func accountCredentialWorkspaceRouteKeys(row *database.AccountRow) []string {
+	if row == nil {
+		return nil
+	}
+	return tokenCredentialSeedWorkspaceRouteKeys(tokenCredentialSeedFromAccountRow(row))
+}
+
+func (h *Handler) existingCredentialWorkspaceRouteKeys(ctx context.Context) (map[string]bool, error) {
+	if h == nil || h.db == nil {
+		return nil, fmt.Errorf("database is not configured")
+	}
+	rows, err := h.db.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	keys := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		for _, key := range accountCredentialWorkspaceRouteKeys(row) {
+			keys[key] = true
+		}
+	}
+	return keys, nil
+}
+
+func (h *Handler) findCredentialWorkspaceRouteDuplicate(ctx context.Context, seed tokenCredentialSeed, excludeID int64) (int64, error) {
+	candidateKeys := tokenCredentialSeedWorkspaceRouteKeys(seed)
+	if len(candidateKeys) == 0 {
+		return 0, nil
+	}
+	candidates := make(map[string]struct{}, len(candidateKeys))
+	for _, key := range candidateKeys {
+		candidates[key] = struct{}{}
+	}
+	rows, err := h.db.ListActive(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, row := range rows {
+		if row.ID == excludeID {
+			continue
+		}
+		for _, key := range accountCredentialWorkspaceRouteKeys(row) {
+			if _, ok := candidates[key]; ok {
+				return row.ID, nil
+			}
+		}
+	}
+	return 0, nil
 }
 
 type optionalStringSlice struct {
@@ -2412,47 +2578,39 @@ func splitAccountCredentialLines(raw string, sanitize bool) []string {
 // accountCredentialDedup 跟踪 RT/ST 原文去重（用于 RT/ST 单账号/批量添加路径）。
 // 身份型（OAuth）去重在文件导入与 AT 路径单独处理，这里只覆盖加入时无法解出身份的 RT/ST。
 type accountCredentialDedup struct {
-	existingRT map[string]bool
-	existingST map[string]bool
-	seenRT     map[string]bool
-	seenST     map[string]bool
+	existingRoutes map[string]bool
+	seenRoutes     map[string]bool
 }
 
 func (h *Handler) newAccountCredentialDedup(ctx context.Context) *accountCredentialDedup {
 	d := &accountCredentialDedup{
-		seenRT: make(map[string]bool),
-		seenST: make(map[string]bool),
+		seenRoutes: make(map[string]bool),
 	}
-	var err error
-	if d.existingRT, err = h.db.GetAllRefreshTokens(ctx); err != nil {
-		log.Printf("查询已有 RT 失败: %v", err)
-		d.existingRT = make(map[string]bool)
+	existingRoutes, err := h.existingCredentialWorkspaceRouteKeys(ctx)
+	if err != nil {
+		log.Printf("查询已有凭证工作区路由失败: %v", err)
+		existingRoutes = make(map[string]bool)
 	}
-	if d.existingST, err = h.db.GetAllSessionTokens(ctx); err != nil {
-		log.Printf("查询已有 ST 失败: %v", err)
-		d.existingST = make(map[string]bool)
-	}
+	d.existingRoutes = existingRoutes
 	return d
 }
 
 // checkAndMark 返回 true 表示该 seed 与已有库或本批次重复（应跳过）；非重复时记录其凭证。
 func (d *accountCredentialDedup) checkAndMark(seed tokenCredentialSeed) bool {
-	rt := strings.TrimSpace(seed.refreshToken)
-	st := strings.TrimSpace(seed.sessionToken)
-	if rt != "" {
-		if d.existingRT[rt] || d.seenRT[rt] {
-			return true
-		}
-	} else if st != "" {
-		if d.existingST[st] || d.seenST[st] {
+	keys := make([]string, 0, 2)
+	if key := credentialWorkspaceRouteKey("rt", seed.refreshToken, seed.customHeaders); key != "" {
+		keys = append(keys, key)
+	}
+	if key := credentialWorkspaceRouteKey("st", seed.sessionToken, seed.customHeaders); key != "" {
+		keys = append(keys, key)
+	}
+	for _, key := range keys {
+		if d.existingRoutes[key] || d.seenRoutes[key] {
 			return true
 		}
 	}
-	if rt != "" {
-		d.seenRT[rt] = true
-	}
-	if st != "" {
-		d.seenST[st] = true
+	for _, key := range keys {
+		d.seenRoutes[key] = true
 	}
 	return false
 }
@@ -2559,7 +2717,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 	createdIDs := &importedAccountIDs{}
 
 	var dedup *accountCredentialDedup
-	if !req.AllowDuplicate {
+	if !req.AllowDuplicate || openaiidentity.WorkspaceOverrideFromHeaders(customHeaders) != "" {
 		dedup = h.newAccountCredentialDedup(ctx)
 	}
 
@@ -2645,7 +2803,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 	defer cancel()
 
 	var dedup *accountCredentialDedup
-	if !req.AllowDuplicate {
+	if !req.AllowDuplicate || openaiidentity.WorkspaceOverrideFromHeaders(req.CustomHeaders) != "" {
 		dedup = h.newAccountCredentialDedup(ctx)
 	}
 	createdIDs := &importedAccountIDs{}
@@ -2804,16 +2962,18 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 	duplicateCount := 0
 	createdIDs := &importedAccountIDs{}
 
-	// AT 去重：非身份型 AT-only（无法从 JWT 解出 email + workspace_id，如 codex_at）
+	// AT 去重：非身份型 AT-only（无法从 JWT 解出 email + 有效工作区，如 codex_at）
 	// 按 access_token 原文去重；身份型 AT 由 upsertOAuthIdentityAccount 按 OAuth 身份
-	//（email + workspace_id）去重/更新。允许重复仅对 workspace_id 为空的账号生效。
-	existingATs := make(map[string]bool)
-	seenAT := make(map[string]bool)
-	if !req.AllowDuplicate {
-		if got, err := h.db.GetAllAccessTokens(ctx); err != nil {
-			log.Printf("查询已有 AT 失败: %v", err)
+	//（email + 有效工作区）去重/更新。显式 Chatgpt-Account-Id 可把同一 AT
+	// 拆成多个独立工作区路由；同一路由仍会更新已有账号。
+	existingATRoutes := make(map[string]bool)
+	seenATRoutes := make(map[string]bool)
+	workspaceOverrideKnown := openaiidentity.WorkspaceOverrideFromHeaders(customHeaders) != ""
+	if !req.AllowDuplicate || workspaceOverrideKnown {
+		if got, err := h.existingCredentialWorkspaceRouteKeys(ctx); err != nil {
+			log.Printf("查询已有凭证工作区路由失败: %v", err)
 		} else {
-			existingATs = got
+			existingATRoutes = got
 		}
 	}
 
@@ -2830,7 +2990,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			allowDuplicate: req.AllowDuplicate,
 			customHeaders:  customHeaders,
 		})
-		if seed.email != "" && seed.workspaceID != "" {
+		if seed.email != "" && effectiveWorkspaceIDFromSeed(seed) != "" {
 			id, updated, err := h.upsertOAuthIdentityAccount(ctx, name, req.ProxyURL, seed, "manual_at")
 			if err != nil {
 				log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
@@ -2849,16 +3009,17 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			continue
 		}
 
-		if !req.AllowDuplicate {
-			if existingATs[at] || seenAT[at] {
+		if !req.AllowDuplicate || workspaceOverrideKnown {
+			routeKey := credentialWorkspaceRouteKey("at", at, seed.customHeaders)
+			if existingATRoutes[routeKey] || seenATRoutes[routeKey] {
 				duplicateCount++
-				log.Printf("AT 账号 %d 已存在（access_token 重复），跳过", i+1)
+				log.Printf("AT 账号 %d 已存在（access_token 与目标工作区重复），跳过", i+1)
 				continue
 			}
-			seenAT[at] = true
+			seenATRoutes[routeKey] = true
 		}
 
-		id, err := h.db.InsertATAccount(ctx, name, at, req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -2874,12 +3035,6 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
 		h.store.AddAccount(newAcc)
 
-		// 将解析/识别到的信息持久化到数据库。
-		if creds := tokenCredentialMap(seed); len(creds) > 0 {
-			if err := h.db.UpdateCredentials(ctx, id, creds); err != nil {
-				log.Printf("AT 账号 %d 更新 credentials 失败: %v", id, err)
-			}
-		}
 		// 触发 wham 用量探针：codex_at 的身份此刻未知，探针补齐身份后会回查
 		// 并合并同身份的已有账号（见 probeImportedAccountUsage）。
 		h.triggerImportedAccountUsageProbe(id, "manual_at")
@@ -2932,13 +3087,14 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	existingATs := make(map[string]bool)
-	seenAT := make(map[string]bool)
-	if !req.AllowDuplicate {
-		if got, err := h.db.GetAllAccessTokens(ctx); err != nil {
-			log.Printf("查询已有 AT 失败: %v", err)
+	existingATRoutes := make(map[string]bool)
+	seenATRoutes := make(map[string]bool)
+	workspaceOverrideKnown := openaiidentity.WorkspaceOverrideFromHeaders(req.CustomHeaders) != ""
+	if !req.AllowDuplicate || workspaceOverrideKnown {
+		if got, err := h.existingCredentialWorkspaceRouteKeys(ctx); err != nil {
+			log.Printf("查询已有凭证工作区路由失败: %v", err)
 		} else {
-			existingATs = got
+			existingATRoutes = got
 		}
 	}
 
@@ -2959,7 +3115,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 		}
 
 		seed := normalizeTokenCredentialSeed(tokenCredentialSeed{accessToken: at, allowDuplicate: req.AllowDuplicate, customHeaders: req.CustomHeaders})
-		if seed.email != "" && seed.workspaceID != "" {
+		if seed.email != "" && effectiveWorkspaceIDFromSeed(seed) != "" {
 			id, updated, err := h.upsertOAuthIdentityAccount(ctx, name, req.ProxyURL, seed, "manual_at")
 			if err != nil {
 				log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
@@ -2977,16 +3133,17 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 			continue
 		}
 
-		if !req.AllowDuplicate {
-			if existingATs[at] || seenAT[at] {
+		if !req.AllowDuplicate || workspaceOverrideKnown {
+			routeKey := credentialWorkspaceRouteKey("at", at, seed.customHeaders)
+			if existingATRoutes[routeKey] || seenATRoutes[routeKey] {
 				duplicateCount++
 				progress(i + 1)
 				continue
 			}
-			seenAT[at] = true
+			seenATRoutes[routeKey] = true
 		}
 
-		id, err := h.db.InsertATAccount(ctx, name, at, req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -2999,11 +3156,6 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 		h.db.InsertAccountEventAsync(id, "added", "manual_at")
 		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
 		h.store.AddAccount(newAcc)
-		if creds := tokenCredentialMap(seed); len(creds) > 0 {
-			if err := h.db.UpdateCredentials(ctx, id, creds); err != nil {
-				log.Printf("AT 账号 %d 更新 credentials 失败: %v", id, err)
-			}
-		}
 		// 与非流式路径一致：探针补齐 codex_at 身份后回查合并同身份的已有账号。
 		h.triggerImportedAccountUsageProbe(id, "manual_at")
 		progress(i + 1)
@@ -3871,6 +4023,12 @@ func importTokenCredentialFingerprint(t importToken, conflicts map[string]bool) 
 	return importCredentialFingerprint(seed.refreshToken, seed.sessionToken, seed.accessToken)
 }
 
+func importTokenCredentialWorkspaceRouteKeys(t importToken, conflicts map[string]bool, customHeaders map[string]string) []string {
+	seed := importTokenSeed(t, conflicts)
+	seed.customHeaders = cloneCustomHeaders(customHeaders)
+	return tokenCredentialSeedWorkspaceRouteKeys(seed)
+}
+
 func importAccountCredentialFingerprint(row *database.AccountRow) string {
 	if row == nil {
 		return ""
@@ -4359,7 +4517,8 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 	var newTokens []importToken
 	duplicateCount := ambiguousOAuthIdentityCount
 
-	if allowDuplicate {
+	workspaceOverrideKnown := openaiidentity.WorkspaceOverrideFromHeaders(importCustomHeaders) != ""
+	if allowDuplicate && !workspaceOverrideKnown {
 		knownCount := 0
 		for _, t := range tokens {
 			if importTokenOAuthIdentityKey(t, conflictingChatGPTIDs) == "" {
@@ -4373,6 +4532,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 			if importTokenOAuthIdentityKey(t, conflictingChatGPTIDs) != "" {
 				knownUniqueCount++
 				seed := importTokenSeed(t, conflictingChatGPTIDs)
+				seed.customHeaders = cloneCustomHeaders(importCustomHeaders)
 				if duplicateID, err := h.findOAuthIdentityDuplicate(dedupeCtx, seed, 0); err != nil {
 					log.Printf("查询已有 OAuth 身份失败: %v", err)
 				} else if duplicateID > 0 {
@@ -4389,36 +4549,16 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 		}
 		duplicateCount += knownCount - knownUniqueCount - ambiguousOAuthIdentityCount
 	} else {
-		existingRTs, err := h.db.GetAllRefreshTokens(dedupeCtx)
+		existingCredentialRoutes, err := h.existingCredentialWorkspaceRouteKeys(dedupeCtx)
 		if err != nil {
-			log.Printf("查询已有 RT 失败: %v", err)
-			existingRTs = make(map[string]bool)
-		}
-
-		// 存在 AT-only token 时额外查询已有 AT
-		hasAT := len(seenAT) > 0
-		var existingATs map[string]bool
-		if hasAT {
-			existingATs, err = h.db.GetAllAccessTokens(dedupeCtx)
-			if err != nil {
-				log.Printf("查询已有 AT 失败: %v", err)
-				existingATs = make(map[string]bool)
-			}
-		}
-		hasST := len(seenST) > 0
-		var existingSTs map[string]bool
-		if hasST {
-			existingSTs, err = h.db.GetAllSessionTokens(dedupeCtx)
-			if err != nil {
-				log.Printf("查询已有 ST 失败: %v", err)
-				existingSTs = make(map[string]bool)
-			}
+			log.Printf("查询已有凭证工作区路由失败: %v", err)
+			existingCredentialRoutes = make(map[string]bool)
 		}
 
 		for _, t := range unique {
-			oauthIdentity := importTokenOAuthIdentityKey(t, conflictingChatGPTIDs)
-			if oauthIdentity != "" {
-				seed := importTokenSeed(t, conflictingChatGPTIDs)
+			seed := importTokenSeed(t, conflictingChatGPTIDs)
+			seed.customHeaders = cloneCustomHeaders(importCustomHeaders)
+			if seed.email != "" && effectiveWorkspaceIDFromSeed(seed) != "" {
 				if duplicateID, err := h.findOAuthIdentityDuplicate(dedupeCtx, seed, 0); err != nil {
 					log.Printf("查询已有 OAuth 身份失败: %v", err)
 				} else if duplicateID > 0 {
@@ -4433,37 +4573,28 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				newTokens = append(newTokens, t)
 				continue
 			}
-			switch {
-			case t.refreshToken != "":
-				if existingRTs[t.refreshToken] {
-					duplicateCount++
-				} else if t.sessionToken != "" && existingSTs[t.sessionToken] {
-					duplicateCount++
-				} else if t.accessToken != "" && existingATs[t.accessToken] {
-					duplicateCount++
-				} else {
-					newTokens = append(newTokens, t)
+
+			routeKeys := importTokenCredentialWorkspaceRouteKeys(t, conflictingChatGPTIDs, importCustomHeaders)
+			isDuplicate := false
+			for _, key := range routeKeys {
+				if existingCredentialRoutes[key] {
+					isDuplicate = true
+					break
 				}
-			case t.sessionToken != "":
-				if existingSTs[t.sessionToken] {
-					duplicateCount++
-				} else if t.accessToken != "" && existingATs[t.accessToken] {
-					duplicateCount++
-				} else {
-					newTokens = append(newTokens, t)
-				}
-			case t.accessToken != "":
-				if existingATs[t.accessToken] {
-					duplicateCount++
-				} else {
-					newTokens = append(newTokens, t)
-				}
+			}
+			if isDuplicate {
+				duplicateCount++
+				continue
+			}
+			newTokens = append(newTokens, t)
+			for _, key := range routeKeys {
+				existingCredentialRoutes[key] = true
 			}
 		}
 	}
 
 	total := len(unique) + ambiguousOAuthIdentityCount + len(agentTokens)
-	if allowDuplicate {
+	if allowDuplicate && !workspaceOverrideKnown {
 		total = len(tokens) + len(agentTokens)
 	}
 	duplicateCount += agentDuplicate
@@ -4535,7 +4666,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 			if tok.accessToken != "" && tok.refreshToken == "" {
 				importSource = "import_at"
 			}
-			if seed.email != "" && seed.workspaceID != "" {
+			if seed.email != "" && effectiveWorkspaceIDFromSeed(seed) != "" {
 				if name == "" {
 					if importSource == "import_at" {
 						name = fmt.Sprintf("at-import-%d", idx+1)
@@ -4582,7 +4713,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, err := h.db.InsertATAccount(insertCtx, name, tok.accessToken, proxyURL)
+				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, tokenCredentialMap(seed), proxyURL)
 				insertCancel()
 
 				if err != nil {
@@ -4598,11 +4729,6 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				h.db.InsertAccountEventAsync(id, "added", "import_at")
 
 				newAcc := accountFromCredentialSeed(id, proxyURL, seed)
-				if len(tokenCredentialMap(seed)) > 0 {
-					credCtx, credCancel := context.WithTimeout(context.Background(), 3*time.Second)
-					_ = h.db.UpdateCredentials(credCtx, id, tokenCredentialMap(seed))
-					credCancel()
-				}
 				h.store.AddAccount(newAcc)
 				h.applyImportedAccountUsageState(newAcc, "import_at")
 				if newAcc.GetAccessToken() != "" {
@@ -4615,13 +4741,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				var id int64
-				var err error
-				if tok.refreshToken != "" {
-					id, err = h.db.InsertAccount(insertCtx, name, tok.refreshToken, proxyURL)
-				} else {
-					id, err = h.db.InsertAccountWithCredentials(insertCtx, name, tokenCredentialMap(seed), proxyURL)
-				}
+				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, tokenCredentialMap(seed), proxyURL)
 				insertCancel()
 
 				if err != nil {
@@ -4636,13 +4756,6 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				atomic.AddInt64(&current, 1)
 				h.db.InsertAccountEventAsync(id, "added", "import")
 
-				if len(tokenCredentialMap(seed)) > 0 {
-					credCtx, credCancel := context.WithTimeout(context.Background(), 3*time.Second)
-					if err := h.db.UpdateCredentials(credCtx, id, tokenCredentialMap(seed)); err != nil {
-						log.Printf("导入账号 %d 更新 token 信息失败: %v", id, err)
-					}
-					credCancel()
-				}
 				newAcc := accountFromCredentialSeed(id, proxyURL, seed)
 				h.store.AddAccount(newAcc)
 				h.applyImportedAccountUsageState(newAcc, "import")
@@ -4900,7 +5013,7 @@ func (h *Handler) RestoreAccount(c *gin.Context) {
 			writeError(c, http.StatusNotFound, "回收站中不存在该账号")
 			return
 		}
-		if errors.Is(err, errDuplicateOAuthIdentity) {
+		if errors.Is(err, errDuplicateOAuthIdentity) || errors.Is(err, errDuplicateCredentialWorkspaceRoute) {
 			writeError(c, http.StatusConflict, "恢复失败: "+err.Error())
 			return
 		}
@@ -4917,9 +5030,10 @@ func (h *Handler) restoreAccountByID(ctx context.Context, id int64) error {
 		return err
 	}
 	seed := tokenCredentialSeedFromAccountRow(row)
-	if seed.email != "" && seed.workspaceID != "" {
-		h.mergeDuplicateMu.Lock()
-		defer h.mergeDuplicateMu.Unlock()
+	h.mergeDuplicateMu.Lock()
+	defer h.mergeDuplicateMu.Unlock()
+
+	if seed.email != "" && effectiveWorkspaceIDFromSeed(seed) != "" {
 		if duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, id); err != nil {
 			return err
 		} else if duplicateID > 0 {
@@ -4930,6 +5044,11 @@ func (h *Handler) restoreAccountByID(ctx context.Context, id int64) error {
 				return err
 			}
 		}
+	}
+	if duplicateID, err := h.findCredentialWorkspaceRouteDuplicate(ctx, seed, id); err != nil {
+		return err
+	} else if duplicateID > 0 {
+		return fmt.Errorf("%w: 已存在相同凭证和目标工作区的账号 (id=%d)，请先删除正常账号或清理回收站账号", errDuplicateCredentialWorkspaceRoute, duplicateID)
 	}
 
 	if err := h.db.RestoreAccount(ctx, id); err != nil {
@@ -4957,6 +5076,7 @@ func tokenCredentialSeedFromAccountRow(row *database.AccountRow) tokenCredential
 		idToken:               row.GetCredential("id_token"),
 		accountID:             firstNonEmpty(row.GetCredential("account_id"), row.GetCredential("chatgpt_account_id")),
 		workspaceID:           row.GetCredential("workspace_id"),
+		customHeaders:         row.GetCredentialStringMap("custom_headers"),
 		email:                 row.GetCredential("email"),
 		planType:              row.GetCredential("plan_type"),
 		expiresAtRaw:          row.GetCredential("expires_at"),
