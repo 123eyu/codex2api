@@ -3175,7 +3175,11 @@ function OverviewView({
                       </div>
                       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                         {moderationThresholdCategories.map((category) => (
-                          <Field key={category} label={category} hint={t('promptFilter.moderationThresholdDefault', { percent: defaultReviewAdapter.moderation_thresholds[category] * 100 })}>
+                          <Field
+                            key={category}
+                            label={`${t(`promptFilter.moderationCategories.${category}`)} (${category})`}
+                            hint={t('promptFilter.moderationThresholdDefault', { percent: defaultReviewAdapter.moderation_thresholds[category] * 100 })}
+                          >
                             <div className="flex items-center gap-2">
                               <DraftNumberInput integer={false} step="0.1" min={0} max={100} value={reviewAdapter.moderation_thresholds[category] * 100} onValueChange={(value) => updateModerationThreshold(category, value)} />
                               <span className="text-sm text-muted-foreground">%</span>
