@@ -1707,6 +1707,21 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, "group_ids 包含不存在的分组 ID: "+strings.Join(values, ", "))
 			return
 		}
+		if len(update.GroupIDs.Values) > 0 {
+			row, err := h.db.GetAccountByID(ctx, id)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeError(c, http.StatusNotFound, "账号不存在")
+					return
+				}
+				writeError(c, http.StatusInternalServerError, "查询账号失败: "+err.Error())
+				return
+			}
+			if err := h.validateGroupChannelForRows(ctx, []*database.AccountRow{row}, update.GroupIDs.Values); err != nil {
+				writeError(c, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 	}
 
 	if update.CustomHeaders.Set {
@@ -5278,6 +5293,27 @@ func (h *Handler) BatchUpdateAccounts(c *gin.Context) {
 			}
 			writeError(c, http.StatusBadRequest, "group_ids 包含不存在的分组 ID: "+strings.Join(values, ", "))
 			return
+		}
+		if len(schedulerUpdate.GroupIDs.Values) > 0 {
+			rows, err := h.db.ListActive(ctx)
+			if err != nil {
+				writeError(c, http.StatusInternalServerError, "查询账号失败: "+err.Error())
+				return
+			}
+			idSet := make(map[int64]bool, len(ids))
+			for _, id := range ids {
+				idSet[id] = true
+			}
+			targetRows := make([]*database.AccountRow, 0, len(ids))
+			for _, row := range rows {
+				if idSet[row.ID] {
+					targetRows = append(targetRows, row)
+				}
+			}
+			if err := h.validateGroupChannelForRows(ctx, targetRows, schedulerUpdate.GroupIDs.Values); err != nil {
+				writeError(c, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 	}
 

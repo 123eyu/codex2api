@@ -210,6 +210,7 @@ type AccountGroupDraft = {
   auto_pause_5h_threshold: number;
   auto_pause_7d_threshold: number;
   proxyURLsInput: string;
+  channel: "codex" | "grok";
 };
 
 function getDefaultAccountVisibleColumns(): Record<
@@ -755,6 +756,20 @@ export default function Accounts() {
   // 由路由驱动（/accounts vs /accounts/grok），刷新浏览器后停留在当前视图。
   const location = useLocation();
   const navigate = useNavigate();
+  // ?groupManager=1 深链直接打开分组管理器(Grok 页的「管理分组」跳转入口,issue #487)。
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get("groupManager") === "1") {
+      setShowGroupManager(true);
+      params.delete("groupManager");
+      const query = params.toString();
+      navigate(
+        { pathname: location.pathname, search: query ? `?${query}` : "" },
+        { replace: true },
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search]);
   const normalizedPath = location.pathname.replace(/\/+$/, "");
   const providerView: "codex" | "grok" = normalizedPath.endsWith("/accounts/grok")
     ? "grok"
@@ -1054,6 +1069,12 @@ export default function Accounts() {
     EMPTY_ACCOUNT_GROUP_FILTER,
   );
   const [allGroups, setAllGroups] = useState<AccountGroup[]>([]);
+  // 分组按渠道隔离(issue #487):Codex 页的所有分组选择器只出 codex 渠道分组;
+  // 管理器仍显示全部渠道(带徽标),徽标解析也用全量以兼容迁移前的跨渠道成员。
+  const codexGroups = useMemo(
+    () => allGroups.filter((group) => group.channel !== "grok"),
+    [allGroups],
+  );
   const [apiKeys, setAPIKeys] = useState<APIKeyRow[]>([]);
   const [lazyMode, setLazyMode] = useState(false);
   // 导入/添加账号时直接绑定的分组（记住上次选择，添加弹窗与导入弹窗共用，与 allowDuplicate 同风格）。
@@ -1072,6 +1093,7 @@ export default function Accounts() {
     auto_pause_5h_threshold: 0,
     auto_pause_7d_threshold: 0,
     proxyURLsInput: "",
+    channel: "codex",
   });
   const [groupSubmitting, setGroupSubmitting] = useState(false);
   const [showBatchMetaEditor, setShowBatchMetaEditor] = useState(false);
@@ -4349,6 +4371,7 @@ export default function Accounts() {
       auto_pause_5h_threshold: 0,
       auto_pause_7d_threshold: 0,
       proxyURLsInput: "",
+      channel: "codex",
     });
   };
 
@@ -4366,6 +4389,7 @@ export default function Accounts() {
       auto_pause_5h_threshold: group.auto_pause_5h_threshold ?? 0,
       auto_pause_7d_threshold: group.auto_pause_7d_threshold ?? 0,
       proxyURLsInput: (group.proxy_urls ?? []).join("\n"),
+      channel: group.channel === "grok" ? "grok" : "codex",
     });
   };
 
@@ -4395,6 +4419,7 @@ export default function Accounts() {
           .split("\n")
           .map((line) => line.trim())
           .filter(Boolean),
+        channel: groupDraft.channel,
       };
       if (groupDraft.id === null) {
         await api.createAccountGroup(payload);
@@ -5097,7 +5122,7 @@ export default function Accounts() {
                 />
                 <AccountGroupFilterSelect
                   className="w-full min-w-0 sm:w-40"
-                  groups={allGroups}
+                  groups={codexGroups}
                   value={groupFilter}
                   onChange={(value) => {
                     setGroupFilter(value);
@@ -6952,7 +6977,7 @@ export default function Accounts() {
                   {t("accounts.importGroupsLabel")}
                 </label>
                 <AccountGroupMultiSelect
-                  groups={allGroups}
+                  groups={codexGroups}
                   value={importGroupIds}
                   onChange={setImportGroupIds}
                   allLabel={t("accounts.groupsUnbound")}
@@ -7017,7 +7042,7 @@ export default function Accounts() {
                   {t("accounts.importGroupsLabel")}
                 </label>
                 <AccountGroupMultiSelect
-                  groups={allGroups}
+                  groups={codexGroups}
                   value={importGroupIds}
                   onChange={setImportGroupIds}
                   allLabel={t("accounts.groupsUnbound")}
@@ -8250,7 +8275,7 @@ export default function Accounts() {
                         </div>
                         <div className="mt-3">
                           <AccountGroupMultiSelect
-                            groups={allGroups}
+                            groups={codexGroups}
                             value={editGroupIds}
                             onChange={setEditGroupIds}
                             allLabel={t("accounts.groupsUnbound")}
@@ -8359,7 +8384,7 @@ export default function Accounts() {
                 </Button>
               </div>
               <AccountGroupMultiSelect
-                groups={allGroups}
+                groups={codexGroups}
                 value={quickGroupIds}
                 onChange={setQuickGroupIds}
                 allLabel={t("accounts.groupsUnbound")}
@@ -8772,7 +8797,7 @@ export default function Accounts() {
                 </div>
                 <div className="mt-3">
                   <AccountGroupMultiSelect
-                    groups={allGroups}
+                    groups={codexGroups}
                     value={batchGroupIds}
                     onChange={setBatchGroupIds}
                     allLabel={t(
@@ -8978,6 +9003,15 @@ export default function Accounts() {
                               <span className="truncate text-sm font-semibold text-foreground">
                                 {group.name}
                               </span>
+                              <span
+                                className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
+                                  group.channel === "grok"
+                                    ? "bg-violet-50 text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+                                    : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+                                }`}
+                              >
+                                {group.channel === "grok" ? "Grok" : "Codex"}
+                              </span>
                               <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-semibold text-muted-foreground">
                                 {t("accounts.groupMembers")}{" "}
                                 {group.member_count}
@@ -9058,6 +9092,48 @@ export default function Accounts() {
                       maxLength={80}
                     />
                   </label>
+                  <div className="space-y-1.5">
+                    <span className="text-xs font-semibold text-muted-foreground">
+                      {t("accounts.groupChannelLabel")}
+                    </span>
+                    {(() => {
+                      const channelLocked =
+                        groupDraft.id !== null &&
+                        (allGroups.find((g) => g.id === groupDraft.id)
+                          ?.member_count ?? 0) > 0;
+                      return (
+                        <>
+                          <div className="flex gap-2">
+                            {(["codex", "grok"] as const).map((channel) => (
+                              <button
+                                key={channel}
+                                type="button"
+                                disabled={channelLocked}
+                                className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                                  groupDraft.channel === channel
+                                    ? "border-primary bg-primary/10 text-primary"
+                                    : "border-border text-muted-foreground hover:bg-muted/50"
+                                }`}
+                                onClick={() =>
+                                  setGroupDraft((draft) => ({
+                                    ...draft,
+                                    channel,
+                                  }))
+                                }
+                              >
+                                {channel === "grok" ? "Grok" : "Codex"}
+                              </button>
+                            ))}
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">
+                            {channelLocked
+                              ? t("accounts.groupChannelLocked")
+                              : t("accounts.groupChannelHint")}
+                          </p>
+                        </>
+                      );
+                    })()}
+                  </div>
                   <label className="block space-y-1.5">
                     <span className="text-xs font-semibold text-muted-foreground">
                       {t("accounts.groupDescription")}

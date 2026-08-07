@@ -1,7 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { ChangeEvent, ReactNode } from "react";
 import {
+  FolderOpen,
   Plus,
   RefreshCw,
   Trash2,
@@ -156,6 +158,7 @@ interface GrokRowHandlers {
   refresh: (account: AccountRow) => void;
   toggleEnabled: (account: AccountRow) => void;
   edit: (account: AccountRow) => void;
+  editGroups: (account: AccountRow) => void;
   remove: (account: AccountRow) => void;
   usageRefreshed: () => void;
 }
@@ -192,12 +195,26 @@ function accountGroupSortKey(
   return sorted.map((g) => g.name).join("\0");
 }
 
-function GrokGroupChips({ groups }: { groups: AccountGroup[] }) {
-  if (groups.length === 0) return null;
+function GrokGroupChips({
+  groups,
+  onClick,
+  emptyLabel,
+}: {
+  groups: AccountGroup[];
+  onClick?: () => void;
+  emptyLabel?: string;
+}) {
+  if (groups.length === 0 && !onClick) return null;
   const visible = groups.slice(0, 3);
   const hidden = groups.length - visible.length;
-  return (
+  const content = (
     <>
+      {groups.length === 0 ? (
+        <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-border px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+          <Plus className="size-2.5" />
+          {emptyLabel}
+        </span>
+      ) : null}
       {visible.map((group) => {
         const color = normalizeGroupColor(group.color);
         return (
@@ -221,8 +238,27 @@ function GrokGroupChips({ groups }: { groups: AccountGroup[] }) {
           +{hidden}
         </span>
       ) : null}
+      {onClick && groups.length > 0 ? (
+        <Pencil className="mt-0.5 size-3 text-muted-foreground opacity-60 transition-opacity group-hover:opacity-100" />
+      ) : null}
     </>
   );
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className="group flex flex-wrap items-center gap-1 text-left"
+        onClick={(event) => {
+          event.stopPropagation();
+          onClick();
+        }}
+        title={emptyLabel}
+      >
+        {content}
+      </button>
+    );
+  }
+  return content;
 }
 
 const EMPTY_FORM: AddGrokAccountRequest = {
@@ -354,6 +390,7 @@ export default function GrokAccounts({
 } = {}) {
   const { t } = useTranslation();
   const { showToast } = useToast();
+  const navigate = useNavigate();
   // 与 Codex 账号页一致：用系统自定义确认弹窗，不用 window.confirm。
   const { confirm, confirmDialog } = useConfirmDialog();
   // 批量测试的右上角进度浮层，与 Codex 账号页共用同一实现。
@@ -368,6 +405,12 @@ export default function GrokAccounts({
 
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [allGroups, setAllGroups] = useState<AccountGroup[]>([]);
+  // 分组按渠道隔离(issue #487):Grok 页的分组选择器/筛选只出 grok 渠道分组;
+  // 徽标解析仍用全量,迁移前挂在 codex 组里的存量成员照常显示。
+  const grokGroups = useMemo(
+    () => allGroups.filter((group) => group.channel === "grok"),
+    [allGroups],
+  );
   // 导入/添加 Grok 账号时直接绑定的分组（与 Codex 账号页共用记忆，见 useImportGroupIds）。
   const {
     groupIds: importGroupIds,
@@ -451,6 +494,11 @@ export default function GrokAccounts({
 
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null);
+  const [quickGroupAccount, setQuickGroupAccount] = useState<AccountRow | null>(
+    null,
+  );
+  const [quickGroupIds, setQuickGroupIds] = useState<number[]>([]);
+  const [quickGroupSubmitting, setQuickGroupSubmitting] = useState(false);
   // 与 Codex 账号页一致：右侧详情 Sheet，按过滤后的列表顺序可左右切换。
   const [detailAccountId, setDetailAccountId] = useState<number | null>(null);
   const [detailAccountData, setDetailAccountData] = useState<AccountRow | null>(null);
@@ -788,6 +836,7 @@ export default function GrokAccounts({
     toggleEnabled: (account) => void handleToggleEnabled(account),
     // openEdit/handleRefresh 等在组件体更靠后定义,这里一律用闭包延迟取值,避开 TDZ。
     edit: (account) => openEdit(account),
+    editGroups: (account) => openQuickGroupEditor(account),
     remove: (account) => void handleDelete(account),
     usageRefreshed: () => void reload(),
   };
@@ -800,11 +849,40 @@ export default function GrokAccounts({
       refresh: (account) => rowHandlersRef.current.refresh(account),
       toggleEnabled: (account) => rowHandlersRef.current.toggleEnabled(account),
       edit: (account) => rowHandlersRef.current.edit(account),
+      editGroups: (account) => rowHandlersRef.current.editGroups(account),
       remove: (account) => rowHandlersRef.current.remove(account),
       usageRefreshed: () => rowHandlersRef.current.usageRefreshed(),
     }),
     [],
   );
+
+  // 快速设置账号分组(issue #487):Grok 账号导入后也能补挂/调整分组,
+  // 与 Codex 账号页同一交互——点行内分组徽标打开,保存走 scheduler 接口。
+  const openQuickGroupEditor = (account: AccountRow) => {
+    setQuickGroupAccount(account);
+    setQuickGroupIds([...(account.group_ids ?? [])]);
+  };
+
+  const handleQuickGroupSave = async () => {
+    if (!quickGroupAccount) return;
+    setQuickGroupSubmitting(true);
+    try {
+      await api.updateAccountScheduler(quickGroupAccount.id, {
+        group_ids: quickGroupIds,
+      });
+      showToast(t("accounts.groupQuickSaveDone"));
+      await reload();
+      setQuickGroupAccount(null);
+      setQuickGroupIds([]);
+    } catch (error) {
+      showToast(
+        t("accounts.groupQuickSaveFailed", { error: getErrorMessage(error) }),
+        "error",
+      );
+    } finally {
+      setQuickGroupSubmitting(false);
+    }
+  };
 
   const credentialReady =
     addMethod === "api_key"
@@ -1867,7 +1945,7 @@ export default function GrokAccounts({
             </div>
             <AccountGroupFilterSelect
               className="w-full min-w-0 sm:w-40"
-              groups={allGroups}
+              groups={grokGroups}
               value={groupFilter}
               onChange={setGroupFilter}
             />
@@ -2696,7 +2774,7 @@ export default function GrokAccounts({
                 {t("accounts.importGroupsLabel")}
               </label>
               <AccountGroupMultiSelect
-                groups={allGroups}
+                groups={grokGroups}
                 value={importGroupIds}
                 onChange={setImportGroupIds}
                 allLabel={t("accounts.groupsUnbound")}
@@ -2730,6 +2808,79 @@ export default function GrokAccounts({
           showCreditSettings={false}
         />
       ) : null}
+
+      {/* 快速设置账号分组(issue #487):与 Codex 账号页同一交互 */}
+      <Modal
+        show={Boolean(quickGroupAccount)}
+        title={t("accounts.groupQuickTitle")}
+        contentClassName="sm:max-w-[520px]"
+        onClose={() => {
+          if (quickGroupSubmitting) return;
+          setQuickGroupAccount(null);
+          setQuickGroupIds([]);
+        }}
+        footer={
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={quickGroupSubmitting}
+              onClick={() => {
+                setQuickGroupAccount(null);
+                setQuickGroupIds([]);
+              }}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              type="button"
+              disabled={quickGroupSubmitting}
+              onClick={() => void handleQuickGroupSave()}
+            >
+              {quickGroupSubmitting
+                ? t("common.saving")
+                : quickGroupIds.length === 0
+                  ? t("accounts.groupQuickClear")
+                  : t("accounts.groupQuickSave")}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg border border-border bg-muted/20 p-3 text-sm text-muted-foreground">
+            <div className="font-semibold text-foreground">
+              {quickGroupAccount
+                ? quickGroupAccount.name || quickGroupAccount.email
+                : ""}
+            </div>
+            <div className="mt-1">{t("accounts.groupQuickDesc")}</div>
+          </div>
+          <div className="flex items-center justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              disabled={quickGroupSubmitting}
+              onClick={() => navigate("/accounts?groupManager=1")}
+            >
+              <FolderOpen className="size-3" />
+              {t("accounts.groupManage")}
+            </Button>
+          </div>
+          <AccountGroupMultiSelect
+            groups={grokGroups}
+            value={quickGroupIds}
+            onChange={setQuickGroupIds}
+            allLabel={t("accounts.groupsUnbound")}
+            selectedLabel={t("accounts.groupsSelected", {
+              count: quickGroupIds.length,
+            })}
+            placeholder={t("accounts.importGroupsPlaceholder")}
+            emptyLabel={t("accounts.groupsNone")}
+            emptyHint={t("accounts.groupsSelectHint")}
+          />
+        </div>
+      </Modal>
 
       <AccountDetailSheet
         account={detailAccount}
@@ -2860,7 +3011,7 @@ export default function GrokAccounts({
             {t("accounts.importGroupsLabel")}
           </label>
           <AccountGroupMultiSelect
-            groups={allGroups}
+            groups={grokGroups}
             value={importGroupIds}
             onChange={setImportGroupIds}
             allLabel={t("accounts.groupsUnbound")}
@@ -3168,6 +3319,7 @@ const MemoGrokAccountTableRow = memo(function MemoGrokAccountTableRow({
       onRefresh={() => handlers.refresh(account)}
       onToggleEnabled={() => handlers.toggleEnabled(account)}
       onEdit={() => handlers.edit(account)}
+      onEditGroups={() => handlers.editGroups(account)}
       onDelete={() => handlers.remove(account)}
       onUsageRefreshed={handlers.usageRefreshed}
     />
@@ -3213,6 +3365,7 @@ const MemoGrokAccountCard = memo(function MemoGrokAccountCard({
       onRefresh={() => handlers.refresh(account)}
       onToggleEnabled={() => handlers.toggleEnabled(account)}
       onEdit={() => handlers.edit(account)}
+      onEditGroups={() => handlers.editGroups(account)}
       onDelete={() => handlers.remove(account)}
       onUsageRefreshed={handlers.usageRefreshed}
     />
@@ -3234,6 +3387,7 @@ function GrokAccountCard({
   onRefresh,
   onToggleEnabled,
   onEdit,
+  onEditGroups,
   onDelete,
   onUsageRefreshed,
 }: {
@@ -3251,6 +3405,7 @@ function GrokAccountCard({
   onRefresh: () => void;
   onToggleEnabled: () => void;
   onEdit: () => void;
+  onEditGroups: () => void;
   onDelete: () => void;
   onUsageRefreshed: () => void;
 }) {
@@ -3372,7 +3527,11 @@ function GrokAccountCard({
               : t("grok.authKindApiKey")}
           </span>
           <GrokPlanBadge account={account} compact />
-          <GrokGroupChips groups={groups} />
+          <GrokGroupChips
+            groups={groups}
+            onClick={onEditGroups}
+            emptyLabel={t("accounts.groupQuickEdit")}
+          />
           {disabled ? (
             <span className="inline-flex items-center rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-300">
               <PowerOff className="mr-0.5 size-2.5" />
@@ -3553,6 +3712,7 @@ function GrokAccountTableRow({
   onRefresh,
   onToggleEnabled,
   onEdit,
+  onEditGroups,
   onDelete,
   onUsageRefreshed,
 }: {
@@ -3571,6 +3731,7 @@ function GrokAccountTableRow({
   onRefresh: () => void;
   onToggleEnabled: () => void;
   onEdit: () => void;
+  onEditGroups: () => void;
   onDelete: () => void;
   onUsageRefreshed: () => void;
 }) {
@@ -3654,11 +3815,13 @@ function GrokAccountTableRow({
                   : t("grok.authKindApiKey")}
               </span>
             </div>
-            {groups.length > 0 ? (
-              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-                <GrokGroupChips groups={groups} />
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
+                <GrokGroupChips
+                  groups={groups}
+                  onClick={onEditGroups}
+                  emptyLabel={t("accounts.groupQuickEdit")}
+                />
               </div>
-            ) : null}
             {host ? (
               <div
                 className="max-w-[200px] truncate font-mono text-[11px] text-muted-foreground/75"

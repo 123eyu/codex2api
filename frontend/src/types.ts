@@ -745,6 +745,7 @@ export interface AccountGroup {
   auto_pause_5h_threshold: number
   auto_pause_7d_threshold: number
   proxy_urls: string[]
+  channel: 'codex' | 'grok'
   created_at: ISODateString
   updated_at: ISODateString
 }
@@ -762,6 +763,7 @@ export interface CreateAccountGroupRequest {
   auto_pause_5h_threshold?: number
   auto_pause_7d_threshold?: number
   proxy_urls?: string[]
+  channel?: 'codex' | 'grok'
 }
 
 export interface UpdateAccountGroupRequest {
@@ -773,6 +775,7 @@ export interface UpdateAccountGroupRequest {
   auto_pause_5h_threshold?: number
   auto_pause_7d_threshold?: number
   proxy_urls?: string[]
+  channel?: 'codex' | 'grok'
 }
 
 export interface AccountModelStat {
