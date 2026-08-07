@@ -294,6 +294,57 @@ func TestFindActiveAccountByOAuthIdentity(t *testing.T) {
 	}
 }
 
+func TestFindActiveAccountByOAuthRouteIdentitySeparatesWorkspaceOverrides(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	personalID, err := db.InsertAccountWithCredentials(ctx, "personal", map[string]interface{}{
+		"access_token": "at-shared",
+		"email":        "user@example.com",
+		"workspace_id": "personal-workspace",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials personal 返回错误: %v", err)
+	}
+	teamID, err := db.InsertAccountWithCredentials(ctx, "team", map[string]interface{}{
+		"access_token": "at-shared",
+		"email":        "user@example.com",
+		"workspace_id": "personal-workspace",
+		"custom_headers": map[string]string{
+			"chatgpt-account-id": "team-workspace",
+		},
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials team 返回错误: %v", err)
+	}
+
+	got, err := db.FindActiveAccountByOAuthRouteIdentity(ctx, "USER@example.com", "personal-workspace")
+	if err != nil {
+		t.Fatalf("FindActiveAccountByOAuthRouteIdentity personal 返回错误: %v", err)
+	}
+	if got != personalID {
+		t.Fatalf("personal matched id = %d, want %d", got, personalID)
+	}
+
+	got, err = db.FindActiveAccountByOAuthRouteIdentity(ctx, "user@example.com", "team-workspace")
+	if err != nil {
+		t.Fatalf("FindActiveAccountByOAuthRouteIdentity team 返回错误: %v", err)
+	}
+	if got != teamID {
+		t.Fatalf("team matched id = %d, want %d", got, teamID)
+	}
+
+	if _, err := db.FindActiveAccountByOAuthRouteIdentity(ctx, "user@example.com", "other-workspace"); err != sql.ErrNoRows {
+		t.Fatalf("other workspace err = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestFindActiveAccountByOAuthIdentityIgnoresLegacyIDs(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 

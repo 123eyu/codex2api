@@ -571,7 +571,10 @@ func (h *Handler) Messages(c *gin.Context) {
 			// 协议发流内 error 事件，下游网关/客户端可识别并自行重试。
 			// 未写过 body 的断流不走这里：循环外静默换号重试或按真实错误码返回 JSON。
 			if writeErr == nil && !gotTerminal && wroteAnyBody && c.Request.Context().Err() == nil {
-				if err := writeAnthropicStreamErrorEvent(streamWriter, "overloaded_error", "Upstream stream interrupted before completion"); err != nil {
+				// 错误类型保持 overloaded_error（Anthropic 协议枚举，官方 SDK 对其自动
+				// 重试）；message 里带稳定标识 upstream_stream_break 供下游编程识别
+				// (issue #473)。
+				if err := writeAnthropicStreamErrorEvent(streamWriter, "overloaded_error", "Upstream stream interrupted before completion (upstream_stream_break)"); err != nil {
 					log.Printf("写入流内 error 事件失败 (/v1/messages): %v", err)
 				}
 			}

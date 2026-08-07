@@ -978,6 +978,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS sort_order INT DEFAULT 0;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS base_concurrency_override INT NULL;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS proxy_urls TEXT DEFAULT '[]';
+	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS channel VARCHAR(16) DEFAULT 'codex';
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
@@ -1001,6 +1002,11 @@ func (db *DB) migrate(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
 	CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);
 	CREATE INDEX IF NOT EXISTS idx_accounts_cooldown_until ON accounts(cooldown_until);
+	CREATE INDEX IF NOT EXISTS idx_accounts_upstream_type_id ON accounts ((LOWER(COALESCE(credentials->>'upstream_type', ''))), id);
+	CREATE INDEX IF NOT EXISTS idx_accounts_active_upstream_type_id ON accounts ((LOWER(COALESCE(credentials->>'upstream_type', ''))), id)
+		WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted';
+	CREATE INDEX IF NOT EXISTS idx_accounts_created_id ON accounts(created_at, id);
+	CREATE INDEX IF NOT EXISTS idx_accounts_updated_id ON accounts(updated_at, id);
 
 
 	CREATE TABLE IF NOT EXISTS usage_logs (
@@ -1172,6 +1178,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS recovery_probe_interval_minutes INT DEFAULT 30;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS scheduler_mode VARCHAR(20) DEFAULT 'round_robin';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS affinity_mode VARCHAR(16) DEFAULT 'bounded';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS session_affinity_spread BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_url TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_platform_name TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_enabled BOOLEAN DEFAULT FALSE;
@@ -1981,6 +1988,7 @@ type SystemSettings struct {
 	RecoveryProbeIntervalMinutes        int
 	SchedulerMode                       string
 	AffinityMode                        string // session 粘性模式: bounded / off / strict
+	SessionAffinitySpread               bool   // 新亲和键按 HRW 哈希散列选号(issue #484)
 	ResinURL                            string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
 	ResinPlatformName                   string // Resin 平台标识，例如 codex2api
 	PromptFilterEnabled                 bool
@@ -2163,6 +2171,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			       COALESCE(recovery_probe_interval_minutes, 30),
 		       COALESCE(scheduler_mode, 'round_robin'),
 		       COALESCE(affinity_mode, 'bounded'),
+		       COALESCE(session_affinity_spread, false),
 		       COALESCE(resin_url, ''),
 		       COALESCE(resin_platform_name, ''),
 		       COALESCE(prompt_filter_enabled, false),
@@ -2246,6 +2255,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.BackgroundRefreshIntervalMinutes, &s.UsageProbeMaxAgeMinutes, &s.UsageProbeConcurrency, &s.UsageProbeResponsesFallbackEnabled, &s.RecoveryProbeIntervalMinutes,
 		&s.SchedulerMode,
 		&s.AffinityMode,
+		&s.SessionAffinitySpread,
 		&s.ResinURL, &s.ResinPlatformName,
 		&s.PromptFilterEnabled, &s.PromptFilterMode, &s.PromptFilterThreshold, &s.PromptFilterStrictThreshold, &s.PromptFilterStrictTerminalEnabled, &s.PromptFilterAdvancedConfig,
 		&s.PromptFilterLogMatches, &s.PromptFilterMaxTextLength, &s.PromptFilterSensitiveWords,
@@ -2370,6 +2380,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					image_storage_config,
 				scheduler_mode,
 				affinity_mode,
+				session_affinity_spread,
 				background_config,
 				grok_config,
 				show_full_usage_numbers,
@@ -2415,7 +2426,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					utls_shutdown_timeout_minutes,
 					codex_ws_weak_network_mode
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -2455,7 +2466,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				prompt_filter_log_matches = EXCLUDED.prompt_filter_log_matches,
 				prompt_filter_max_text_length = EXCLUDED.prompt_filter_max_text_length,
 				prompt_filter_sensitive_words = EXCLUDED.prompt_filter_sensitive_words,
-				prompt_filter_custom_patterns = CASE WHEN $105 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
+				prompt_filter_custom_patterns = CASE WHEN $106 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
 				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns,
 				prompt_filter_review_enabled = EXCLUDED.prompt_filter_review_enabled,
 				prompt_filter_review_api_key = EXCLUDED.prompt_filter_review_api_key,
@@ -2477,6 +2488,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					image_storage_config = EXCLUDED.image_storage_config,
 				scheduler_mode = EXCLUDED.scheduler_mode,
 				affinity_mode = EXCLUDED.affinity_mode,
+				session_affinity_spread = EXCLUDED.session_affinity_spread,
 				background_config = EXCLUDED.background_config,
 				grok_config = EXCLUDED.grok_config,
 				show_full_usage_numbers = EXCLUDED.show_full_usage_numbers,
@@ -2531,7 +2543,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.PromptFilterReviewModel, s.PromptFilterReviewTimeoutSeconds, s.PromptFilterReviewFailClosed,
 		s.ClientCompatMode, s.CodexMinCLIVersion, codexUserAgentConfig, s.UsageLogMode, s.UsageLogBatchSize,
 		s.UsageLogFlushIntervalSeconds, s.StreamFlushPolicy, s.StreamFlushIntervalMS,
-		s.FirstTokenTimeoutSeconds, firstTokenMode, billingTierPolicy, s.ImageStorageConfig, s.SchedulerMode, normalizeAffinityMode(s.AffinityMode), s.BackgroundConfig, normalizeGrokConfig(s.GrokConfig), s.ShowFullUsageNumbers, s.PublicKeyUsagePageEnabled, s.PublicImageStudioPageEnabled, reasoningEffortModels,
+		s.FirstTokenTimeoutSeconds, firstTokenMode, billingTierPolicy, s.ImageStorageConfig, s.SchedulerMode, normalizeAffinityMode(s.AffinityMode), s.SessionAffinitySpread, s.BackgroundConfig, normalizeGrokConfig(s.GrokConfig), s.ShowFullUsageNumbers, s.PublicKeyUsagePageEnabled, s.PublicImageStudioPageEnabled, reasoningEffortModels,
 		s.CodexForceWebsocket, s.CodexWSKeepaliveEnabled, normalizeCodexWSKeepaliveInterval(s.CodexWSKeepaliveIntervalSec),
 		s.CodexWSHideUpstreamErrors, s.CodexWSSilentRetryEnabled, normalizeCodexWSSilentMaxRetries(s.CodexWSSilentMaxRetries),
 		s.AutoPause5hThreshold, s.AutoPause7dThreshold, s.AutoPause5hGuardBandPercent, s.AutoPause5hGuardConcurrency,
@@ -7093,7 +7105,19 @@ func (db *DB) FindActiveAccountByOAuthIdentity(ctx context.Context, email, works
 		}
 	}
 
-	rows, err := db.conn.QueryContext(ctx, `SELECT id, credentials FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`)
+	query := `SELECT id, credentials
+		FROM accounts
+		WHERE status <> 'deleted'
+		  AND COALESCE(error_message, '') <> 'deleted'
+		  AND LOWER(TRIM(json_extract(credentials, '$.email'))) = ?`
+	if db.driver == "postgres" {
+		query = `SELECT id, credentials
+			FROM accounts
+			WHERE status <> 'deleted'
+			  AND COALESCE(error_message, '') <> 'deleted'
+			  AND LOWER(BTRIM(COALESCE(credentials->>'email', ''))) = $1`
+	}
+	rows, err := db.conn.QueryContext(ctx, query, email)
 	if err != nil {
 		return 0, err
 	}
@@ -7112,6 +7136,67 @@ func (db *DB) FindActiveAccountByOAuthIdentity(ctx context.Context, email, works
 			continue
 		}
 		if openaiidentity.NormalizeWorkspaceID(credentialString(raw, "workspace_id")) == workspaceID {
+			return id, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return 0, sql.ErrNoRows
+}
+
+// FindActiveAccountByOAuthRouteIdentity returns the first non-deleted account
+// that targets the same effective workspace. A per-account
+// Chatgpt-Account-Id header represents a distinct workspace route even when
+// multiple routes share the same OAuth token identity.
+func (db *DB) FindActiveAccountByOAuthRouteIdentity(ctx context.Context, email, effectiveWorkspaceID string, excludeIDs ...int64) (int64, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	effectiveWorkspaceID = strings.TrimSpace(effectiveWorkspaceID)
+	if email == "" || effectiveWorkspaceID == "" {
+		return 0, sql.ErrNoRows
+	}
+	excluded := make(map[int64]struct{}, len(excludeIDs))
+	for _, id := range excludeIDs {
+		if id > 0 {
+			excluded[id] = struct{}{}
+		}
+	}
+
+	query := `SELECT id, credentials
+		FROM accounts
+		WHERE status <> 'deleted'
+		  AND COALESCE(error_message, '') <> 'deleted'
+		  AND LOWER(TRIM(json_extract(credentials, '$.email'))) = ?`
+	if db.driver == "postgres" {
+		query = `SELECT id, credentials
+			FROM accounts
+			WHERE status <> 'deleted'
+			  AND COALESCE(error_message, '') <> 'deleted'
+			  AND LOWER(BTRIM(COALESCE(credentials->>'email', ''))) = $1`
+	}
+	rows, err := db.conn.QueryContext(ctx, query, email)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var raw interface{}
+		if err := rows.Scan(&id, &raw); err != nil {
+			return 0, err
+		}
+		if _, ok := excluded[id]; ok {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(credentialString(raw, "email"))) != email {
+			continue
+		}
+		candidateWorkspaceID := openaiidentity.EffectiveWorkspaceID(
+			credentialString(raw, "workspace_id"),
+			credentialStringMap(raw, "custom_headers"),
+		)
+		if candidateWorkspaceID == effectiveWorkspaceID {
 			return id, nil
 		}
 	}

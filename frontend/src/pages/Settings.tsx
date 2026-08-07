@@ -1229,6 +1229,7 @@ export default function Settings() {
     utls_shutdown_timeout_minutes: 30,
     scheduler_mode: 'round_robin',
     affinity_mode: 'bounded',
+    session_affinity_spread: false,
     grok_affinity_mode: 'strict',
     grok_probe_enabled: false,
     grok_probe_interval_minutes: 30,
@@ -2332,6 +2333,12 @@ export default function Settings() {
                   <Switch
                     checked={settingsForm.fast_scheduler_enabled}
                     onCheckedChange={(checked) => autoSaveBooleanField('fast_scheduler_enabled', checked)}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.sessionAffinitySpread')} description={t('settings.sessionAffinitySpreadDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.session_affinity_spread}
+                    onCheckedChange={(checked) => autoSaveBooleanField('session_affinity_spread', checked)}
                   />
                 </SettingField>
               </div>

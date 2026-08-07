@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"math"
 	"math/rand"
@@ -323,6 +324,35 @@ type SchedulerDebugSnapshot struct {
 	LastServerErrorAt        time.Time
 }
 
+// AccountListRuntimeSnapshot is the inexpensive runtime projection used by
+// the admin account list. Unlike SchedulerDebugSnapshot it never recomputes
+// scheduler state; the scheduler already keeps these fields current on every
+// state transition. Reading them under one lock keeps large-pool list rebuilds
+// bounded without weakening the status shown to operators.
+type AccountListRuntimeSnapshot struct {
+	Status                  string
+	UsingCredits            bool
+	GroupIDs                []int64
+	PlanType                string
+	UsagePercent5h          float64
+	UsagePercent5hValid     bool
+	UsagePercent7d          float64
+	UsagePercent7dValid     bool
+	HealthTier              string
+	DispatchScore           float64
+	LatencyPenalty          float64
+	LastUnauthorizedAt      time.Time
+	LastRateLimitedAt       time.Time
+	LastTimeoutAt           time.Time
+	ActiveRequests          int64
+	DynamicConcurrencyLimit int64
+	Reset5hAt               time.Time
+	Reset7dAt               time.Time
+	Window7dSeconds         int64
+	CooldownReason          string
+	CooldownUntil           time.Time
+}
+
 // ID 返回数据库 ID
 func (a *Account) ID() int64 {
 	return a.DBID
@@ -504,7 +534,7 @@ func (a *Account) EffectiveAccountID() string {
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if v := strings.TrimSpace(a.CustomHeaders["Chatgpt-Account-Id"]); v != "" {
+	if v := openaiidentity.WorkspaceOverrideFromHeaders(a.CustomHeaders); v != "" {
 		return v
 	}
 	return strings.TrimSpace(a.AccountID)
@@ -517,7 +547,7 @@ func (a *Account) AccountIDOverridden() bool {
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	v := strings.TrimSpace(a.CustomHeaders["Chatgpt-Account-Id"])
+	v := openaiidentity.WorkspaceOverrideFromHeaders(a.CustomHeaders)
 	return v != "" && v != strings.TrimSpace(a.AccountID)
 }
 
@@ -1729,7 +1759,12 @@ func (a *Account) IsBanned() bool {
 func (a *Account) RuntimeStatus() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	now := time.Now()
+	return a.runtimeStatusLocked(time.Now())
+}
+
+// runtimeStatusLocked returns the public runtime status while the caller
+// holds a.mu for reading or writing.
+func (a *Account) runtimeStatusLocked(now time.Time) string {
 	if a.healthTierLocked() == HealthTierBanned {
 		return "unauthorized"
 	}
@@ -1780,6 +1815,43 @@ func (a *Account) RuntimeStatus() string {
 			return "refreshing"
 		}
 		return "error"
+	}
+}
+
+// GetAccountListRuntimeSnapshot returns every runtime field needed by the
+// cached admin list under a single read lock. It intentionally consumes the
+// scheduler's maintained values rather than invoking recomputeSchedulerLocked
+// for every account during a list-cache rebuild.
+func (a *Account) GetAccountListRuntimeSnapshot() AccountListRuntimeSnapshot {
+	if a == nil {
+		return AccountListRuntimeSnapshot{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	now := time.Now()
+	return AccountListRuntimeSnapshot{
+		Status:                  a.runtimeStatusLocked(now),
+		UsingCredits:            a.usingCreditsLocked(now),
+		GroupIDs:                cloneInt64Slice(a.GroupIDs),
+		PlanType:                a.PlanType,
+		UsagePercent5h:          a.UsagePercent5h,
+		UsagePercent5hValid:     a.UsagePercent5hValid,
+		UsagePercent7d:          a.UsagePercent7d,
+		UsagePercent7dValid:     a.UsagePercent7dValid,
+		HealthTier:              string(a.HealthTier),
+		DispatchScore:           a.DispatchScore,
+		LatencyPenalty:          a.schedulerBreakdownLocked(now).LatencyPenalty,
+		LastUnauthorizedAt:      a.LastUnauthorizedAt,
+		LastRateLimitedAt:       a.LastRateLimitedAt,
+		LastTimeoutAt:           a.LastTimeoutAt,
+		ActiveRequests:          atomic.LoadInt64(&a.ActiveRequests),
+		DynamicConcurrencyLimit: a.DynamicConcurrencyLimit,
+		Reset5hAt:               a.Reset5hAt,
+		Reset7dAt:               a.Reset7dAt,
+		Window7dSeconds:         a.Window7dSeconds,
+		CooldownReason:          a.CooldownReason,
+		CooldownUntil:           a.CooldownUtil,
 	}
 }
 
@@ -2731,6 +2803,8 @@ type Store struct {
 	testContent                        atomic.Value // 测试连接使用的输入内容（string）
 	db                                 *database.DB
 	tokenCache                         cache.TokenCache
+	oauthRefreshLocksMu                sync.Mutex
+	oauthRefreshLocks                  map[string]*oauthRefreshLocalLock
 	apiKeyGroupsMu                     sync.RWMutex
 	apiKeyAllowedGroups                map[int64][]int64
 	apiKeyAllowedGroupSets             map[int64]map[int64]struct{}
@@ -2827,6 +2901,7 @@ type Store struct {
 	reasoningEffortModels atomic.Value // 带思考强度的模型别名 JSON 数组
 	schedulerMode         atomic.Value // string: "round_robin" or "remaining_quota"
 	affinityMode          atomic.Value // string: "bounded" / "off" / "strict"
+	affinitySpreadEnabled atomic.Bool  // 新亲和键按 HRW 哈希散列选号(issue #484)
 	grokAffinityMode      atomic.Value // string: "follow" / "bounded" / "off" / "strict"（"follow"=跟随全局）
 	grokProbeEnabled      atomic.Bool  // 定期探测 Grok 账号状态是否开启（默认关）
 	grokProbeIntervalMin  atomic.Int64 // 定期探测间隔（分钟，默认 30，下限 grokProbeMinIntervalMinutes）
@@ -3264,6 +3339,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		proxyPoolEnabled:           settings.ProxyPoolEnabled,
 		sessionBindings:            make(map[string]sessionAffinity),
 		promptFilterNewAPIBindings: make(map[int64]database.PromptFilterNewAPIBinding),
+		oauthRefreshLocks:          make(map[string]*oauthRefreshLocalLock),
 	}
 	if db != nil {
 		s.proxyPoolLoader = db.ListEnabledProxies
@@ -3294,6 +3370,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.allowRemoteMigration.Store(settings.AllowRemoteMigration)
 	s.schedulerMode.Store(settings.SchedulerMode)
 	s.SetAffinityMode(settings.AffinityMode)
+	s.SetSessionAffinitySpread(settings.SessionAffinitySpread)
 	s.SetGrokAffinityMode(grokAffinityModeFromConfig(settings.GrokConfig))
 	s.SetGrokProbeConfig(grokProbeConfigFromConfig(settings.GrokConfig))
 	s.SetGrokMaxRateLimitRetries(grokMaxRateLimitRetriesFromConfig(settings.GrokConfig))
@@ -5197,7 +5274,7 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 	if binding, ok := s.getCachedSessionAffinity(key); ok {
 		if !s.affinityProxyStillValid(binding.accountID, binding.proxyURL) {
 			s.UnbindSessionAffinity(key, binding.accountID)
-			return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
+			return s.nextAccountForFreshAffinity(key, apiKeyID, exclude, filter), ""
 		}
 		// 跨进程缓存的 binding 也按 bounded 逻辑校验账号健康；Grok 账号套用 Grok 专属模式。
 		cacheMode := mode
@@ -5217,7 +5294,99 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		}
 	}
 
-	return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
+	return s.nextAccountForFreshAffinity(key, apiKeyID, exclude, filter), ""
+}
+
+// nextAccountForFreshAffinity 为"新亲和键首次绑定"选号(issue #484)。
+//
+// 关闭散列开关时沿用调度器"最高分优先"语义——但那正是聚集根因:新键到来时
+// 号池大多空闲,dispatchScore 的细微差异让每个新键都独立选中同一个第一名。
+// 开启后改为 rendezvous(HRW)哈希:在最高调度优先级+健康档位的候选层内,对
+// 每个账号计算 hash(亲和键, 账号ID) 取最大——同一亲和键在号池不变时恒命中
+// 同一账号(幂等一一绑定),不同键均匀摊开,首选不可用时确定性顺延到哈希序
+// 下一名,账号增删只迁移受影响的键。层间仍严格尊重运营者设置的调度优先级
+// 与健康档位,层内才忽略分数差异。
+func (s *Store) nextAccountForFreshAffinity(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
+	if s == nil {
+		return nil
+	}
+	if !s.GetSessionAffinitySpread() || strings.TrimSpace(key) == "" {
+		return s.NextExcludingWithFilter(apiKeyID, exclude, filter)
+	}
+
+	type affinityCandidate struct {
+		acc               *Account
+		schedulerPriority int64
+		tierPriority      int
+		limit             int64
+		weight            uint64
+	}
+	maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
+
+	s.mu.RLock()
+	candidates := make([]affinityCandidate, 0, len(s.accounts))
+	for _, acc := range s.accounts {
+		if exclude != nil && exclude[acc.DBID] {
+			continue
+		}
+		if !acc.IsAvailable() {
+			continue
+		}
+		if !s.accountAllowedForAPIKey(acc, apiKeyID) {
+			continue
+		}
+		if filter != nil && !filter(acc) {
+			continue
+		}
+		load := atomic.LoadInt64(&acc.ActiveRequests)
+		tier, _, _, limit := acc.schedulerSnapshot(maxConcurrency)
+		if limit <= 0 || load >= limit {
+			continue
+		}
+		hasher := fnv.New64a()
+		_, _ = hasher.Write([]byte(key))
+		_, _ = hasher.Write([]byte{':'})
+		_, _ = hasher.Write([]byte(strconv.FormatInt(acc.DBID, 10)))
+		candidates = append(candidates, affinityCandidate{
+			acc:               acc,
+			schedulerPriority: acc.schedulerPriority(),
+			tierPriority:      tierPriority(tier),
+			limit:             limit,
+			weight:            hasher.Sum64(),
+		})
+	}
+	s.mu.RUnlock()
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// 只保留最高的 (调度优先级, 健康档位) 层。
+	bestSchedPrio, bestTier := candidates[0].schedulerPriority, candidates[0].tierPriority
+	for _, c := range candidates[1:] {
+		if c.schedulerPriority > bestSchedPrio ||
+			(c.schedulerPriority == bestSchedPrio && c.tierPriority > bestTier) {
+			bestSchedPrio, bestTier = c.schedulerPriority, c.tierPriority
+		}
+	}
+	layer := candidates[:0]
+	for _, c := range candidates {
+		if c.schedulerPriority == bestSchedPrio && c.tierPriority == bestTier {
+			layer = append(layer, c)
+		}
+	}
+	sort.Slice(layer, func(i, j int) bool { return layer[i].weight > layer[j].weight })
+
+	for _, c := range layer {
+		if s.accountHasCachedCooldown(c.acc) {
+			continue
+		}
+		if s.tryAcquireAccount(c.acc, c.limit, true) {
+			return c.acc
+		}
+	}
+	// 整层都拿不下(并发/冷却)时回退到常规调度,宁可暂时聚集也不拒绝请求。
+	return s.NextExcludingWithFilter(apiKeyID, exclude, filter)
 }
 
 // affinityProxyStillValid verifies that a sticky proxy still matches the
@@ -5726,6 +5895,22 @@ func (s *Store) SetAffinityMode(mode string) {
 		mode = AffinityModeBounded
 	}
 	s.affinityMode.Store(mode)
+}
+
+// GetSessionAffinitySpread 报告新亲和键是否按 HRW 哈希散列选号(issue #484)。
+func (s *Store) GetSessionAffinitySpread() bool {
+	if s == nil {
+		return false
+	}
+	return s.affinitySpreadEnabled.Load()
+}
+
+// SetSessionAffinitySpread 热更新散列绑定开关。
+func (s *Store) SetSessionAffinitySpread(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.affinitySpreadEnabled.Store(enabled)
 }
 
 // AffinityModeFollow 表示 Grok 会话粘性跟随全局 affinity_mode（不做 Grok 专属覆盖）。
@@ -8550,6 +8735,40 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	expiredCooldown := acc.Status == StatusCooldown && !now.Before(acc.CooldownUtil)
 	acc.mu.RUnlock()
 
+	// 同一个 OAuth 登录凭据可以派生多个工作区路由。先按 RT 获取跨实例
+	// lease，再重新读库；等待期间其他实例可能已经完成 RT 轮换。
+	var activeOAuthRefreshLease *oauthRefreshLease
+	for strings.TrimSpace(rt) != "" {
+		lockedRT := strings.TrimSpace(rt)
+		acc.mu.RLock()
+		lockedAccessToken := acc.AccessToken
+		acc.mu.RUnlock()
+		lease, lockErr := s.acquireOAuthRefreshLease(ctx, lockedRT)
+		if lockErr != nil {
+			return lockErr
+		}
+		changed, usable, reloadErr := s.reloadOAuthCredentialsAfterLock(ctx, acc, lockedRT, lockedAccessToken)
+		if reloadErr != nil {
+			log.Printf("[账号 %d] 获取共享 OAuth 刷新锁后重新读取凭据失败: %v", dbID, reloadErr)
+		}
+		acc.mu.RLock()
+		rt = acc.RefreshToken
+		st = acc.SessionToken
+		acc.mu.RUnlock()
+		if changed {
+			lease.Release()
+			if !forceRefresh && usable {
+				s.finishReloadedOAuthRefresh(ctx, acc, activeCooldown, expiredCooldown, cooldownUntil, cooldownReason)
+				return nil
+			}
+			continue
+		}
+		activeOAuthRefreshLease = lease
+		defer activeOAuthRefreshLease.Release()
+		ctx = activeOAuthRefreshLease.Context()
+		break
+	}
+
 	// 1. 尝试从缓存读取 AT
 	cachedToken := ""
 	var err error
@@ -8668,6 +8887,21 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 		}
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("OAuth 刷新超过共享 lease 的安全时限: %w", err)
+	}
+
+	// 在公开轮换后的 RT 前也持有新 RT 的 lease，封住旧 RT 到新 RT 的切换窗口。
+	var rotatedOAuthRefreshLease *oauthRefreshLease
+	newRefreshToken := strings.TrimSpace(td.RefreshToken)
+	if activeOAuthRefreshLease != nil && newRefreshToken != "" &&
+		oauthRefreshTokenFingerprint(newRefreshToken) != activeOAuthRefreshLease.fingerprint {
+		rotatedOAuthRefreshLease, err = s.acquireOAuthRefreshLease(ctx, newRefreshToken)
+		if err != nil {
+			return fmt.Errorf("锁定轮换后的 OAuth 凭据失败: %w", err)
+		}
+		defer rotatedOAuthRefreshLease.Release()
+	}
 
 	// 4. 更新内存状态
 	appliedPlanType := ""
@@ -8771,6 +9005,7 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	if err := s.db.UpdateCredentials(ctx, dbID, credentials); err != nil {
 		log.Printf("[账号 %d] 更新数据库失败: %v", dbID, err)
 	}
+	s.propagateSharedOAuthCredentials(ctx, acc, rt, td, credentials, ttl)
 	if err := s.db.ClearError(ctx, dbID); err != nil {
 		log.Printf("[账号 %d] 清理错误状态失败: %v", dbID, err)
 	}
@@ -8792,4 +9027,71 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	}
 
 	return nil
+}
+
+// propagateSharedOAuthCredentials 将一次成功刷新得到的新凭据同步给使用同一旧 RT
+// 的兄弟工作区路由。只同步认证材料和 Token 原生身份；每条路由自己的
+// Chatgpt-Account-Id、代理、分组、用量、冷却和调度配置保持不变。
+func (s *Store) propagateSharedOAuthCredentials(
+	ctx context.Context,
+	source *Account,
+	previousRefreshToken string,
+	td *TokenData,
+	credentials map[string]interface{},
+	ttl time.Duration,
+) {
+	if s == nil || source == nil || td == nil || strings.TrimSpace(previousRefreshToken) == "" {
+		return
+	}
+	source.mu.RLock()
+	sourceID := source.DBID
+	sourceAccountID := source.AccountID
+	sourceEmail := source.Email
+	sourcePlanType := source.PlanType
+	sourceSubscriptionExpiresAt := source.SubscriptionExpiresAt
+	source.mu.RUnlock()
+
+	for _, sibling := range s.Accounts() {
+		if sibling == nil || sibling.DBID == sourceID || sibling.IsGrokAPI() || sibling.IsOpenAIResponsesAPI() {
+			continue
+		}
+
+		sibling.mu.Lock()
+		if strings.TrimSpace(sibling.RefreshToken) != strings.TrimSpace(previousRefreshToken) {
+			sibling.mu.Unlock()
+			continue
+		}
+		sibling.AccessToken = td.AccessToken
+		if td.RefreshToken != "" {
+			sibling.RefreshToken = td.RefreshToken
+		}
+		if sessionToken, ok := credentials["session_token"].(string); ok {
+			sibling.SessionToken = sessionToken
+		}
+		sibling.ExpiresAt = td.ExpiresAt
+		sibling.ErrorMsg = ""
+		if sourceAccountID != "" {
+			sibling.AccountID = sourceAccountID
+		}
+		if sourceEmail != "" {
+			sibling.Email = sourceEmail
+		}
+		if sourcePlanType != "" {
+			sibling.PlanType = sourcePlanType
+		}
+		sibling.SubscriptionExpiresAt = sourceSubscriptionExpiresAt
+		sibling.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+		sibling.mu.Unlock()
+		s.fastSchedulerUpdate(sibling)
+
+		if s.db != nil {
+			if err := s.db.UpdateCredentials(ctx, sibling.DBID, credentials); err != nil {
+				log.Printf("[账号 %d] 同步共享 OAuth 凭据失败: %v", sibling.DBID, err)
+			}
+		}
+		if s.tokenCache != nil && ttl > 0 {
+			_ = s.tokenCache.SetAccessToken(ctx, sibling.DBID, td.AccessToken, ttl)
+		}
+		log.Printf("[账号 %d] 已同步账号 %d 刷新的共享 OAuth 凭据，工作区路由保持独立", sibling.DBID, sourceID)
+	}
 }
