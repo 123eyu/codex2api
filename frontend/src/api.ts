@@ -70,6 +70,7 @@ import type {
   PromptFilterTestResponse,
   PromptReviewTestRequest,
   PromptReviewTestResponse,
+  PromptReviewAPIKeysResponse,
   PublicAPIKeyUsageResponse,
   RecycleBinAccountsResponse,
   ResetCreditsDetailResponse,
@@ -1077,6 +1078,10 @@ export const api = {
     request<PromptFilterTestResponse>('/prompt-filter/test', { method: 'POST', body: JSON.stringify(data) }),
   testPromptReview: (data: PromptReviewTestRequest) =>
     request<PromptReviewTestResponse>('/prompt-filter/review/test', { method: 'POST', body: JSON.stringify(data) }),
+  getPromptReviewAPIKeys: () =>
+    request<PromptReviewAPIKeysResponse>('/prompt-filter/review/keys'),
+  deletePromptReviewAPIKey: (keyID: string) =>
+    request<PromptReviewAPIKeysResponse>(`/prompt-filter/review/keys/${encodeURIComponent(keyID)}`, { method: 'DELETE' }),
   testPromptFilterRulePattern: (data: { pattern: string; text: string }) =>
     request<PromptFilterRulePatternTestResponse>('/prompt-filter/rules/test', { method: 'POST', body: JSON.stringify(data) }),
   getPromptFilterRules: () =>

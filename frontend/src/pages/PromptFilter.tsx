@@ -11,11 +11,12 @@ import StateShell from '../components/StateShell'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
+import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
 import { getPromptFilterScoreBand, normalizePromptFilterScore } from '../lib/promptFilterScore'
 import { parseAdvancedConfigDocument, patchAdvancedConfigDocument, readAdvancedConfigPath } from '../types'
-import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings } from '../types'
+import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -2749,6 +2750,10 @@ function OverviewView({
   const [reviewTestText, setReviewTestText] = useState('请帮我整理今天的会议纪要。')
   const [reviewTesting, setReviewTesting] = useState(false)
   const [reviewTestResult, setReviewTestResult] = useState<PromptReviewTestResponse | null>(null)
+  const [configuredReviewKeys, setConfiguredReviewKeys] = useState<PromptReviewAPIKeyDescriptor[]>([])
+  const [reviewKeysLoading, setReviewKeysLoading] = useState(false)
+  const [deletingReviewKeyID, setDeletingReviewKeyID] = useState<string | null>(null)
+  const { confirm, confirmDialog } = useConfirmDialog()
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [reviewSettingsOpen, setReviewSettingsOpen] = useState(false)
   const [newAPISettingsOpen, setNewAPISettingsOpen] = useState(false)
@@ -2861,6 +2866,52 @@ function OverviewView({
       showToast(`${t('promptFilter.reviewTestFailed')}: ${getErrorMessage(err)}`, 'error')
     } finally {
       setReviewTesting(false)
+    }
+  }
+  useEffect(() => {
+    if (!reviewSettingsOpen) return
+    let cancelled = false
+    setReviewKeysLoading(true)
+    void api.getPromptReviewAPIKeys()
+      .then((result) => {
+        if (!cancelled) setConfiguredReviewKeys(result.items)
+      })
+      .catch((err) => {
+        if (!cancelled) showToast(getErrorMessage(err), 'error')
+      })
+      .finally(() => {
+        if (!cancelled) setReviewKeysLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [reviewSettingsOpen, showToast])
+  const deleteReviewKey = async (keyID: string, masked: string) => {
+    const approved = await confirm({
+      title: t('promptFilter.reviewKeyDeleteTitle'),
+      description: t('promptFilter.reviewKeyDeleteConfirm', { key: masked }),
+      confirmText: t('common.delete'),
+      tone: 'destructive',
+      confirmVariant: 'destructive',
+    })
+    if (!approved) return
+    setDeletingReviewKeyID(keyID)
+    try {
+      const result = await api.deletePromptReviewAPIKey(keyID)
+      setConfiguredReviewKeys(result.items)
+      setForm((current) => ({
+        ...current,
+        prompt_filter_review_api_key_configured: result.count > 0,
+        prompt_filter_review_api_key_count: result.count,
+      }))
+      setReviewTestResult((current) => current ? {
+        ...current,
+        key_count: result.count,
+        results: current.results?.filter((item) => item.key_id !== keyID),
+      } : null)
+      showToast(t('promptFilter.reviewKeyDeleted', { key: masked }))
+    } catch (err) {
+      showToast(getErrorMessage(err), 'error')
+    } finally {
+      setDeletingReviewKeyID(null)
     }
   }
   const applyRecommendedProtection = () => {
@@ -3077,6 +3128,37 @@ function OverviewView({
                     />
                     <span className="block text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewApiKeyHint')}</span>
                   </Field>
+                  {configuredReviewKeys.length > 0 ? (
+                    <div className="space-y-2 rounded-lg border bg-muted/15 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-xs font-semibold">{t('promptFilter.reviewKeyListTitle')}</div>
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">{t('promptFilter.reviewKeyListHint')}</p>
+                        </div>
+                        <Badge variant="outline">{reviewKeysLoading ? '…' : configuredReviewKeys.length}</Badge>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        {configuredReviewKeys.map((key) => {
+                          const tested = reviewTestResult?.results?.find((item) => item.key_id ? item.key_id === key.id : item.key_index === key.index)
+                          return (
+                            <div key={key.id} className="flex items-center justify-between gap-2 rounded-md border bg-background px-3 py-2">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[11px] font-medium text-muted-foreground">#{key.index}</span>
+                                  <span className="truncate font-mono text-xs">{key.masked}</span>
+                                  {tested ? <Badge variant={tested.ok ? 'default' : 'destructive'}>{tested.ok ? t('common.success') : t('common.failed')}</Badge> : null}
+                                </div>
+                                {tested ? <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{tested.latency_ms} ms · {tested.ok ? tested.confidence.toFixed(2) : tested.error || '-'}</div> : null}
+                              </div>
+                              <Button type="button" size="icon" variant="ghost" className="shrink-0 text-destructive hover:text-destructive" disabled={deletingReviewKeyID !== null} onClick={() => void deleteReviewKey(key.id, key.masked)} aria-label={t('promptFilter.reviewKeyDeleteAria', { key: key.masked })}>
+                                {deletingReviewKeyID === key.id ? <RefreshCw className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                              </Button>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="grid gap-4 sm:grid-cols-3">
                     <Field label={t('promptFilter.reviewRequestMode')}><Select value={reviewAdapter.request_mode} onValueChange={(value) => updateReviewAdapter('request_mode', value as ReviewAdapterFormConfig['request_mode'])} options={[{ label: t('promptFilter.reviewModeChat'), value: 'chat_completions' }, { label: t('promptFilter.reviewModeModerations'), value: 'moderations' }]} /></Field>
                     <Field label={t('promptFilter.reviewScope')}><Select value={reviewAdapter.scope} onValueChange={(value) => updateReviewAdapter('scope', value as ReviewAdapterFormConfig['scope'])} options={(['all_requests', 'local_candidates', 'local_blocks'] as ReviewAdapterFormConfig['scope'][]).map((scope) => ({ label: t(`promptFilter.reviewScopeOptions.${scope}`), value: scope }))} /></Field>
@@ -3158,7 +3240,7 @@ function OverviewView({
                         <div>{t('promptFilter.reviewModel')}: <span className="font-mono">{reviewTestResult.model}</span></div>
                         {reviewTestResult.highest_category ? <div>{t('promptFilter.reviewTestHighestCategory')}: <span className="font-mono">{reviewTestResult.highest_category}</span></div> : null}
                         {reviewTestResult.reason ? <div className="sm:col-span-2">{t('promptFilter.reviewTestReason')}: {reviewTestResult.reason}</div> : null}
-                        {reviewTestResult.results?.length ? <div className="sm:col-span-2 mt-1 grid gap-2 md:grid-cols-3">{reviewTestResult.results.map((item) => <div key={item.key_index} className="rounded border bg-background p-2"><div className="flex items-center justify-between gap-2"><span className="font-medium">Key #{item.key_index}</span><Badge variant={item.ok ? 'default' : 'destructive'}>{item.ok ? t('common.success') : t('common.failed')}</Badge></div><div className="mt-1 text-muted-foreground">{item.latency_ms} ms · {item.ok ? item.confidence.toFixed(2) : item.error || '-'}</div></div>)}</div> : null}
+                        {reviewTestResult.results?.length ? <div className="sm:col-span-2 mt-1 grid gap-2 md:grid-cols-3">{reviewTestResult.results.map((item) => <div key={item.key_id || item.key_index} className="rounded border bg-background p-2"><div className="flex items-center justify-between gap-2"><span className="font-medium">{item.key_masked || `Key #${item.key_index}`}</span><Badge variant={item.ok ? 'default' : 'destructive'}>{item.ok ? t('common.success') : t('common.failed')}</Badge></div><div className="mt-1 text-muted-foreground">{item.latency_ms} ms · {item.ok ? item.confidence.toFixed(2) : item.error || '-'}</div></div>)}</div> : null}
                       </div>
                     ) : null}
                   </div>
@@ -3246,6 +3328,7 @@ function OverviewView({
           <PromptFilterLogsTable logs={recentLogs} compact />
         </CardContent>
       </Card>
+      {confirmDialog}
     </>
   )
 }

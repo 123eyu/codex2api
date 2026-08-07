@@ -1666,6 +1666,8 @@ export interface PromptReviewTestRequest {
 
 export interface PromptReviewKeyTestResult {
   key_index: number
+  key_id?: string
+  key_masked?: string
   ok: boolean
   endpoint?: string
   model?: string
@@ -1680,6 +1682,17 @@ export interface PromptReviewKeyTestResult {
   moderation_thresholds?: Record<string, number>
   latency_ms: number
   error?: string
+}
+
+export interface PromptReviewAPIKeyDescriptor {
+  id: string
+  index: number
+  masked: string
+}
+
+export interface PromptReviewAPIKeysResponse {
+  items: PromptReviewAPIKeyDescriptor[]
+  count: number
 }
 
 export interface PromptReviewTestResponse {

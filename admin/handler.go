@@ -713,6 +713,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.DELETE("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.RevokePromptRiskTrustPolicy)
 	api.POST("/prompt-policy/conversation-locks/:lock_key/unlock", h.UnlockPromptConversation)
 	api.POST("/prompt-filter/test", h.TestPromptFilter)
+	api.GET("/prompt-filter/review/keys", h.ListPromptReviewAPIKeys)
+	api.DELETE("/prompt-filter/review/keys/:key_id", h.DeletePromptReviewAPIKey)
 	api.POST("/prompt-filter/review/test", h.TestPromptReviewConnection)
 	api.POST("/prompt-filter/rules/test", h.TestPromptFilterRulePattern)
 	api.GET("/prompt-filter/rules", h.GetPromptFilterRules)
