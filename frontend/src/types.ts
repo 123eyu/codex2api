@@ -2049,10 +2049,19 @@ export interface APIKeyAccountUsageSummary {
   user_billed: number
 }
 
+export interface APIKeyAccountUsageReconciliation {
+  grouped_total: APIKeyAccountUsageSummary
+  ungrouped: APIKeyAccountUsageSummary
+  duplicate: APIKeyAccountUsageSummary
+  unique_grouped_accounts: number
+  multi_group_accounts: number
+}
+
 export interface APIKeyAccountStatsResponse {
   items: APIKeyAccountStat[]
   groups: APIKeyAccountGroupUsage[]
   summary: APIKeyAccountUsageSummary
+  reconciliation?: APIKeyAccountUsageReconciliation
   /** Active accounts use current memberships; deleted accounts use their last retained membership. */
   membership_basis: 'current_and_deleted_last_membership'
 }

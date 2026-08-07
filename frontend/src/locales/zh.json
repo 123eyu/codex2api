@@ -3850,8 +3850,14 @@
 	"keyGroupsAccountCost": "上游成本",
 	"keyGroupsBilled": "下游计费",
 	"keyGroupsCurrentHint": "活跃账号按当前分组、回收站账号按删除前保留的分组汇总；同一账号属于多个分组时会计入每个分组。",
-	"keyAccountDeleted": "已删除",
-	"keyAccountDeletedHint": "该上游账号已进入回收站，但历史用量仍计入统计。"
+    "keyAccountDeleted": "已删除",
+    "keyAccountDeletedHint": "该上游账号已进入回收站，但历史用量仍计入统计。",
+    "keyAccountUngrouped": "未分组",
+    "keyAccountHistoricalGroupMissing": "历史分组缺失",
+    "keyGroupsUngrouped": "未分组 / 历史分组缺失",
+    "keyGroupsReconcileCost": "计费核对：",
+    "keyGroupsReconcileAccounts": "账号核对：",
+    "keyGroupsReconcileHint": "分组卡片会重复计入多分组账号；加上 {{ungrouped}} 个未分组账号，再减去 {{multi}} 个多分组账号的重复归属后，即为 Key 去重总计。"
   },
   "keyUsage": {
     "title": "API Key 使用统计",

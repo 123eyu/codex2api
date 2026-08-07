@@ -3850,8 +3850,14 @@
 	"keyGroupsAccountCost": "Upstream cost",
 	"keyGroupsBilled": "User billed",
 	"keyGroupsCurrentHint": "Active accounts use current groups; recycle-bin accounts use their last retained groups. Accounts in multiple groups count toward each group.",
-	"keyAccountDeleted": "Deleted",
-	"keyAccountDeletedHint": "This upstream account is in the recycle bin; its historical usage is still included."
+    "keyAccountDeleted": "Deleted",
+    "keyAccountDeletedHint": "This upstream account is in the recycle bin; its historical usage is still included.",
+    "keyAccountUngrouped": "Ungrouped",
+    "keyAccountHistoricalGroupMissing": "Historical group missing",
+    "keyGroupsUngrouped": "Ungrouped / historical group missing",
+    "keyGroupsReconcileCost": "Billing check:",
+    "keyGroupsReconcileAccounts": "Account check:",
+    "keyGroupsReconcileHint": "Group totals include repeated usage for multi-group accounts. {{ungrouped}} ungrouped account(s) are added and repeated assignments from {{multi}} multi-group account(s) are subtracted to match the deduplicated key total."
   },
   "keyUsage": {
     "title": "API Key Usage",
