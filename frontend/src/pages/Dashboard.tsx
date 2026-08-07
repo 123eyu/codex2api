@@ -12,8 +12,7 @@ import ChannelFilter, { useUsageChannel, type UsageChannel } from '../components
 import ChannelLogo from '../components/ChannelLogo'
 import SystemHealthBar from '../components/SystemHealthBar'
 import type {
-  AccountRow,
-  OpsOverviewResponse,
+  AccountAnalysisResponse,
   StatsResponse,
   StatsChannelCounts,
   SystemSettings,
@@ -92,7 +91,7 @@ export default function Dashboard() {
   const timeRangeRef = useRef<TimeRangeKey>(timeRange)
   const usageStatsRangeInitialized = useRef(false)
   const showPoolRunwayRef = useRef(showPoolRunway)
-  const poolDataRef = useRef<{ accounts: AccountRow[]; opsOverview: OpsOverviewResponse | null }>({ accounts: [], opsOverview: null })
+  const poolDataRef = useRef<AccountAnalysisResponse | null>(null)
 
   // 核心统计与号池分析解耦：百万级日志下账号聚合变慢时，不能阻塞整个仪表盘首屏。
   const loadDashboardStats = useCallback(async () => {
@@ -115,8 +114,7 @@ export default function Dashboard() {
       stats,
       usageStats,
       settings,
-      accounts: poolDataRef.current.accounts,
-      opsOverview: poolDataRef.current.opsOverview,
+      accountAnalysis: poolDataRef.current,
     }
   }, [])
 
@@ -124,29 +122,25 @@ export default function Dashboard() {
     stats: StatsResponse | null
     usageStats: UsageStats | null
     settings: SystemSettings | null
-    accounts: AccountRow[]
-    opsOverview: OpsOverviewResponse | null
+    accountAnalysis: AccountAnalysisResponse | null
   }>({
     initialData: {
       stats: null,
       usageStats: null,
       settings: null,
-      accounts: [],
-      opsOverview: null,
+      accountAnalysis: null,
     },
     load: loadDashboardStats,
   })
 
   const loadPoolRunwayData = useCallback(async () => {
     if (!showPoolRunwayRef.current) return
-    const [accountsRes, opsOverview] = await Promise.all([
-      api.getAccounts().catch(() => ({ accounts: [] as AccountRow[] })),
-      api.getOpsOverview().catch((): OpsOverviewResponse | null => null),
-    ])
+    const accountAnalysis = await api.getAccountAnalysis('codex').catch(
+      (): AccountAnalysisResponse | null => null,
+    )
     if (!showPoolRunwayRef.current) return
-    const next = { accounts: accountsRes.accounts ?? [], opsOverview }
-    poolDataRef.current = next
-    setData((prev) => ({ ...prev, ...next }))
+    poolDataRef.current = accountAnalysis
+    setData((prev) => ({ ...prev, accountAnalysis }))
   }, [setData])
 
   // 偏好持久化 + 号池独立加载。号池失败只影响号池卡片，不拖死核心统计。
@@ -154,8 +148,8 @@ export default function Dashboard() {
     showPoolRunwayRef.current = showPoolRunway
     persistPoolRunwayVisibility(showPoolRunway)
     if (!showPoolRunway) {
-      poolDataRef.current = { accounts: [], opsOverview: null }
-      setData((prev) => ({ ...prev, accounts: [], opsOverview: null }))
+      poolDataRef.current = null
+      setData((prev) => ({ ...prev, accountAnalysis: null }))
       return
     }
     void loadPoolRunwayData()
@@ -234,7 +228,7 @@ export default function Dashboard() {
     return () => window.clearInterval(timer)
   }, [reloadSilently, timeRange, loadChartData])
 
-  const { stats, usageStats, settings, accounts, opsOverview } = data
+  const { stats, usageStats, settings, accountAnalysis } = data
   const showFullUsageNumbers = settings?.show_full_usage_numbers ?? false
   // 渠道视图下账号池概览与统计卡切换为该渠道的计数；全部视图保持总量并展示分渠道徽标。
   // 旧后端响应无 channels 字段时回退全量，有字段但该渠道无账号时如实显示 0。
@@ -255,9 +249,6 @@ export default function Dashboard() {
         .filter((item): item is { key: 'codex' | 'grok'; counts: StatsChannelCounts } =>
           Boolean(item.counts && item.counts.total > 0))
     : []
-  const currentRpm = opsOverview?.traffic?.rpm ?? 0
-  const rpmLimit = opsOverview?.traffic?.rpm_limit ?? 0
-  const avgDurationMs = opsOverview?.traffic?.avg_duration_ms ?? 0
 
   const icons: Record<string, ReactNode> = {
     total: <Users className="size-[22px]" />,
@@ -408,13 +399,8 @@ export default function Dashboard() {
 
         {/* Pool runway（可开关）+ system health */}
         <div className="mb-6 space-y-3">
-          {showPoolRunway && accounts.length > 0 ? (
-            <PoolRunwayCard
-              accounts={accounts}
-              currentRpm={currentRpm}
-              rpmLimit={rpmLimit}
-              avgDurationMs={avgDurationMs}
-            />
+          {showPoolRunway && accountAnalysis ? (
+            <PoolRunwayCard analysis={accountAnalysis} />
           ) : null}
           <SystemHealthBar chartData={chartData} timeRange={timeRange} loading={chartLoading} />
           {chartError ? (

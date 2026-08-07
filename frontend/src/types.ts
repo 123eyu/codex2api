@@ -81,6 +81,7 @@ export interface GrokPlanInfo {
 }
 
 export interface AccountRow {
+  detail_loaded?: boolean
   id: number
   name: string
   email: string
@@ -210,6 +211,163 @@ export interface AccountRow {
 }
 
 export type AccountsResponse = ApiListResponse<'accounts', AccountRow>
+
+export interface AccountListSummary {
+  total: number
+  normal: number
+  active: number
+  rate_limited: number
+  rate_limited_5h: number
+  rate_limited_7d: number
+  abnormal: number
+  banned: number
+  error: number
+  unsampled: number
+  disabled: number
+  locked: number
+  healthy: number
+  warm: number
+  risky: number
+  oauth: number
+  api_key: number
+  subscription_unlocked: number
+  unauthorized_24h: number
+  rate_limited_1h: number
+  timeout_15m: number
+}
+
+export interface AccountEmailDomainFacet {
+  domain: string
+  total: number
+  banned: number
+}
+
+export interface AccountsPageResponse extends AccountsResponse {
+  page: number
+  page_size: number
+  total: number
+  summary: AccountListSummary
+  facets: {
+    tags: string[]
+    email_domains: AccountEmailDomainFacet[]
+  }
+  snapshot_at: ISODateString
+  stats_state: 'ready' | 'stale' | 'warming'
+}
+
+export interface AccountPageStatsItem {
+  usage_5h_detail?: AccountUsageWindow
+  usage_7d_detail?: AccountUsageWindow
+  billed_5h?: number
+  billed_7d?: number
+}
+
+export interface AccountPageStatsResponse {
+  stats: Record<string, AccountPageStatsItem>
+}
+
+export interface AccountsPageParams {
+  channel?: 'codex' | 'grok'
+  page: number
+  pageSize: number
+  search?: string
+  status?: string
+  plan?: string
+  authKind?: string
+  tag?: string
+  emailDomain?: string
+  groupInclude?: number[]
+  groupExclude?: number[]
+  ungrouped?: boolean
+  healthTier?: 'healthy' | 'warm' | 'risky' | 'banned' | 'attention'
+  proxyUrl?: string
+  proxyFilter?: 'all' | 'unbound' | 'this' | 'other'
+  sort?: 'requests' | 'usage' | 'created_at' | 'updated_at' | 'scheduler_priority' | 'group' | 'risk' | 'dispatch_score' | 'latency_penalty' | 'unauthorized'
+  order?: 'asc' | 'desc'
+}
+
+export interface AccountQuotaAnalysisBucket {
+  min: number
+  max: number
+  count: number
+}
+
+export interface AccountQuotaAnalysis {
+  total: number
+  sampled: number
+  unsampled: number
+  high_usage: number
+  exhausted: number
+  average_used: number | null
+  buckets: AccountQuotaAnalysisBucket[]
+}
+
+export interface AccountAnalysisTimeBucket {
+  start_at: number
+  end_at: number
+  count: number
+  cooldown_count?: number
+}
+
+export interface AccountRecoveryAnalysis {
+  total: number
+  recoverable: number
+  unknown: number
+  next_at: number | null
+  buckets: AccountAnalysisTimeBucket[]
+}
+
+export interface AccountResetAnalysis {
+  total: number
+  known: number
+  unknown: number
+  next_at: number | null
+  buckets: AccountAnalysisTimeBucket[]
+}
+
+export interface AccountPressureForecastAnalysis {
+  sampled: number
+  threshold: number
+  predicted_at: number | null
+  predicted_count: number
+  unknown: number
+  rpm: number
+  effective_rpm_limit: number
+  rpm_pressure: number | null
+  active_pressure: number
+  rate_limit_pressure: number
+  dispatchable_accounts: number
+  avg_concurrency: number
+  high_pressure_at: number | null
+  supply_shortage_at: number | null
+  risk_level: 'low' | 'medium' | 'high'
+  confidence: number
+}
+
+export interface AccountAnalysisResponse {
+  channel: 'codex' | 'grok'
+  quota: Record<'5h' | '7d', AccountQuotaAnalysis>
+  recovery: Record<'5h' | '7d', AccountRecoveryAnalysis>
+  reset: AccountResetAnalysis
+  forecasts: Record<'5h' | '7d', AccountPressureForecastAnalysis>
+  snapshot_at: ISODateString
+  stats_state: 'ready' | 'stale' | 'warming'
+}
+
+export interface AccountOperationSelector {
+  channel: 'codex' | 'grok'
+  search?: string
+  status?: string
+  plan?: string
+  auth_kind?: string
+  tag?: string
+  email_domain?: string
+  group_include?: number[]
+  group_exclude?: number[]
+  ungrouped?: boolean
+  refreshable_only?: boolean
+  subscription_unlocked?: boolean
+}
 
 // 单张「主动重置次数」券的有效期明细（issue #322）。
 export interface ResetCreditItem {
@@ -570,7 +728,8 @@ export interface UpdateAccountSchedulerRequest {
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
-  ids: number[]
+  ids?: number[]
+  selector?: AccountOperationSelector
   enabled?: boolean
   locked?: boolean
 }

@@ -34,18 +34,20 @@ import type {
   CodexClientMetadataMode,
   UpdateOpenAIResponsesAccountRequest,
   APIKeyRow,
-  OpsOverviewResponse,
+  AccountAnalysisResponse,
   AccountGroup,
   SystemSettings,
   RecycleBinAccountRow,
   AgentIdentityImportItem,
+  AccountListSummary,
+  AccountEmailDomainFacet,
+  AccountOperationSelector,
 } from "../types";
 import { getErrorMessage } from "../utils/error";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
 import { buildBatchMetadataUpdate } from "../lib/accountBatchUpdate";
 import {
   collectAccountOperationResult,
-  resolveChannelBatchTestAccountIDs,
   snapshotAccountOperationResults,
   type AccountOperationResult,
   type AccountOperationResultsState,
@@ -667,6 +669,8 @@ interface BatchOperationEvent {
   rate_limited?: number;
   deleted?: number;
   account_id?: number;
+  account_name?: string;
+  account_email?: string;
   message?: string;
   error?: string;
 }
@@ -788,6 +792,8 @@ export default function Accounts() {
     | "locked"
   >("all");
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
+  const accountPageAbortRef = useRef<AbortController | null>(null);
   const [planFilter, setPlanFilter] = useState<
     "all" | "pro" | "prolite" | "plus" | "team" | "k12" | "free"
   >("all");
@@ -795,6 +801,16 @@ export default function Accounts() {
     "requests" | "usage" | "importTime" | "schedulerPriority" | "group" | null
   >(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
+
+  useEffect(() => () => accountPageAbortRef.current?.abort(), []);
   const [addForm, setAddForm] = useState<AddAccountRequest>({
     refresh_token: "",
     session_token: "",
@@ -842,6 +858,8 @@ export default function Accounts() {
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null);
   const [detailAccountId, setDetailAccountId] = useState<number | null>(null);
+  const [detailAccountData, setDetailAccountData] = useState<AccountRow | null>(null);
+  const detailNavigationTargetRef = useRef<"first" | "last" | null>(null);
   const [editingAccount, setEditingAccount] = useState<AccountRow | null>(null);
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editTab, setEditTab] = useState<"scheduler" | "account">("scheduler");
@@ -923,6 +941,11 @@ export default function Accounts() {
   const [showAnalysisCharts, setShowAnalysisCharts] = useState(
     getInitialAnalysisVisibility,
   );
+  const [accountAnalysis, setAccountAnalysis] =
+    useState<AccountAnalysisResponse | null>(null);
+  const [accountAnalysisLoading, setAccountAnalysisLoading] = useState(false);
+  const [accountAnalysisError, setAccountAnalysisError] = useState<string | null>(null);
+  const accountAnalysisAbortRef = useRef<AbortController | null>(null);
   const [showRecycleBin, setShowRecycleBin] = useState(false);
   const [showEmailDomainTags, setShowEmailDomainTags] = useState(
     getInitialEmailDomainVisibility,
@@ -1031,6 +1054,8 @@ export default function Accounts() {
     EMPTY_ACCOUNT_GROUP_FILTER,
   );
   const [allGroups, setAllGroups] = useState<AccountGroup[]>([]);
+  const [apiKeys, setAPIKeys] = useState<APIKeyRow[]>([]);
+  const [lazyMode, setLazyMode] = useState(false);
   // 导入/添加账号时直接绑定的分组（记住上次选择，添加弹窗与导入弹窗共用，与 allowDuplicate 同风格）。
   const {
     groupIds: importGroupIds,
@@ -1098,7 +1123,6 @@ export default function Accounts() {
   const atFileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
-  const lazyModeRef = useRef<boolean | null>(null);
   const { toast, showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
   const ipApiLang = i18n.language?.startsWith("zh") ? "zh-CN" : "en";
@@ -1601,59 +1625,121 @@ export default function Accounts() {
     [applyOperationProgressEvent],
   );
 
-  const loadAccounts = useCallback(async (options?: LoadOptions) => {
-    const shouldLoadSettings = !options?.silent || lazyModeRef.current === null;
-    const [
-      accountsResponse,
-      apiKeysResponse,
-      opsOverview,
-      groupsResponse,
-      settings,
-      healthBars,
-    ] =
-      await Promise.all([
-        // Codex 页只拉非 Grok 账号，与 Grok 页 channel=grok 对称，减少大号池传输。
-        api.getAccounts({ channel: "codex" }),
-        api.getAPIKeys(),
-        api.getOpsOverview().catch((): OpsOverviewResponse | null => null),
-        api.listAccountGroups().catch(() => ({ groups: [] })),
-        shouldLoadSettings
-          ? api.getSettings().catch((): SystemSettings | null => null)
-          : Promise.resolve<SystemSettings | null>(null),
-        api
-          .getAccountHealthBars()
-          .then((res) => res.buckets)
-          .catch((): Record<string, AccountHealthBucket[]> | null => null),
-      ]);
-    if (settings) {
-      lazyModeRef.current = settings.lazy_mode;
-    }
-    setAllGroups(groupsResponse.groups ?? []);
+  const [pagedHealthBars, setPagedHealthBars] = useState<
+    Record<string, AccountHealthBucket[]>
+  >({});
+
+  const loadAccounts = useCallback(async (_options?: LoadOptions) => {
+    accountPageAbortRef.current?.abort();
+    const controller = new AbortController();
+    accountPageAbortRef.current = controller;
+    const accountsResponse = await api.getAccountsPage({
+      channel: "codex",
+      page,
+      pageSize,
+      search: debouncedSearchQuery,
+      status: statusFilter,
+      plan: planFilter,
+      tag: tagFilter,
+      emailDomain: domainFilter,
+      groupInclude: groupFilter.include,
+      groupExclude: groupFilter.exclude,
+      ungrouped: groupFilter.ungrouped,
+      sort: sortKey === "importTime"
+        ? "created_at"
+        : sortKey === "schedulerPriority"
+          ? "scheduler_priority"
+          : sortKey ?? undefined,
+      order: sortDir,
+    }, controller.signal);
     return {
       accounts: accountsResponse.accounts ?? [],
-      apiKeys: apiKeysResponse.keys ?? [],
-      opsOverview,
-      lazyMode: lazyModeRef.current ?? false,
-      healthBars: healthBars ?? {},
+      total: accountsResponse.total,
+      page: accountsResponse.page,
+      summary: accountsResponse.summary,
+      facets: accountsResponse.facets,
+      snapshotAt: accountsResponse.snapshot_at,
+      statsState: accountsResponse.stats_state,
     };
+  }, [debouncedSearchQuery, domainFilter, groupFilter.exclude, groupFilter.include, groupFilter.ungrouped, page, pageSize, planFilter, sortDir, sortKey, statusFilter, tagFilter]);
+
+  const loadAccountAnalysis = useCallback(async () => {
+    accountAnalysisAbortRef.current?.abort();
+    const controller = new AbortController();
+    accountAnalysisAbortRef.current = controller;
+    setAccountAnalysisLoading(true);
+    setAccountAnalysisError(null);
+    try {
+      const response = await api.getAccountAnalysis("codex", controller.signal);
+      if (!controller.signal.aborted) setAccountAnalysis(response);
+    } catch (analysisError) {
+      if (!controller.signal.aborted) {
+        setAccountAnalysisError(getErrorMessage(analysisError));
+      }
+    } finally {
+      if (!controller.signal.aborted) setAccountAnalysisLoading(false);
+    }
   }, []);
 
-  const { data, loading, error, reload, reloadSilently } = useDataLoader<{
+  useEffect(() => {
+    if (!showAnalysisCharts) {
+      accountAnalysisAbortRef.current?.abort();
+      return undefined;
+    }
+    void loadAccountAnalysis();
+    return () => accountAnalysisAbortRef.current?.abort();
+  }, [loadAccountAnalysis, showAnalysisCharts]);
+
+  // Auxiliary data is intentionally independent from the account page request:
+  // failures or slow settings/overview/group calls must not hold up the first row.
+  useEffect(() => {
+    let cancelled = false;
+    void api.getAPIKeys()
+      .then((response) => { if (!cancelled) setAPIKeys(response.keys ?? []); })
+      .catch(() => undefined);
+    void api.listAccountGroups()
+      .then((response) => { if (!cancelled) setAllGroups(response.groups ?? []); })
+      .catch(() => undefined);
+    void api.getSettings()
+      .then((settings) => { if (!cancelled) setLazyMode(settings.lazy_mode); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  const { data, setData, loading, error, reload, reloadSilently } = useDataLoader<{
     accounts: AccountRow[];
-    apiKeys: APIKeyRow[];
-    opsOverview: OpsOverviewResponse | null;
-    lazyMode: boolean;
-    healthBars: Record<string, AccountHealthBucket[]>;
+    total: number;
+    page: number;
+    summary: AccountListSummary | null;
+    facets: { tags: string[]; email_domains: AccountEmailDomainFacet[] };
+    snapshotAt: string;
+    statsState: "ready" | "stale" | "warming";
   }>({
     initialData: {
       accounts: [],
-      apiKeys: [],
-      opsOverview: null,
-      lazyMode: false,
-      healthBars: {},
+      total: 0,
+      page: 1,
+      summary: null,
+      facets: { tags: [], email_domains: [] },
+      snapshotAt: "",
+      statsState: "warming",
     },
     load: loadAccounts,
   });
+  const refreshAccountRow = useCallback(async (id: number) => {
+    const account = await api.getAccount(id);
+    setDetailAccountData((current) => current?.id === id ? account : current);
+    setData((current) => ({
+      ...current,
+      accounts: current.accounts.map((item) => item.id === id ? account : item),
+    }));
+    return account;
+  }, [setData]);
+  const loadAccountDetail = useCallback(
+    (account: AccountRow) =>
+      account.detail_loaded ? Promise.resolve(account) : api.getAccount(account.id),
+    [],
+  );
   // Codex 视图的统计卡/额度分布/列表/批量操作一律排除 Grok 账号
   // （Grok 账号由顶部切换后的 Grok 页单独统计与管理）。
   const allAccounts = data.accounts;
@@ -1661,10 +1747,45 @@ export default function Accounts() {
     () => allAccounts.filter((account) => !account.grok_api),
     [allAccounts],
   );
-  const apiKeys = data.apiKeys;
-  const opsOverview = data.opsOverview;
-  const lazyMode = data.lazyMode;
-  const healthBars = data.healthBars;
+  const accountPageIDsKey = useMemo(
+    () => accounts.map((account) => account.id).join(","),
+    [accounts],
+  );
+  const healthBars = pagedHealthBars;
+
+  useEffect(() => {
+    if (!accountPageIDsKey) {
+      setPagedHealthBars({});
+      return;
+    }
+    let cancelled = false;
+    const ids = accountPageIDsKey.split(",").map(Number);
+    void api.getAccountHealthBars(ids)
+      .then((response) => {
+        if (!cancelled) setPagedHealthBars(response.buckets ?? {});
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [accountPageIDsKey]);
+
+  useEffect(() => {
+    if (!accountPageIDsKey) return undefined;
+    const controller = new AbortController();
+    const ids = accountPageIDsKey.split(",").map(Number);
+    void api.getAccountPageStats(ids, controller.signal)
+      .then((response) => {
+        if (controller.signal.aborted) return;
+        setData((current) => ({
+          ...current,
+          accounts: current.accounts.map((account) => {
+            const stats = response.stats[String(account.id)];
+            return stats ? { ...account, ...stats } : account;
+          }),
+        }));
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [accountPageIDsKey, setData]);
   const usageReloadAttemptsRef = useRef<Map<number, number>>(new Map());
   // 测试连接后需要强制刷新用量的账号 id：即使其用量数据已存在（如已显示 100%），
   // 也要在后台探针跑完后重新拉取，确保进度条更新为最新值。
@@ -1695,11 +1816,11 @@ export default function Accounts() {
     if (loading) return;
     pageModeAutoAppliedRef.current = true;
     setPageMode(
-      accounts.length < ACCOUNT_PERSONAL_MODE_AUTO_THRESHOLD
+      data.total < ACCOUNT_PERSONAL_MODE_AUTO_THRESHOLD
         ? "personal"
         : "pool",
     );
-  }, [loading, accounts.length]);
+  }, [loading, data.total]);
 
   useEffect(() => {
     setGroupFilter((current) => pruneAccountGroupFilter(current, allGroups));
@@ -1751,56 +1872,23 @@ export default function Accounts() {
     return () => window.clearTimeout(timer);
   }, [accounts, reloadSilently]);
 
-  const accountSummary = useMemo(() => {
-    const rateLimitedWindowStats = getRateLimitedWindowStats(accounts);
-    // 健康分类:异常(封禁/错误) > 限流 > 正常。禁用只是调度开关,保留独立计数但不影响健康分类。
-    const bannedAccounts = accounts.filter(
-      (account) => account.status === "unauthorized",
-    ).length;
-    const errorAccounts = accounts.filter(
-      (account) => account.status === "error",
-    ).length;
-    const disabledAccounts = accounts.filter(
-      (account) => account.enabled === false,
-    ).length;
-    const abnormalAccounts = accounts.filter(
-      (account) =>
-        account.status === "unauthorized" ||
-        account.status === "error",
-    ).length;
-    const rateLimitedExclusive = accounts.filter(
-      (account) =>
-        account.status !== "unauthorized" &&
-        account.status !== "error" &&
-        isRateLimitedAccount(account),
-    ).length;
-    const normalAccounts = accounts.length - abnormalAccounts - rateLimitedExclusive;
-    const unsampledAccounts = accounts.filter(isUnsampledQuotaAccount).length;
-    return {
-      totalAccounts: accounts.length,
-      normalAccounts,
-      rateLimitedAccounts: rateLimitedExclusive,
-      rateLimited5hAccounts: rateLimitedWindowStats.fiveHour,
-      rateLimited7dAccounts: rateLimitedWindowStats.sevenDay,
-      abnormalAccounts,
-      bannedAccounts,
-      errorAccounts,
-      unsampledAccounts,
-      disabledAccounts,
-      lockedAccounts: accounts.filter((account) => account.locked).length,
-      subscriptionAccountsToLock: accounts.filter(
-        (account) => isSubscriptionPlan(account.plan_type) && !account.locked,
-      ),
-      healthyAccounts: accounts.filter(
-        (account) => account.health_tier === "healthy",
-      ).length,
-      warmAccounts: accounts.filter((account) => account.health_tier === "warm")
-        .length,
-      riskyAccounts: accounts.filter(
-        (account) => account.health_tier === "risky",
-      ).length,
-    };
-  }, [accounts]);
+  const accountSummary = {
+    totalAccounts: data.summary?.total ?? data.total,
+    normalAccounts: data.summary?.normal ?? 0,
+    rateLimitedAccounts: data.summary?.rate_limited ?? 0,
+    rateLimited5hAccounts: data.summary?.rate_limited_5h ?? 0,
+    rateLimited7dAccounts: data.summary?.rate_limited_7d ?? 0,
+    abnormalAccounts: data.summary?.abnormal ?? 0,
+    bannedAccounts: data.summary?.banned ?? 0,
+    errorAccounts: data.summary?.error ?? 0,
+    unsampledAccounts: data.summary?.unsampled ?? 0,
+    disabledAccounts: data.summary?.disabled ?? 0,
+    lockedAccounts: data.summary?.locked ?? 0,
+    subscriptionAccountsToLockCount: data.summary?.subscription_unlocked ?? 0,
+    healthyAccounts: data.summary?.healthy ?? 0,
+    warmAccounts: data.summary?.warm ?? 0,
+    riskyAccounts: data.summary?.risky ?? 0,
+  };
   const {
     totalAccounts,
     normalAccounts,
@@ -1813,182 +1901,104 @@ export default function Accounts() {
     unsampledAccounts,
     disabledAccounts,
     lockedAccounts,
-    subscriptionAccountsToLock,
+    subscriptionAccountsToLockCount,
     healthyAccounts,
     warmAccounts,
     riskyAccounts,
   } = accountSummary;
 
-  const allTags = useMemo(() => {
-    const tags = new Set<string>();
-    for (const account of accounts) {
-      for (const tag of account.tags ?? []) {
-        tags.add(tag);
-      }
-    }
-    return Array.from(tags).sort();
-  }, [accounts]);
+  const allTags = data.facets.tags;
+  const emailDomainStats = data.facets.email_domains;
+  const currentAccountSelector = useMemo<AccountOperationSelector>(() => ({
+    channel: "codex",
+    search: debouncedSearchQuery || undefined,
+    status: statusFilter === "all" ? undefined : statusFilter,
+    plan: planFilter === "all" ? undefined : planFilter,
+    tag: tagFilter || undefined,
+    email_domain: domainFilter || undefined,
+    group_include: groupFilter.include.length > 0 ? groupFilter.include : undefined,
+    group_exclude: groupFilter.exclude.length > 0 ? groupFilter.exclude : undefined,
+    ungrouped: groupFilter.ungrouped || undefined,
+  }), [debouncedSearchQuery, domainFilter, groupFilter.exclude, groupFilter.include, groupFilter.ungrouped, planFilter, statusFilter, tagFilter]);
 
-  const emailDomainStats = useMemo(() => {
-    const byDomain = new Map<string, EmailDomainStat>();
-    for (const account of accounts) {
-      const domain = getAccountEmailDomain(account);
-      if (!domain) continue;
-      const stat = byDomain.get(domain) ?? { domain, total: 0, banned: 0 };
-      stat.total += 1;
-      if (account.status === "unauthorized") {
-        stat.banned += 1;
-      }
-      byDomain.set(domain, stat);
-    }
-    return Array.from(byDomain.values()).sort((a, b) => {
-      if (b.banned !== a.banned) return b.banned - a.banned;
-      if (b.total !== a.total) return b.total - a.total;
-      return a.domain.localeCompare(b.domain);
-    });
-  }, [accounts]);
+  // 服务端已完成全池筛选、排序和分页。
+  const filteredAccounts = accounts;
+  const sortedAccounts = accounts;
 
-  const filteredAccounts = useMemo(() => {
-    const query = searchQuery.toLowerCase();
-    return accounts.filter((account) => {
-      switch (statusFilter) {
-        case "normal":
-          if (
-            account.status === "unauthorized" ||
-            account.status === "error" ||
-            isRateLimitedAccount(account)
-          )
-            return false;
-          break;
-        case "rate_limited":
-          if (
-            account.status === "unauthorized" ||
-            account.status === "error"
-          )
-            return false;
-          if (!isRateLimitedAccount(account)) return false;
-          break;
-        case "abnormal":
-          if (
-            account.status !== "unauthorized" &&
-            account.status !== "error"
-          )
-            return false;
-          break;
-        case "banned":
-          if (account.status !== "unauthorized") return false;
-          break;
-        case "error":
-          if (account.status !== "error") return false;
-          break;
-        case "unsampled":
-          if (!isUnsampledQuotaAccount(account)) return false;
-          break;
-        case "disabled":
-          if (account.enabled !== false) return false;
-          break;
-        case "locked":
-          if (!account.locked) return false;
-          break;
-      }
-      if (planFilter !== "all") {
-        const plan = (account.plan_type || "").toLowerCase().trim();
-        if (plan !== planFilter) return false;
-      }
-      if (query) {
-        const email = (account.email || "").toLowerCase();
-        const name = (account.name || "").toLowerCase();
-        const domain = getAccountEmailDomain(account);
-        if (!email.includes(query) && !name.includes(query) && !domain.includes(query))
-          return false;
-      }
-      if (tagFilter && !(account.tags ?? []).includes(tagFilter)) return false;
-      if (domainFilter && getAccountEmailDomain(account) !== domainFilter) return false;
-      if (!accountMatchesGroupFilter(account.group_ids ?? [], groupFilter))
-        return false;
-      return true;
-    });
-  }, [accounts, domainFilter, groupFilter, planFilter, searchQuery, statusFilter, tagFilter]);
-
-  const sortedAccounts = useMemo(() => {
-    if (!sortKey) return filteredAccounts;
-    return [...filteredAccounts].sort((a, b) => {
-      let diff = 0;
-      if (sortKey === "requests") {
-        diff =
-          (a.success_requests ?? 0) +
-          (a.error_requests ?? 0) -
-          ((b.success_requests ?? 0) + (b.error_requests ?? 0));
-      } else if (sortKey === "usage") {
-        diff = (a.usage_percent_7d ?? -1) - (b.usage_percent_7d ?? -1);
-      } else if (sortKey === "importTime") {
-        diff =
-          new Date(a.created_at || 0).getTime() -
-          new Date(b.created_at || 0).getTime();
-      } else if (sortKey === "schedulerPriority") {
-        diff = getSchedulerPriority(a) - getSchedulerPriority(b);
-        if (diff === 0) return a.id - b.id;
-      } else if (sortKey === "group") {
-        const aMeta = getAccountGroupSortMeta(a, allGroups);
-        const bMeta = getAccountGroupSortMeta(b, allGroups);
-        diff = aMeta.order - bMeta.order;
-        if (diff === 0) {
-          diff = aMeta.key.localeCompare(bMeta.key, "zh");
-        }
-        if (diff === 0) return a.id - b.id;
-      }
-      return sortDir === "asc" ? diff : -diff;
-    });
-  }, [allGroups, filteredAccounts, sortDir, sortKey]);
-
-  const totalPages = Math.max(1, Math.ceil(sortedAccounts.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(data.total / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const pagedAccounts = useMemo(
-    () =>
-      sortedAccounts.slice(
-        (currentPage - 1) * pageSize,
-        currentPage * pageSize,
-      ),
-    [currentPage, pageSize, sortedAccounts],
-  );
+  const pagedAccounts = accounts;
   const pagedAccountIds = useMemo(
     () => pagedAccounts.map((account) => account.id),
     [pagedAccounts],
   );
-  // 详情抽屉：始终从最新 accounts 列表取行，保证刷新后状态同步。
-  const detailAccount = useMemo(
+  const detailListAccount = useMemo(
     () =>
       detailAccountId == null
         ? null
         : (accounts.find((account) => account.id === detailAccountId) ?? null),
     [accounts, detailAccountId],
   );
+  const detailAccount =
+    detailAccountData?.id === detailAccountId
+      ? detailAccountData
+      : detailListAccount;
   const detailNavIndex = useMemo(() => {
     if (detailAccountId == null) return -1;
     return sortedAccounts.findIndex((account) => account.id === detailAccountId);
   }, [detailAccountId, sortedAccounts]);
   const openAccountDetail = useCallback((account: AccountRow) => {
+    setDetailAccountData(account);
     setDetailAccountId(account.id);
   }, []);
   const closeAccountDetail = useCallback(() => {
     setDetailAccountId(null);
+    setDetailAccountData(null);
   }, []);
   const goDetailPrev = useCallback(() => {
-    if (detailNavIndex <= 0) return;
-    setDetailAccountId(sortedAccounts[detailNavIndex - 1]?.id ?? null);
-  }, [detailNavIndex, sortedAccounts]);
-  const goDetailNext = useCallback(() => {
-    if (detailNavIndex < 0 || detailNavIndex >= sortedAccounts.length - 1) return;
-    setDetailAccountId(sortedAccounts[detailNavIndex + 1]?.id ?? null);
-  }, [detailNavIndex, sortedAccounts]);
-
-  // 账号被删除或过滤后从列表消失时，自动关闭详情抽屉。
-  useEffect(() => {
-    if (detailAccountId == null) return;
-    if (!accounts.some((account) => account.id === detailAccountId)) {
-      setDetailAccountId(null);
+    if (detailNavIndex > 0) {
+      const target = sortedAccounts[detailNavIndex - 1] ?? null;
+      setDetailAccountData(target);
+      setDetailAccountId(target?.id ?? null);
+      return;
     }
-  }, [accounts, detailAccountId]);
+    if (currentPage > 1) {
+      detailNavigationTargetRef.current = "last";
+      setPage(currentPage - 1);
+    }
+  }, [currentPage, detailNavIndex, sortedAccounts]);
+  const goDetailNext = useCallback(() => {
+    if (detailNavIndex >= 0 && detailNavIndex < sortedAccounts.length - 1) {
+      const target = sortedAccounts[detailNavIndex + 1] ?? null;
+      setDetailAccountData(target);
+      setDetailAccountId(target?.id ?? null);
+      return;
+    }
+    if (currentPage < totalPages) {
+      detailNavigationTargetRef.current = "first";
+      setPage(currentPage + 1);
+    }
+  }, [currentPage, detailNavIndex, sortedAccounts, totalPages]);
+
+  useEffect(() => {
+    if (detailAccountId == null) return undefined;
+    const controller = new AbortController();
+    void api.getAccount(detailAccountId, controller.signal)
+      .then((account) => {
+        if (!controller.signal.aborted) setDetailAccountData(account);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [detailAccountId, detailListAccount?.enabled, detailListAccount?.locked, detailListAccount?.status, detailListAccount?.updated_at]);
+
+  useEffect(() => {
+    const target = detailNavigationTargetRef.current;
+    if (!target || data.page !== page || accounts.length === 0) return;
+    const account = target === "first" ? accounts[0] : accounts[accounts.length - 1];
+    detailNavigationTargetRef.current = null;
+    setDetailAccountData(account ?? null);
+    setDetailAccountId(account?.id ?? null);
+  }, [accounts, data.page, page]);
   // 自用模式（personal）下，主体列表强制走每行 2 列卡片，桌面端也不渲染表格。
   const isPersonalMode = pageMode === "personal";
   const shouldRenderMobileCards =
@@ -3214,7 +3224,7 @@ export default function Accounts() {
     try {
       const result = await api.refreshAccount(account.id);
       showToast(result.message || t("accounts.refreshRequested"));
-      void reloadSilently();
+      await refreshAccountRow(account.id);
     } catch (error) {
       showToast(
         t("accounts.refreshFailed", { error: getErrorMessage(error) }),
@@ -3236,7 +3246,7 @@ export default function Accounts() {
       showToast(
         newLocked ? t("accounts.lockSuccess") : t("accounts.unlockSuccess"),
       );
-      void reload();
+      await refreshAccountRow(account.id);
     } catch (error) {
       showToast(
         t("accounts.lockFailed", { error: getErrorMessage(error) }),
@@ -3246,8 +3256,7 @@ export default function Accounts() {
   };
 
   const handleLockSubscriptionAccounts = async () => {
-    const candidates = subscriptionAccountsToLock;
-    if (candidates.length === 0) {
+    if (subscriptionAccountsToLockCount === 0) {
       showToast(t("accounts.noSubscriptionAccountsToLock"));
       return;
     }
@@ -3256,7 +3265,7 @@ export default function Accounts() {
     setLockingSubscriptionAccounts(true);
     try {
       const result = await api.batchUpdateAccounts({
-        ids: candidates.map((account) => account.id),
+        selector: { channel: "codex", subscription_unlocked: true },
         locked: true,
       });
       showToast(
@@ -3286,7 +3295,7 @@ export default function Accounts() {
           ? t("accounts.enableSuccess")
           : t("accounts.disableSuccess"),
       );
-      void reload();
+      await refreshAccountRow(account.id);
     } catch (error) {
       showToast(
         t("accounts.enableFailed", { error: getErrorMessage(error) }),
@@ -3373,15 +3382,17 @@ export default function Accounts() {
     }
   };
 
-  const handleBatchRefresh = async (ids?: number[]) => {
-    const targetIds = ids ?? Array.from(selected);
-    if (targetIds.length === 0) return;
+  const handleBatchRefresh = async (ids?: number[], allRefreshable = false) => {
+    const targetIds = ids ?? (allRefreshable ? [] : Array.from(selected));
+    if (!allRefreshable && targetIds.length === 0) return;
     setBatchLoading(true);
     setBatchRefreshing(true);
     try {
       const result = await runStreamingAccountOperation(
         "/accounts/batch-refresh?stream=true",
-        { ids: targetIds },
+        allRefreshable
+          ? { selector: { channel: "codex", refreshable_only: true } }
+          : { ids: targetIds },
         t("accounts.batchRefreshProgressTitle"),
       );
       const success = result?.success ?? 0;
@@ -3451,7 +3462,7 @@ export default function Accounts() {
     try {
       await api.resetAccountStatus(account.id);
       showToast(t("accounts.resetStatusSuccess"));
-      void reload();
+      await refreshAccountRow(account.id);
     } catch (error) {
       showToast(
         t("accounts.resetStatusFailed", { error: getErrorMessage(error) }),
@@ -3605,11 +3616,23 @@ export default function Accounts() {
     }
   };
 
-  const openModelsEditor = (account: AccountRow) => {
+  const populateModelsEditor = (account: AccountRow) => {
     setModelsAccount(account);
     setModelsDraft([...(account.models ?? [])]);
     setModelsInputDraft("");
     setProbeBoard([]);
+  };
+
+  const openModelsEditor = (account: AccountRow) => {
+    void loadAccountDetail(account)
+      .then(populateModelsEditor)
+      .catch((error) => showToast(getErrorMessage(error), "error"));
+  };
+
+  const openTestingAccount = (account: AccountRow) => {
+    void loadAccountDetail(account)
+      .then(setTestingAccount)
+      .catch((error) => showToast(getErrorMessage(error), "error"));
   };
 
   const closeModelsEditor = () => {
@@ -3896,17 +3919,13 @@ export default function Accounts() {
   };
 
   const handleBatchTest = async (ids?: number[]) => {
-    const scopedIDs = resolveChannelBatchTestAccountIDs(
-      accounts,
-      "codex",
-      ids,
-    );
-    if (scopedIDs.length === 0) return;
+    if (ids && ids.length === 0) return;
+    if (!ids && data.total === 0) return;
     setBatchTesting(true);
     try {
       const result = await runStreamingAccountOperation(
         "/accounts/batch-test?stream=true",
-        { ids: scopedIDs },
+        ids ? { ids } : { selector: currentAccountSelector },
         t("accounts.batchTestProgressTitle"),
       );
       showToast(
@@ -3997,7 +4016,7 @@ export default function Accounts() {
     }
   };
 
-  const openSchedulerEditor = (account: AccountRow) => {
+  const populateSchedulerEditor = (account: AccountRow) => {
     setEditingAccount(account);
     setEditTab("scheduler");
     setScoreMode(
@@ -4077,6 +4096,12 @@ export default function Accounts() {
     setEditOAuthCallbackUrl("");
     setEditOAuthGenerating(false);
     setEditOAuthUpdating(false);
+  };
+
+  const openSchedulerEditor = (account: AccountRow) => {
+    void loadAccountDetail(account)
+      .then(populateSchedulerEditor)
+      .catch((error) => showToast(getErrorMessage(error), "error"));
   };
 
   const closeSchedulerEditor = (force = false) => {
@@ -4504,8 +4529,8 @@ export default function Accounts() {
       />
       <StateShell
         variant="page"
-        loading={loading}
-        error={error}
+        loading={loading && accounts.length === 0}
+        error={accounts.length === 0 ? error : null}
         onRetry={() => void reload()}
         loadingTitle={t("accounts.loadingTitle")}
         loadingDescription={t("accounts.loadingDesc")}
@@ -4574,11 +4599,9 @@ export default function Accounts() {
                           disabled:
                             batchLoading ||
                             batchTesting ||
-                            accounts.length === 0,
+                            data.total === 0,
                           onSelect: () =>
-                            void handleBatchRefresh(
-                              accounts.map((account) => account.id),
-                            ),
+                            void handleBatchRefresh(undefined, true),
                         },
                         {
                           key: "lock-subscription",
@@ -4590,9 +4613,9 @@ export default function Accounts() {
                             batchLoading ||
                             batchTesting ||
                             lockingSubscriptionAccounts ||
-                            accounts.length === 0,
+                            subscriptionAccountsToLockCount === 0,
                           title: t("accounts.lockSubscriptionAccountsHint", {
-                            count: subscriptionAccountsToLock.length,
+                            count: subscriptionAccountsToLockCount,
                           }),
                           onSelect: () => void handleLockSubscriptionAccounts(),
                         },
@@ -4684,7 +4707,7 @@ export default function Accounts() {
                         size="sm"
                         className="shrink-0"
                         disabled={
-                          batchLoading || batchTesting || accounts.length === 0
+                          batchLoading || batchTesting || data.total === 0
                         }
                         onClick={() => void handleBatchTest()}
                       >
@@ -4825,6 +4848,20 @@ export default function Accounts() {
             }
           />
 
+          {error && accounts.length > 0 ? (
+            <div className="mb-2 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive" role="alert">
+              <span className="truncate">{error}</span>
+              <Button variant="outline" size="sm" onClick={() => void reload()}>
+                {t("common.retry")}
+              </Button>
+            </div>
+          ) : null}
+          {loading || data.statsState !== "ready" ? (
+            <div className="mb-2 flex items-center justify-end gap-1.5 text-xs text-muted-foreground" role="status">
+              {loading ? <Loader2 className="size-3 animate-spin" /> : null}
+              {loading ? t("common.loading") : data.statsState}
+            </div>
+          ) : null}
           <div className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-4">
             <CompactStat
               label={t("accounts.totalAccounts")}
@@ -4880,29 +4917,39 @@ export default function Accounts() {
             />
           </div>
 
-          {showAnalysisCharts ? (
+          {showAnalysisCharts && accountAnalysis ? (
             <div className="mb-4 grid items-stretch gap-4 xl:grid-cols-2">
               <AccountQuotaDistributionChart
-                accounts={accounts}
+                analysis={accountAnalysis.quota}
                 compact
                 className="min-w-0"
                 onProbeStarted={() => {
                   showToast(t('accounts.quotaDistributionRefreshStarted'), 'success')
                   // 探针在后台并发执行；稍等一下再静默拉取，让首批结果有机会回流
                   window.setTimeout(() => {
-                    void reloadSilently()
+                    void loadAccountAnalysis()
                   }, 4000)
                 }}
                 onProbeError={(message) => showToast(message, 'error')}
               />
               <AccountRateLimitRecoveryChart
-                accounts={accounts}
-                currentRpm={opsOverview?.traffic?.rpm}
-                rpmLimit={opsOverview?.traffic?.rpm_limit}
-                avgDurationMs={opsOverview?.traffic?.avg_duration_ms}
+                analysis={accountAnalysis}
                 compact
                 className="min-w-0"
               />
+            </div>
+          ) : showAnalysisCharts ? (
+            <div className="mb-4 flex min-h-28 items-center justify-center rounded-xl border border-dashed border-border bg-muted/20 px-4 text-sm text-muted-foreground">
+              {accountAnalysisError ? (
+                <div className="flex flex-wrap items-center justify-center gap-3 text-center">
+                  <span>{accountAnalysisError}</span>
+                  <Button variant="outline" size="sm" onClick={() => void loadAccountAnalysis()}>
+                    {t("common.retry")}
+                  </Button>
+                </div>
+              ) : (
+                <span>{accountAnalysisLoading ? t("common.loading") : t("common.noData")}</span>
+              )}
             </div>
           ) : null}
 
@@ -4983,10 +5030,7 @@ export default function Accounts() {
                   className="h-9 rounded-lg pl-9 text-[13px] sm:h-8"
                   placeholder={t("accounts.searchPlaceholder")}
                   value={searchQuery}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    setSearchQuery(e.target.value);
-                    setPage(1);
-                  }}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSearchQuery(e.target.value)}
                 />
               </div>
               <div className="flex max-w-full shrink-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-border bg-muted/30 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -5446,7 +5490,6 @@ export default function Accounts() {
           )}
 
           <PendingSelfServiceReviewPanel
-            accounts={accounts}
             onApprove={handleApprovePending}
             onReject={handleRejectPending}
             onSaveNote={handleSaveNote}
@@ -5497,7 +5540,7 @@ export default function Accounts() {
                           onEdit={() => openSchedulerEditor(account)}
                           onEditGroups={() => openQuickGroupEditor(account)}
                           onUsage={() => setUsageAccount(account)}
-                          onTest={() => setTestingAccount(account)}
+                          onTest={() => openTestingAccount(account)}
                           onRefresh={() => void handleRefresh(account)}
                           onGenerateAuthJson={() =>
                             void handleGenerateAuthJSON(account)
@@ -6085,7 +6128,7 @@ export default function Accounts() {
                                     variant="ghost"
                                     size="icon-sm"
                                     className="size-8"
-                                    onClick={() => setTestingAccount(account)}
+                                    onClick={() => openTestingAccount(account)}
                                     title={t("accounts.testConnection")}
                                   >
                                     <Zap className="size-3.5" />
@@ -6108,7 +6151,7 @@ export default function Accounts() {
                                     )}
                                     includeTest={false}
                                     includeDelete={false}
-                                    onTest={() => setTestingAccount(account)}
+                                    onTest={() => openTestingAccount(account)}
                                     onRefresh={() => void handleRefresh(account)}
                                     onGenerateAuthJson={() =>
                                       void handleGenerateAuthJSON(account)
@@ -6142,7 +6185,7 @@ export default function Accounts() {
                   page={currentPage}
                   totalPages={totalPages}
                   onPageChange={setPage}
-                  totalItems={sortedAccounts.length}
+                  totalItems={data.total}
                   pageSize={pageSize}
                   pageSizeOptions={pageSizeOptions}
                   onPageSizeChange={(nextPageSize) => {
@@ -7376,7 +7419,9 @@ export default function Accounts() {
                 : undefined
             }
             sequence={
-              detailNavIndex >= 0 ? detailNavIndex + 1 : undefined
+              detailNavIndex >= 0
+                ? (currentPage - 1) * pageSize + detailNavIndex + 1
+                : undefined
             }
             usageSlot={
               detailAccount ? (
@@ -7387,10 +7432,10 @@ export default function Accounts() {
                 />
               ) : null
             }
-            canGoPrev={detailNavIndex > 0}
+            canGoPrev={detailNavIndex > 0 || currentPage > 1}
             canGoNext={
-              detailNavIndex >= 0 &&
-              detailNavIndex < sortedAccounts.length - 1
+              (detailNavIndex >= 0 && detailNavIndex < sortedAccounts.length - 1) ||
+              currentPage < totalPages
             }
             refreshing={
               detailAccount
@@ -7415,7 +7460,7 @@ export default function Accounts() {
             }}
             onTest={() => {
               if (!detailAccount) return;
-              setTestingAccount(detailAccount);
+              openTestingAccount(detailAccount);
             }}
             onRefresh={() => {
               if (!detailAccount) return;
@@ -13530,26 +13575,38 @@ function CooldownTimer({ until }: { until: string }) {
 const SELF_SERVICE_TAG = "self-service";
 
 function PendingSelfServiceReviewPanel({
-  accounts,
   onApprove,
   onReject,
   onSaveNote,
 }: {
-  accounts: AccountRow[];
-  onApprove: (account: AccountRow) => void;
-  onReject: (account: AccountRow) => void;
+  onApprove: (account: AccountRow) => Promise<void>;
+  onReject: (account: AccountRow) => Promise<void>;
   onSaveNote: (account: AccountRow, note: string) => Promise<void>;
 }) {
   const { t } = useTranslation();
-  const pending = useMemo(
-    () =>
-      accounts.filter(
-        (account) =>
-          account.enabled === false &&
-          (account.tags ?? []).includes(SELF_SERVICE_TAG),
-      ),
-    [accounts],
-  );
+  const [pending, setPending] = useState<AccountRow[]>([]);
+  const [pendingPage, setPendingPage] = useState(1);
+  const [pendingTotal, setPendingTotal] = useState(0);
+  const pendingPageSize = 20;
+  const loadPending = useCallback(async () => {
+    try {
+      const response = await api.getAccountsPage({
+        channel: "codex",
+        page: pendingPage,
+        pageSize: pendingPageSize,
+        status: "disabled",
+        tag: SELF_SERVICE_TAG,
+        sort: "created_at",
+        order: "asc",
+      });
+      setPending(response.accounts ?? []);
+      setPendingTotal(response.total ?? 0);
+      if (response.page !== pendingPage) setPendingPage(response.page);
+    } catch {
+      // This auxiliary panel must never block the account list.
+    }
+  }, [pendingPage]);
+  useEffect(() => { void loadPending(); }, [loadPending]);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [draftNote, setDraftNote] = useState("");
   const [savingId, setSavingId] = useState<number | null>(null);
@@ -13570,6 +13627,7 @@ function PendingSelfServiceReviewPanel({
     setSavingId(account.id);
     try {
       await onSaveNote(account, draftNote.trim());
+      await loadPending();
       setEditingId(null);
       setDraftNote("");
     } finally {
@@ -13589,7 +13647,7 @@ function PendingSelfServiceReviewPanel({
               {t("accounts.pendingReview.title")}
             </div>
             <div className="text-[11px] text-muted-foreground">
-              {t("accounts.pendingReview.count", { count: pending.length })} ·{" "}
+              {t("accounts.pendingReview.count", { count: pendingTotal })} ·{" "}
               {t("accounts.pendingReview.desc")}
             </div>
           </div>
@@ -13672,7 +13730,7 @@ function PendingSelfServiceReviewPanel({
                   <Button
                     size="sm"
                     className="h-9"
-                    onClick={() => onApprove(account)}
+                    onClick={() => void onApprove(account).then(loadPending)}
                   >
                     <Check className="size-3.5" />
                     {t("accounts.pendingReview.approve")}
@@ -13681,7 +13739,7 @@ function PendingSelfServiceReviewPanel({
                     size="sm"
                     variant="outline"
                     className="h-9"
-                    onClick={() => onReject(account)}
+                    onClick={() => void onReject(account).then(loadPending)}
                   >
                     <Trash2 className="size-3.5" />
                     {t("accounts.pendingReview.reject")}
@@ -13691,6 +13749,17 @@ function PendingSelfServiceReviewPanel({
             );
           })}
         </div>
+        {pendingTotal > pendingPageSize ? (
+          <div className="mt-3">
+            <Pagination
+              page={pendingPage}
+              totalPages={Math.max(1, Math.ceil(pendingTotal / pendingPageSize))}
+              totalItems={pendingTotal}
+              pageSize={pendingPageSize}
+              onPageChange={setPendingPage}
+            />
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );

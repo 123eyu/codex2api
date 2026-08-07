@@ -168,10 +168,13 @@ export default function CodexInviteView({ accounts, onClose, loading = false }: 
   const { t } = useTranslation()
   const { showToast } = useToast()
 
-  // 仅保留可用于 referral 的 Codex OAuth 账号；中转 / AT-only / 失效账号不能发送邀请。
+  const [pickerAccounts, setPickerAccounts] = useState<AccountRow[]>(accounts)
+  const [pickerLoading, setPickerLoading] = useState(loading)
+
+  // 仅保留可用于 referral 的 Codex OAuth 账号；选择器由服务端分页搜索驱动。
   const codexAccounts = useMemo(
-    () => accounts.filter(isCodexInviteCandidate),
-    [accounts],
+    () => pickerAccounts.filter(isCodexInviteCandidate),
+    [pickerAccounts],
   )
   const firstAccount = codexAccounts[0] ?? null
 
@@ -199,6 +202,30 @@ export default function CodexInviteView({ accounts, onClose, loading = false }: 
   const proxyUrlRef = useRef(proxyUrl)
   // 递增序号用于丢弃过期响应（快速切换账号时后到的旧响应不能覆盖新账号的数据）。
   const infoSeqRef = useRef(0)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      setPickerLoading(true)
+      void api.getAccountsPage({
+        channel: 'codex',
+        page: 1,
+        pageSize: 100,
+        search: accountTyping ? accountQuery.trim() : undefined,
+      }, controller.signal)
+        .then((response) => {
+          if (!controller.signal.aborted) setPickerAccounts(response.accounts ?? [])
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (!controller.signal.aborted) setPickerLoading(false)
+        })
+    }, accountTyping ? 250 : 0)
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [accountQuery, accountTyping])
 
   const parsed = useMemo(() => parseEmails(emailsText), [emailsText])
   const selectedAccount = useMemo(
@@ -421,7 +448,7 @@ export default function CodexInviteView({ accounts, onClose, loading = false }: 
       <div className="mt-4 space-y-5">
         {codexAccounts.length === 0 ? (
           <div className="mx-auto max-w-2xl">
-            <EmptyState message={loading ? t('invite.accountsLoading') : t('invite.noCodexAccounts')} spinning={loading} />
+            <EmptyState message={pickerLoading ? t('invite.accountsLoading') : t('invite.noCodexAccounts')} spinning={pickerLoading} />
           </div>
         ) : (
           <div className="grid grid-cols-1 items-stretch gap-5 lg:grid-cols-2 xl:grid-cols-12">

@@ -1001,6 +1001,11 @@ func (db *DB) migrate(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
 	CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);
 	CREATE INDEX IF NOT EXISTS idx_accounts_cooldown_until ON accounts(cooldown_until);
+	CREATE INDEX IF NOT EXISTS idx_accounts_upstream_type_id ON accounts ((LOWER(COALESCE(credentials->>'upstream_type', ''))), id);
+	CREATE INDEX IF NOT EXISTS idx_accounts_active_upstream_type_id ON accounts ((LOWER(COALESCE(credentials->>'upstream_type', ''))), id)
+		WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted';
+	CREATE INDEX IF NOT EXISTS idx_accounts_created_id ON accounts(created_at, id);
+	CREATE INDEX IF NOT EXISTS idx_accounts_updated_id ON accounts(updated_at, id);
 
 
 	CREATE TABLE IF NOT EXISTS usage_logs (

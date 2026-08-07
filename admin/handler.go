@@ -77,10 +77,26 @@ type Handler struct {
 	chartCacheMu   sync.RWMutex
 	chartCacheData map[string]*chartCacheEntry
 
-	// 账号请求统计缓存（30秒 TTL）
+	// 账号请求统计缓存（分页路径 10 秒 stale-while-revalidate；旧全量路径复用同一份值）
 	reqCountMu        sync.RWMutex
 	reqCountCache     map[int64]*database.AccountRequestCount
 	reqCountExpiresAt time.Time
+	reqCountRefreshMu sync.Mutex
+
+	// 管理后台账号分页使用的轻量快照。快照按渠道缓存，只保存筛选、排序和
+	// 当前页定位所需的信息；完整账号响应仍只为当前页构建。
+	accountListCacheMu sync.RWMutex
+	accountListCache   map[string]*accountListSnapshot
+	accountListBuildMu sync.Mutex
+
+	// 分析图表使用固定大小的聚合结果，避免把完整号池传给浏览器。与账号
+	// 快照分开缓存，只有展开分析区或 Dashboard runway 时才会构建。
+	accountAnalysisCacheMu        sync.RWMutex
+	accountAnalysisCache          map[string]*accountAnalysisCacheEntry
+	accountAnalysisBuildMu        sync.Mutex
+	accountAnalysisTrafficMu      sync.RWMutex
+	accountAnalysisTraffic        map[string]*accountAnalysisTrafficCacheEntry
+	accountAnalysisTrafficBuildMu sync.Mutex
 
 	// 「主动重置次数」消耗操作的工作区级互斥锁（workspace -> *sync.Mutex），
 	// 串行化同一上游工作区的并发重置，避免重复消耗与次数计数竞态。
@@ -504,20 +520,22 @@ func parseUsageChannel(c *gin.Context) string {
 // NewHandler 创建管理后台处理器
 func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *proxy.RateLimiter, adminSecretEnv string) *Handler {
 	handler := &Handler{
-		store:          store,
-		cache:          tc,
-		db:             db,
-		cacheCfgStore:  db,
-		rateLimiter:    rl,
-		cpuSampler:     newCPUSampler(),
-		startedAt:      time.Now(),
-		databaseDriver: db.Driver(),
-		databaseLabel:  db.Label(),
-		cacheDriver:    tc.Driver(),
-		cacheLabel:     tc.Label(),
-		adminSecretEnv: adminSecretEnv,
-		imageProxy:     proxy.NewHandler(store, db, nil, nil),
-		chartCacheData: make(map[string]*chartCacheEntry),
+		store:                store,
+		cache:                tc,
+		db:                   db,
+		cacheCfgStore:        db,
+		rateLimiter:          rl,
+		cpuSampler:           newCPUSampler(),
+		startedAt:            time.Now(),
+		databaseDriver:       db.Driver(),
+		databaseLabel:        db.Label(),
+		cacheDriver:          tc.Driver(),
+		cacheLabel:           tc.Label(),
+		adminSecretEnv:       adminSecretEnv,
+		imageProxy:           proxy.NewHandler(store, db, nil, nil),
+		chartCacheData:       make(map[string]*chartCacheEntry),
+		accountListCache:     make(map[string]*accountListSnapshot),
+		accountAnalysisCache: make(map[string]*accountAnalysisCacheEntry),
 	}
 	if handler.imageProxy != nil {
 		handler.imageProxy.SetRuntimeCache(tc)
@@ -579,6 +597,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.Use(h.adminAuthMiddleware())
 	api.GET("/stats", h.GetStats)
 	api.GET("/accounts", h.ListAccounts)
+	api.GET("/accounts/analysis", h.GetAccountAnalysis)
+	api.GET("/accounts/page-stats", h.GetAccountPageStats)
+	api.GET("/accounts/:id", h.GetAccount)
 	api.POST("/accounts", h.AddAccount)
 	api.POST("/accounts/at", h.AddATAccount)
 	api.POST("/accounts/codex/agent-identity", h.ImportCodexAgentIdentity)
@@ -949,6 +970,7 @@ func isDashboardRateLimitedAccount(status string, cooldownReason string) bool {
 // ==================== Accounts ====================
 
 type accountResponse struct {
+	DetailLoaded          bool   `json:"detail_loaded,omitempty"`
 	ID                    int64  `json:"id"`
 	Name                  string `json:"name"`
 	Email                 string `json:"email"`
@@ -1114,338 +1136,213 @@ type schedulerBreakdownResponse struct {
 
 // ListAccounts 获取账号列表
 func (h *Handler) ListAccounts(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	view := strings.ToLower(strings.TrimSpace(c.Query("view")))
+	timeout := 5 * time.Second
+	if view == "page" {
+		timeout = 15 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 	defer cancel()
 
 	// ?view=lite — 轻量视图:只返回身份/绑定字段,跳过用量富化与探测触发。
 	// 供代理绑定弹窗等只需要"账号是谁、绑了哪条代理"的场景,大号池下不再传输
 	// 全量调度指标(代理页卡死问题)。
-	if strings.EqualFold(strings.TrimSpace(c.Query("view")), "lite") {
+	if view == "lite" {
 		h.listAccountsLite(c, ctx)
 		return
 	}
 
-	h.store.TriggerUsageProbeAsync()
-	h.store.TriggerRecoveryProbeAsync()
+	// The paged list is a read path and must never fan out probes across a
+	// 40k-account pool. Existing background schedulers and explicit refresh
+	// actions own probing; the legacy full response preserves its old behavior.
+	if view != "page" {
+		h.store.TriggerUsageProbeAsync()
+		h.store.TriggerRecoveryProbeAsync()
+	}
 
 	// Optional ?channel=codex|grok — server-side filter so Grok/Codex admin
 	// pages only transfer and enrich their own account set.
 	channel := parseUsageChannel(c)
-	rows, err := h.db.ListActiveByChannel(ctx, channel)
+	var pageSelection *accountPageSelection
+	var rows []*database.AccountRow
+	var err error
+	if view == "page" {
+		pageSelection, err = h.getAccountPageSelection(ctx, c, channel)
+		if err == nil {
+			rows = pageSelection.Rows
+		}
+	} else {
+		rows, err = h.db.ListActiveByChannel(ctx, channel)
+	}
 	if err != nil {
-		writeInternalError(c, err)
+		var queryErr *accountPageQueryError
+		if view == "page" && errors.As(err, &queryErr) {
+			writeError(c, http.StatusBadRequest, err.Error())
+		} else {
+			writeInternalError(c, err)
+		}
 		return
 	}
 
 	// 合并内存中的调度指标
 	accountMap := make(map[int64]*auth.Account)
-	for _, acc := range h.store.Accounts() {
-		accountMap[acc.DBID] = acc
+	if view == "page" {
+		for _, row := range rows {
+			if acc := h.store.FindByID(row.ID); acc != nil {
+				accountMap[row.ID] = acc
+			}
+		}
+	} else {
+		for _, acc := range h.store.Accounts() {
+			accountMap[acc.DBID] = acc
+		}
 	}
 
-	// 获取每账号近 7 天请求统计（带 30 秒内存缓存）
-	reqCounts := h.getCachedRequestCounts()
-	usage5h, usage7d := h.getAccountUsageWindows(ctx)
+	var reqCounts map[int64]*database.AccountRequestCount
+	var usage5h, usage7d map[int64]*database.AccountTimeRangeUsage
+	if view == "page" {
+		pageIDs := make([]int64, 0, len(rows))
+		for _, row := range rows {
+			pageIDs = append(pageIDs, row.ID)
+		}
+		reqCounts, err = h.db.GetAccountRequestCountsByIDs(ctx, pageIDs)
+		if err != nil {
+			log.Printf("获取当前页账号请求统计失败: %v", err)
+			reqCounts = make(map[int64]*database.AccountRequestCount)
+		}
+		usage5h = make(map[int64]*database.AccountTimeRangeUsage)
+		usage7d = make(map[int64]*database.AccountTimeRangeUsage)
+	} else {
+		// 旧全量接口保持原行为和缓存语义。
+		reqCounts = h.getCachedRequestCounts()
+		usage5h, usage7d = h.getAccountUsageWindows(ctx)
+	}
 
 	accounts := make([]accountResponse, 0, len(rows))
 	for _, row := range rows {
-		upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
-		isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
-		isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
-		grokAuthKind := ""
-		var grokBilling json.RawMessage
-		if isGrokAccount {
-			if strings.TrimSpace(row.GetCredential("api_key")) != "" {
-				grokAuthKind = auth.GrokAuthKindAPIKey
-			} else {
-				grokAuthKind = auth.GrokAuthKindOAuth
-			}
-			if detail := strings.TrimSpace(row.GetCredential("grok_billing_detail")); detail != "" && json.Valid([]byte(detail)) {
-				grokBilling = json.RawMessage(detail)
-			}
-		}
-		email := row.GetCredential("email")
-		baseURL := row.GetCredential("base_url")
-		if isOpenAIResponsesAccount && email == "" {
-			email = baseURL
-		}
-		planType := row.GetCredential("plan_type")
-		if isOpenAIResponsesAccount && planType == "" {
-			planType = "api"
-		}
-		if isGrokAccount && grokAuthKind == auth.GrokAuthKindAPIKey {
-			planType = "api"
-		}
-		if isGrokAccount {
-			if runtimeAccount, ok := accountMap[row.ID]; ok {
-				if runtimePlan := runtimeAccount.GetPlanType(); runtimePlan != "" {
-					planType = runtimePlan
-				}
-			}
-		}
-		var grokPlan *auth.GrokPlan
-		if isGrokAccount {
-			if resolved, ok := auth.ResolveGrokPlan(planType); ok {
-				grokPlan = &resolved
-			}
-		}
-		codexClientMetadataMode := ""
-		if isOpenAIResponsesAccount {
-			codexClientMetadataMode = auth.NormalizeCodexClientMetadataMode(row.GetCredential("codex_client_metadata_mode"))
-		}
-		ignoreUsageLimitStatusOverride := row.GetCredentialOptionalBool("ignore_usage_limit_status_override")
-		ignoreUsageLimitStatusEffective := h.store.IgnoreUsageLimitStatus()
-		if ignoreUsageLimitStatusOverride != nil {
-			ignoreUsageLimitStatusEffective = *ignoreUsageLimitStatusOverride
-		}
-		customHeaders := row.GetCredentialStringMap("custom_headers")
-		tokenWorkspaceID := openaiidentity.NormalizeWorkspaceID(row.GetCredential("workspace_id"))
-		workspaceIDOverride := openaiidentity.WorkspaceOverrideFromHeaders(customHeaders)
-		effectiveWorkspaceID := openaiidentity.EffectiveWorkspaceID(tokenWorkspaceID, customHeaders)
-		resp := accountResponse{
-			ID:                       row.ID,
-			Name:                     row.Name,
-			Email:                    email,
-			EmailDomain:              accountEmailDomain(email),
-			ChatGPTAccountID:         row.GetCredential("account_id"),
-			TokenWorkspaceID:         tokenWorkspaceID,
-			WorkspaceIDOverride:      workspaceIDOverride,
-			EffectiveWorkspaceID:     effectiveWorkspaceID,
-			PlanType:                 planType,
-			SubscriptionExpiresAt:    row.GetCredential("subscription_expires_at"),
-			Status:                   row.Status,
-			ErrorMessage:             row.ErrorMessage,
-			ATOnly:                   !isOpenAIResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
-			CreditEnabled:            row.CreditEnabled,
-			CreditSkipUsageWindow:    row.CreditSkipUsageWindow,
-			SkipWarmTier:             row.SkipWarmTier,
-			AccountType:              row.Type,
-			AccessTokenType:          accountAccessTokenType(row),
-			OpenAIResponsesAPI:       isOpenAIResponsesAccount,
-			GrokAPI:                  isGrokAccount,
-			AgentIdentity:            isAgentIdentityCredentialRow(row),
-			GrokAuthKind:             grokAuthKind,
-			GrokPlan:                 grokPlan,
-			GrokBilling:              grokBilling,
-			BaseURL:                  baseURL,
-			Models:                   row.GetCredentialStringSlice("models"),
-			ModelMapping:             row.GetCredential("model_mapping"),
-			CodexClientMetadataMode:  codexClientMetadataMode,
-			CustomHeaders:            customHeaders,
-			ProxyURL:                 row.ProxyURL,
-			Enabled:                  row.Enabled,
-			Locked:                   row.Locked,
-			AllowedAPIKeyIDs:         row.GetCredentialInt64Slice("allowed_api_key_ids"),
-			Tags:                     append([]string(nil), row.Tags...),
-			Note:                     row.Note,
-			ScoreBiasOverride:        nullableInt64Pointer(row.ScoreBiasOverride),
-			ScoreBiasEffective:       effectiveScoreBias(planType, row.ScoreBiasOverride),
-			BaseConcurrencyOverride:  nullableInt64Pointer(row.BaseConcurrencyOverride),
-			BaseConcurrencyEffective: effectiveBaseConcurrency(row.BaseConcurrencyOverride, int64(h.store.GetMaxConcurrency())),
-			CreatedAt:                row.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:                row.UpdatedAt.Format(time.RFC3339),
-			CodexUsageUpdatedAt:      row.GetCredential("codex_usage_updated_at"),
-			Codex5HUsageUpdatedAt:    row.GetCredential("codex_5h_usage_updated_at"),
-			UsageLimitOverride:       ignoreUsageLimitStatusOverride,
-			UsageLimitEffective:      ignoreUsageLimitStatusEffective,
-		}
-		resp.AutoPause5hThreshold = accountQuotaAutoPauseThreshold(row, "auto_pause_5h_threshold")
-		resp.AutoPause7dThreshold = accountQuotaAutoPauseThreshold(row, "auto_pause_7d_threshold")
-		resp.AutoPause5hDisabled = row.GetCredentialBool("auto_pause_5h_disabled")
-		resp.AutoPause7dDisabled = row.GetCredentialBool("auto_pause_7d_disabled")
-		resp.DispatchCountLimit = accountDispatchCountLimit(row)
-		resp.SchedulerPriority = accountSchedulerPriority(row)
-		if acc, ok := accountMap[row.ID]; ok {
-			resp.ModelCooldownModeOverride, resp.ModelCooldownSecondsOverride, resp.ModelCooldownBackoffOverride = acc.GetModelCooldownPolicyOverride()
-			effectiveCooldownPolicy := h.store.ResolveModelCooldownPolicy(acc)
-			resp.ModelCooldownModeEffective = effectiveCooldownPolicy.Mode
-			resp.ModelCooldownSecondsEffective = effectiveCooldownPolicy.Seconds
-			resp.ModelCooldownBackoffEffective = effectiveCooldownPolicy.BackoffEnabled
-			resp.UsageLimitOverride = acc.GetIgnoreUsageLimitStatusOverride()
-			resp.UsageLimitEffective = acc.IgnoresUsageLimitStatus()
-			if isGrokAccount {
-				if snap, hasSnap := acc.GetGrokRateLimitSnapshot(); hasSnap {
-					resp.GrokRateLimit = &snap
-				}
-				if snap, hasSnap := acc.GetGrokFreeQuotaSnapshot(); hasSnap {
-					resp.GrokFreeQuota = &snap
-				}
-			}
-			acc.Mu().RLock()
-			resp.GroupIDs = append([]int64(nil), acc.GroupIDs...)
-			acc.Mu().RUnlock()
-			resp.ActiveRequests = acc.GetActiveRequests()
-			resp.TotalRequests = acc.GetTotalRequests()
-			debug := acc.GetSchedulerDebugSnapshot(int64(h.store.GetMaxConcurrency()))
-			resp.HealthTier = debug.HealthTier
-			resp.SchedulerScore = debug.SchedulerScore
-			resp.ConcurrencyCap = debug.DynamicConcurrencyLimit
-			if dispatchScore, ok := reflectFloat64Field(debug, "DispatchScore"); ok {
-				resp.DispatchScore = dispatchScore
-			}
-			if scoreBiasEffective, ok := reflectInt64Field(debug, "ScoreBiasEffective"); ok {
-				resp.ScoreBiasEffective = scoreBiasEffective
-			}
-			if baseConcurrencyEffective, ok := reflectInt64Field(debug, "BaseConcurrencyEffective"); ok {
-				resp.BaseConcurrencyEffective = baseConcurrencyEffective
-			}
-			resp.ScoreBreakdown = schedulerBreakdownResponse{
-				UnauthorizedPenalty: debug.Breakdown.UnauthorizedPenalty,
-				RateLimitPenalty:    debug.Breakdown.RateLimitPenalty,
-				TimeoutPenalty:      debug.Breakdown.TimeoutPenalty,
-				ServerPenalty:       debug.Breakdown.ServerPenalty,
-				FailurePenalty:      debug.Breakdown.FailurePenalty,
-				SuccessBonus:        debug.Breakdown.SuccessBonus,
-				UsagePenalty7d:      debug.Breakdown.UsagePenalty7d,
-				UsageUrgencyBonus5h: debug.Breakdown.UsageUrgencyBonus5h,
-				UsageUrgencyBonus7d: debug.Breakdown.UsageUrgencyBonus7d,
-				ExpiryUrgencyBonus:  debug.Breakdown.ExpiryUrgencyBonus,
-				LatencyPenalty:      debug.Breakdown.LatencyPenalty,
-				SuccessRatePenalty:  debug.Breakdown.SuccessRatePenalty,
-			}
-			if usagePct, ok := acc.GetUsagePercent7d(); ok {
-				resp.UsagePercent7d = &usagePct
-			}
-			if usagePct5h, ok := acc.GetUsagePercent5h(); ok {
-				resp.UsagePercent5h = &usagePct5h
-			}
-			if credits, ok := acc.GetRateLimitResetCredits(); ok {
-				resp.RateLimitResetCredits = &credits
-			}
-			if applicable, ok := acc.GetApplicableResetCredits(); ok {
-				resp.ApplicableResetCredits = &applicable
-			}
-			if balance, hasCredits, unlimited, overage, ok := acc.GetCreditBalance(); ok {
-				resp.CreditsBalance = &balance
-				resp.CreditsHasCredits = &hasCredits
-				resp.CreditsUnlimited = &unlimited
-				resp.CreditsOverageLimitReached = &overage
-			}
-			if snapshot := acc.GetDispatchCountSnapshot(); snapshot.Limit > 0 {
-				limit := snapshot.Limit
-				resp.DispatchCountLimit = &limit
-				resp.DispatchCountUsed = snapshot.Used
-				resp.DispatchCountLimited = snapshot.Limited
-				if !snapshot.ResetAt.IsZero() {
-					resp.DispatchCountResetAt = snapshot.ResetAt.Format(time.RFC3339)
-				}
+		accounts = append(accounts, h.buildAccountResponse(
+			row,
+			accountMap[row.ID],
+			reqCounts[row.ID],
+			usage5h[row.ID],
+			usage7d[row.ID],
+			view != "page",
+		))
+	}
+
+	if view != "page" {
+		billing5hWindows := make(map[int64]time.Time)
+		billing7dWindows := make(map[int64]time.Time)
+		for i := range accounts {
+			acc, ok := accountMap[accounts[i].ID]
+			if !ok {
+				continue
 			}
 			if t := acc.GetReset5hAt(); !t.IsZero() {
-				resp.Reset5hAt = t.Format(time.RFC3339)
+				billing5hWindows[accounts[i].ID] = t.Add(-5 * time.Hour)
 			}
 			if t := acc.GetReset7dAt(); !t.IsZero() {
-				resp.Reset7dAt = t.Format(time.RFC3339)
-			}
-			if sec := acc.GetWindow7dSeconds(); sec > 0 {
-				resp.Window7dSeconds = &sec
-				resp.Window7dKind = acc.Window7dKind()
-			}
-			if t := acc.GetLastUsedAt(); !t.IsZero() {
-				resp.LastUsedAt = t.Format(time.RFC3339)
-			}
-			if !debug.LastUnauthorizedAt.IsZero() {
-				resp.LastUnauthorizedAt = debug.LastUnauthorizedAt.Format(time.RFC3339)
-			}
-			if !debug.LastRateLimitedAt.IsZero() {
-				resp.LastRateLimitedAt = debug.LastRateLimitedAt.Format(time.RFC3339)
-			}
-			if !debug.LastTimeoutAt.IsZero() {
-				resp.LastTimeoutAt = debug.LastTimeoutAt.Format(time.RFC3339)
-			}
-			if !debug.LastServerErrorAt.IsZero() {
-				resp.LastServerErrorAt = debug.LastServerErrorAt.Format(time.RFC3339)
-			}
-			if reason, until := acc.GetCooldownSnapshot(); !until.IsZero() && until.After(time.Now()) {
-				resp.CooldownReason = reason
-				resp.CooldownUntil = until.Format(time.RFC3339)
-			}
-			for _, cooldown := range acc.ActiveModelCooldowns() {
-				resp.ModelCooldowns = append(resp.ModelCooldowns, modelCooldownResponse{
-					Model:     cooldown.Model,
-					Reason:    cooldown.Reason,
-					ResetAt:   cooldown.ResetAt.Format(time.RFC3339),
-					Remaining: int64(time.Until(cooldown.ResetAt).Seconds()),
-				})
-			}
-			// 使用运行时状态（优先于 DB 状态）
-			resp.Status = acc.RuntimeStatus()
-			resp.UsingCredits = acc.UsingCredits()
-			acc.Mu().RLock()
-			resp.ErrorMessage = acc.ErrorMsg
-			acc.Mu().RUnlock()
-		} else if row.CooldownUntil.Valid && row.CooldownUntil.Time.After(time.Now()) {
-			resp.CooldownReason = row.CooldownReason
-			resp.CooldownUntil = row.CooldownUntil.Time.Format(time.RFC3339)
-		}
-		if resp.DispatchScore == 0 {
-			resp.DispatchScore = dispatchScoreFallback(resp.SchedulerScore, resp.ScoreBiasEffective, resp.HealthTier, resp.Status)
-		}
-		if rc, ok := reqCounts[row.ID]; ok {
-			resp.SuccessRequests = rc.SuccessCount
-			resp.ErrorRequests = rc.ErrorCount
-			resp.RetryErrorRequests = rc.RetryErrorCount
-			resp.RateLimitAttempts = rc.RateLimitAttemptCount
-		}
-		if usage, ok := usage5h[row.ID]; ok {
-			resp.Usage5hDetail = &accountUsageWindow{
-				Requests:      usage.Requests,
-				Tokens:        usage.Tokens,
-				AccountBilled: usage.AccountBilled,
-				UserBilled:    usage.UserBilled,
+				// 长窗口起点 = reset - 真实周期。free/team 是月窗(约 30 天),
+				// 写死减 7 天会把起点算到未来,成本恒为 0 (issue #324)。
+				windowDur := 7 * 24 * time.Hour
+				if sec := acc.GetWindow7dSeconds(); sec > 0 {
+					windowDur = time.Duration(sec) * time.Second
+				}
+				billing7dWindows[accounts[i].ID] = t.Add(-windowDur)
 			}
 		}
-		if usage, ok := usage7d[row.ID]; ok {
-			resp.Usage7dDetail = &accountUsageWindow{
-				Requests:      usage.Requests,
-				Tokens:        usage.Tokens,
-				AccountBilled: usage.AccountBilled,
-				UserBilled:    usage.UserBilled,
-			}
-		}
-		accounts = append(accounts, resp)
-	}
 
-	billing5hWindows := make(map[int64]time.Time)
-	billing7dWindows := make(map[int64]time.Time)
-	for i := range accounts {
-		acc, ok := accountMap[accounts[i].ID]
-		if !ok {
-			continue
+		billed5h, billingErr := h.db.GetAccountsBilledSince(ctx, billing5hWindows)
+		if billingErr != nil {
+			log.Printf("批量获取账号 5h 成本失败: %v", billingErr)
+			billed5h = nil
 		}
-		if t := acc.GetReset5hAt(); !t.IsZero() {
-			billing5hWindows[accounts[i].ID] = t.Add(-5 * time.Hour)
+		billed7d, billingErr := h.db.GetAccountsBilledSince(ctx, billing7dWindows)
+		if billingErr != nil {
+			log.Printf("批量获取账号 7d 成本失败: %v", billingErr)
+			billed7d = nil
 		}
-		if t := acc.GetReset7dAt(); !t.IsZero() {
-			// 长窗口起点 = reset - 真实周期。free/team 是月窗(约 30 天),
-			// 写死减 7 天会把起点算到未来,成本恒为 0 (issue #324)。
-			windowDur := 7 * 24 * time.Hour
-			if sec := acc.GetWindow7dSeconds(); sec > 0 {
-				windowDur = time.Duration(sec) * time.Second
+		for i := range accounts {
+			if billed, ok := billed5h[accounts[i].ID]; ok {
+				accounts[i].Billed5h = &billed
 			}
-			billing7dWindows[accounts[i].ID] = t.Add(-windowDur)
+			if billed, ok := billed7d[accounts[i].ID]; ok {
+				accounts[i].Billed7d = &billed
+			}
 		}
 	}
 
-	billed5h, err := h.db.GetAccountsBilledSince(ctx, billing5hWindows)
-	if err != nil {
-		log.Printf("批量获取账号 5h 成本失败: %v", err)
-		billed5h = nil
+	if pageSelection != nil {
+		c.JSON(http.StatusOK, accountsPageResponse{
+			Accounts: accounts,
+			Page:     pageSelection.Page, PageSize: pageSelection.PageSize, Total: pageSelection.Total,
+			Summary: pageSelection.Summary, Facets: pageSelection.Facets,
+			SnapshotAt: pageSelection.SnapshotAt.Format(time.RFC3339), StatsState: pageSelection.StatsState,
+		})
+		return
 	}
-	billed7d, err := h.db.GetAccountsBilledSince(ctx, billing7dWindows)
-	if err != nil {
-		log.Printf("批量获取账号 7d 成本失败: %v", err)
-		billed7d = nil
-	}
-	for i := range accounts {
-		if billed, ok := billed5h[accounts[i].ID]; ok {
-			accounts[i].Billed5h = &billed
-		}
-		if billed, ok := billed7d[accounts[i].ID]; ok {
-			accounts[i].Billed7d = &billed
-		}
-	}
-
 	c.JSON(http.StatusOK, accountsResponse{Accounts: accounts})
+}
+
+// GetAccount returns the fully enriched representation for one account. Large
+// account pages call this endpoint only when a row is opened or after a
+// mutation, keeping expensive detail fields off the critical list path.
+// GET /api/admin/accounts/:id
+func (h *Handler) GetAccount(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(c, http.StatusBadRequest, "无效的账号 ID")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+	row, err := h.db.GetAccountByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(c, http.StatusNotFound, "账号不存在")
+			return
+		}
+		writeInternalError(c, err)
+		return
+	}
+
+	requestCounts, err := h.db.GetAccountRequestCountsByIDs(ctx, []int64{id})
+	if err != nil {
+		log.Printf("获取账号 %d 请求统计失败: %v", id, err)
+		requestCounts = make(map[int64]*database.AccountRequestCount)
+	}
+	now := time.Now()
+	usage5h, usage7d, err := h.db.GetAccountUsageWindowsByIDs(ctx, []int64{id}, now.Add(-5*time.Hour), now.AddDate(0, 0, -7))
+	if err != nil {
+		log.Printf("获取账号 %d 用量统计失败: %v", id, err)
+		usage5h = make(map[int64]*database.AccountTimeRangeUsage)
+		usage7d = make(map[int64]*database.AccountTimeRangeUsage)
+	}
+
+	runtimeAccount := h.store.FindByID(id)
+	resp := h.buildAccountResponse(row, runtimeAccount, requestCounts[id], usage5h[id], usage7d[id], true)
+	if runtimeAccount != nil {
+		if resetAt := runtimeAccount.GetReset5hAt(); !resetAt.IsZero() {
+			if billed, billedErr := h.db.GetAccountBilledSince(ctx, id, resetAt.Add(-5*time.Hour)); billedErr == nil {
+				resp.Billed5h = &billed
+			} else {
+				log.Printf("获取账号 %d 5h 成本失败: %v", id, billedErr)
+			}
+		}
+		if resetAt := runtimeAccount.GetReset7dAt(); !resetAt.IsZero() {
+			windowDuration := 7 * 24 * time.Hour
+			if seconds := runtimeAccount.GetWindow7dSeconds(); seconds > 0 {
+				windowDuration = time.Duration(seconds) * time.Second
+			}
+			if billed, billedErr := h.db.GetAccountBilledSince(ctx, id, resetAt.Add(-windowDuration)); billedErr == nil {
+				resp.Billed7d = &billed
+			} else {
+				log.Printf("获取账号 %d 长窗口成本失败: %v", id, billedErr)
+			}
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // accountLiteResponse 是 ?view=lite 的账号条目:身份 + 绑定字段,无调度/用量指标。
@@ -2502,7 +2399,8 @@ func reflectInt64Field(value interface{}, field string) (int64, bool) {
 	}
 }
 
-// getCachedRequestCounts 返回带 30 秒 TTL 的账号请求统计缓存
+// getCachedRequestCounts preserves the legacy full-list behavior while sharing
+// the paged list's ten-second cache.
 func (h *Handler) getCachedRequestCounts() map[int64]*database.AccountRequestCount {
 	h.reqCountMu.RLock()
 	if h.reqCountCache != nil && time.Now().Before(h.reqCountExpiresAt) {
@@ -2522,7 +2420,7 @@ func (h *Handler) getCachedRequestCounts() map[int64]*database.AccountRequestCou
 
 	h.reqCountMu.Lock()
 	h.reqCountCache = counts
-	h.reqCountExpiresAt = time.Now().Add(30 * time.Second)
+	h.reqCountExpiresAt = time.Now().Add(requestCountCacheTTL)
 	h.reqCountMu.Unlock()
 
 	return counts
@@ -4886,14 +4784,41 @@ func (h *Handler) RefreshAccountUsage(c *gin.Context) {
 }
 
 type batchAccountIDsRequest struct {
-	IDs []int64 `json:"ids"`
+	IDs      *[]int64                  `json:"ids"`
+	Selector *accountOperationSelector `json:"selector,omitempty"`
 }
 
 type batchUpdateAccountsReq struct {
 	updateAccountSchedulerReq
-	IDs     []int64 `json:"ids"`
-	Enabled *bool   `json:"enabled"`
-	Locked  *bool   `json:"locked"`
+	IDs      *[]int64                  `json:"ids"`
+	Selector *accountOperationSelector `json:"selector,omitempty"`
+	Enabled  *bool                     `json:"enabled"`
+	Locked   *bool                     `json:"locked"`
+}
+
+func (h *Handler) accountOperationIdentity(id int64) (string, string) {
+	h.accountListCacheMu.RLock()
+	for _, channel := range []string{database.UpstreamChannelCodex, database.UpstreamChannelGrok} {
+		snapshot := h.accountListCache[channel]
+		if snapshot == nil {
+			continue
+		}
+		index := sort.Search(len(snapshot.Items), func(index int) bool {
+			return snapshot.Items[index].ID >= id
+		})
+		if index < len(snapshot.Items) && snapshot.Items[index].ID == id {
+			item := snapshot.Items[index]
+			name := strings.TrimSpace(item.Row.Name)
+			email := strings.TrimSpace(item.Email)
+			h.accountListCacheMu.RUnlock()
+			return name, email
+		}
+	}
+	h.accountListCacheMu.RUnlock()
+	if h.store == nil {
+		return "", ""
+	}
+	return runtimeAccountOperationIdentity(h.store.FindByID(id))
 }
 
 // DeleteAccount 删除账号
@@ -5157,7 +5082,24 @@ func (h *Handler) BatchDeleteAccounts(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	ids := uniqueAccountIDs(req.IDs)
+	if req.IDs != nil && req.Selector != nil {
+		writeError(c, http.StatusBadRequest, "ids 与 selector 不能同时提供")
+		return
+	}
+	var ids []int64
+	if req.IDs != nil {
+		ids = uniqueAccountIDs(*req.IDs)
+	}
+	if req.Selector != nil {
+		selectorCtx, selectorCancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		resolvedIDs, err := h.resolveAccountOperationSelector(selectorCtx, req.Selector)
+		selectorCancel()
+		if err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		ids = resolvedIDs
+	}
 	if len(ids) == 0 {
 		writeError(c, http.StatusBadRequest, "请提供要删除的账号 ID 列表")
 		return
@@ -5227,13 +5169,16 @@ func (h *Handler) runBatchDeleteAccounts(ctx context.Context, ids []int64, onPro
 			break
 		}
 
+		accountName, accountEmail := h.accountOperationIdentity(id)
 		err := h.deleteAccountByID(ctx, id)
 		event := batchOperationEvent{
-			Type:      "progress",
-			Action:    "batch_delete",
-			Current:   i + 1,
-			Total:     total,
-			AccountID: id,
+			Type:         "progress",
+			Action:       "batch_delete",
+			Current:      i + 1,
+			Total:        total,
+			AccountID:    id,
+			AccountName:  accountName,
+			AccountEmail: accountEmail,
 		}
 		if err != nil {
 			fail++
@@ -5267,7 +5212,24 @@ func (h *Handler) BatchUpdateAccounts(c *gin.Context) {
 		return
 	}
 
-	ids := uniqueAccountIDs(req.IDs)
+	if req.IDs != nil && req.Selector != nil {
+		writeError(c, http.StatusBadRequest, "ids 与 selector 不能同时提供")
+		return
+	}
+	var ids []int64
+	if req.IDs != nil {
+		ids = uniqueAccountIDs(*req.IDs)
+	}
+	if req.Selector != nil {
+		selectorCtx, selectorCancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		resolvedIDs, err := h.resolveAccountOperationSelector(selectorCtx, req.Selector)
+		selectorCancel()
+		if err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		ids = resolvedIDs
+	}
 	if len(ids) == 0 {
 		writeError(c, http.StatusBadRequest, "请提供要更新的账号 ID 列表")
 		return
@@ -5392,7 +5354,24 @@ func (h *Handler) BatchRefreshAccounts(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	ids := uniqueAccountIDs(req.IDs)
+	if req.IDs != nil && req.Selector != nil {
+		writeError(c, http.StatusBadRequest, "ids 与 selector 不能同时提供")
+		return
+	}
+	var ids []int64
+	if req.IDs != nil {
+		ids = uniqueAccountIDs(*req.IDs)
+	}
+	if req.Selector != nil {
+		selectorCtx, selectorCancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		resolvedIDs, err := h.resolveAccountOperationSelector(selectorCtx, req.Selector)
+		selectorCancel()
+		if err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		ids = resolvedIDs
+	}
 	if len(ids) == 0 {
 		writeError(c, http.StatusBadRequest, "请提供要刷新的账号 ID 列表")
 		return
@@ -5491,23 +5470,24 @@ func (h *Handler) runBatchRefreshAccounts(ctx context.Context, ids []int64, onPr
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			accountName, accountEmail := h.accountOperationIdentity(id)
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
 				atomic.AddInt64(&fail, 1)
-				emitBatchRefreshProgress(onProgress, id, total, &completed, &success, &fail, "刷新已取消", true)
+				emitBatchRefreshProgress(onProgress, id, accountName, accountEmail, total, &completed, &success, &fail, "刷新已取消", true)
 				return
 			}
 			defer func() { <-sem }()
 
 			if err := h.refreshAccountByID(ctx, id); err != nil {
 				atomic.AddInt64(&fail, 1)
-				emitBatchRefreshProgress(onProgress, id, total, &completed, &success, &fail, err.Error(), true)
+				emitBatchRefreshProgress(onProgress, id, accountName, accountEmail, total, &completed, &success, &fail, err.Error(), true)
 				return
 			}
 
 			atomic.AddInt64(&success, 1)
-			emitBatchRefreshProgress(onProgress, id, total, &completed, &success, &fail, "账号刷新成功", false)
+			emitBatchRefreshProgress(onProgress, id, accountName, accountEmail, total, &completed, &success, &fail, "账号刷新成功", false)
 		}()
 	}
 
@@ -5518,6 +5498,8 @@ func (h *Handler) runBatchRefreshAccounts(ctx context.Context, ids []int64, onPr
 func emitBatchRefreshProgress(
 	onProgress func(batchOperationEvent),
 	accountID int64,
+	accountName string,
+	accountEmail string,
 	total int,
 	completedCount *int64,
 	successCount *int64,
@@ -5530,16 +5512,18 @@ func emitBatchRefreshProgress(
 	}
 	current := int(atomic.AddInt64(completedCount, 1))
 	event := batchOperationEvent{
-		Type:       "progress",
-		Action:     "batch_refresh",
-		Status:     "success",
-		HTTPStatus: http.StatusOK,
-		Current:    current,
-		Total:      total,
-		Success:    atomic.LoadInt64(successCount),
-		Failed:     atomic.LoadInt64(failedCount),
-		AccountID:  accountID,
-		Message:    message,
+		Type:         "progress",
+		Action:       "batch_refresh",
+		Status:       "success",
+		HTTPStatus:   http.StatusOK,
+		Current:      current,
+		Total:        total,
+		Success:      atomic.LoadInt64(successCount),
+		Failed:       atomic.LoadInt64(failedCount),
+		AccountID:    accountID,
+		AccountName:  accountName,
+		AccountEmail: accountEmail,
+		Message:      message,
 	}
 	if failed {
 		event.Status = "failed"

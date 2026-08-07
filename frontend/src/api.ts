@@ -29,6 +29,10 @@ import type {
   APIKeyScopeUsageItem,
   APIKeyScopeSummaryItem,
   AccountsResponse,
+  AccountAnalysisResponse,
+  AccountsPageParams,
+  AccountsPageResponse,
+  AccountPageStatsResponse,
   ChartAggregation,
   CreateAccountResponse,
   CreateAPIKeyResponse,
@@ -87,7 +91,9 @@ import type {
   UsageLogsPagedResponse,
   UsageStats,
   AccountGroup,
+  AccountRow,
   AccountGroupsResponse,
+  AccountOperationSelector,
   AccountHealthBarsResponse,
   BatchUpdateAccountsRequest,
   BackgroundUploadResponse,
@@ -526,6 +532,35 @@ export const api = {
     const qs = searchParams.toString()
     return request<AccountsResponse>(`/accounts${qs ? `?${qs}` : ''}`)
   },
+  getAccountsPage: (params: AccountsPageParams, signal?: AbortSignal) => {
+    const searchParams = new URLSearchParams({
+      view: 'page',
+      page: String(params.page),
+      page_size: String(params.pageSize),
+    })
+    if (params.channel) searchParams.set('channel', params.channel)
+    if (params.search?.trim()) searchParams.set('search', params.search.trim())
+    if (params.status && params.status !== 'all') searchParams.set('status', params.status)
+    if (params.plan && params.plan !== 'all') searchParams.set('plan', params.plan)
+    if (params.authKind && params.authKind !== 'all') searchParams.set('auth_kind', params.authKind)
+    if (params.tag) searchParams.set('tag', params.tag)
+    if (params.emailDomain) searchParams.set('email_domain', params.emailDomain)
+    if (params.groupInclude?.length) searchParams.set('group_include', params.groupInclude.join(','))
+    if (params.groupExclude?.length) searchParams.set('group_exclude', params.groupExclude.join(','))
+    if (params.ungrouped) searchParams.set('ungrouped', 'true')
+    if (params.healthTier) searchParams.set('health_tier', params.healthTier)
+    if (params.proxyUrl) searchParams.set('proxy_url', params.proxyUrl)
+    if (params.proxyFilter && params.proxyFilter !== 'all') searchParams.set('proxy_filter', params.proxyFilter)
+    if (params.sort) searchParams.set('sort', params.sort)
+    if (params.order) searchParams.set('order', params.order)
+    return request<AccountsPageResponse>(`/accounts?${searchParams.toString()}`, { signal })
+  },
+  getAccountAnalysis: (channel: 'codex' | 'grok' = 'codex', signal?: AbortSignal) =>
+    request<AccountAnalysisResponse>(`/accounts/analysis?channel=${channel}`, { signal }),
+  getAccountPageStats: (ids: number[], signal?: AbortSignal) => {
+    const query = new URLSearchParams({ ids: ids.join(',') })
+    return request<AccountPageStatsResponse>(`/accounts/page-stats?${query}`, { signal })
+  },
   addAccount: (data: AddAccountRequest) =>
     request<CreateAccountResponse>('/accounts', { method: 'POST', body: JSON.stringify(data) }),
   addATAccount: (data: AddATAccountRequest) =>
@@ -588,6 +623,8 @@ export const api = {
     }),
   refreshAccount: (id: number) =>
     request<MessageResponse>(`/accounts/${id}/refresh`, { method: 'POST' }),
+  getAccount: (id: number, signal?: AbortSignal) =>
+    request<AccountRow>(`/accounts/${id}`, { signal }),
   forceUsageProbe: () =>
     request<{ triggered: boolean; concurrency: number; reason?: string; mode?: string }>(`/accounts/usage/probe`, { method: 'POST' }),
   refreshAccountUsage: (id: number) =>
@@ -663,8 +700,10 @@ export const api = {
     }>(`/accounts/${id}/reset-credits`, { method: 'POST' }),
   getResetCredits: (id: number) =>
     request<ResetCreditsDetailResponse>(`/accounts/${id}/reset-credits`),
-  getAccountHealthBars: () =>
-    request<AccountHealthBarsResponse>('/accounts/health-bars'),
+  getAccountHealthBars: (ids: number[] = []) => {
+    const query = ids.length > 0 ? `?ids=${ids.join(',')}` : ''
+    return request<AccountHealthBarsResponse>(`/accounts/health-bars${query}`)
+  },
   sendInvite: (id: number, data: { emails?: string[]; emails_text?: string; program_id?: string; entrypoint?: string; proxy_url?: string; max_emails?: number }) =>
     request<InviteResponse>(`/accounts/${id}/invite`, { method: 'POST', body: JSON.stringify(data) }),
   getInviteEligibility: (id: number, params?: { program_id?: string; entrypoint?: string; proxy_url?: string }) => {
@@ -688,8 +727,11 @@ export const api = {
     request<{ message: string; success: number; failed: number }>('/accounts/batch-reset-status', { method: 'POST', body: JSON.stringify({ ids }) }),
   batchDeleteAccounts: (ids: number[]) =>
     request<{ message: string; deleted: number; success: number; failed: number }>('/accounts/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
-  batchRefreshAccounts: (ids: number[]) =>
-    request<{ message: string; success: number; failed: number }>('/accounts/batch-refresh', { method: 'POST', body: JSON.stringify({ ids }) }),
+  batchRefreshAccounts: (target: number[] | AccountOperationSelector) =>
+    request<{ message: string; success: number; failed: number }>('/accounts/batch-refresh', {
+      method: 'POST',
+      body: JSON.stringify(Array.isArray(target) ? { ids: target } : { selector: target }),
+    }),
   getAccountUsage: (id: number, days?: number) => {
     const search = new URLSearchParams()
     if (typeof days === 'number') search.set('days', String(days))
@@ -725,7 +767,7 @@ export const api = {
     }),
   deletePromptFilterNewAPIBinding: (apiKeyId: number) =>
     request<MessageResponse>(`/prompt-filter/newapi-bindings/${apiKeyId}`, { method: 'DELETE' }),
-  getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
+  getOpsOverview: (signal?: AbortSignal) => request<OpsOverviewResponse>('/ops/overview', { signal }),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
   getSystemUpdate: () => request<SystemUpdateInfo>('/system/update', { timeoutMs: 20_000 }),
   performSystemUpdate: () =>
@@ -1094,10 +1136,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ url: url ?? '' }),
     }),
-  batchTestAccounts: (ids?: number[]) =>
+  batchTestAccounts: (target?: number[] | AccountOperationSelector) =>
     request<{ total: number; success: number; failed: number; banned: number; rate_limited: number }>('/accounts/batch-test', {
       method: 'POST',
-      body: ids ? JSON.stringify({ ids }) : undefined,
+      body: target
+        ? JSON.stringify(Array.isArray(target) ? { ids: target } : { selector: target })
+        : undefined,
     }),
   cleanBanned: () =>
     request<{ message: string; cleaned: number }>('/accounts/clean-banned', { method: 'POST' }),
