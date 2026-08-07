@@ -86,6 +86,9 @@ export interface AccountRow {
   email: string
   email_domain?: string
   chatgpt_account_id?: string
+  token_workspace_id?: string
+  workspace_id_override?: string
+  effective_workspace_id?: string
   plan_type: string
   subscription_expires_at?: string
   status: AccountStatus

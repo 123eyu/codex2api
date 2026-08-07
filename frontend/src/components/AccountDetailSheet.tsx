@@ -364,10 +364,24 @@ export default function AccountDetailSheet({
                     </span>
                   )}
                 </div>
-                {account.chatgpt_account_id ? (
-                  <SheetDescription className="mt-1 break-all font-mono text-[11px]">
-                    {account.chatgpt_account_id}
-                  </SheetDescription>
+                {account.effective_workspace_id ? (
+                  <div className="mt-1 space-y-0.5">
+                    <SheetDescription className="break-all font-mono text-[11px]">
+                      {account.workspace_id_override
+                        ? `${t("accounts.workspaceRouteBadge")}: `
+                        : ""}
+                      {account.effective_workspace_id}
+                    </SheetDescription>
+                    {account.workspace_id_override &&
+                    account.token_workspace_id &&
+                    account.token_workspace_id !==
+                      account.effective_workspace_id ? (
+                      <SheetDescription className="break-all font-mono text-[10px] text-muted-foreground/70">
+                        {t("accounts.tokenWorkspaceLabel")}:{" "}
+                        {account.token_workspace_id}
+                      </SheetDescription>
+                    ) : null}
+                  </div>
                 ) : isGrok && account.email && account.name && account.email !== account.name ? (
                   <SheetDescription className="mt-1 break-all text-[12px]">
                     {account.email}

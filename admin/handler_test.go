@@ -21,6 +21,7 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/imagestore"
+	"github.com/codex2api/internal/openaiidentity"
 	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
 )
@@ -1930,6 +1931,143 @@ func TestUpdateAccountSchedulerPersistsOverrides(t *testing.T) {
 	}
 }
 
+func TestUpdateAccountSchedulerPersistsWorkspaceRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	accountID, err := db.InsertAccountWithCredentials(context.Background(), "workspace-route", map[string]interface{}{
+		"refresh_token": "rt-workspace-route",
+		"email":         "route@example.com",
+		"workspace_id":  "personal-workspace",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+	handler := &Handler{db: db}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", accountID)}}
+	ctx.Request = httptest.NewRequest(
+		http.MethodPatch,
+		fmt.Sprintf("/api/admin/accounts/%d/scheduler", accountID),
+		strings.NewReader(`{"custom_headers":{"chatgpt-account-id":"team-workspace"}}`),
+	)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateAccountScheduler(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	row, err := db.GetAccountByID(context.Background(), accountID)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if got := openaiidentity.WorkspaceOverrideFromHeaders(row.GetCredentialStringMap("custom_headers")); got != "team-workspace" {
+		t.Fatalf("workspace override = %q, want team-workspace", got)
+	}
+}
+
+func TestUpdateAccountSchedulerRejectsDuplicateWorkspaceRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	if _, err := db.InsertAccountWithCredentials(context.Background(), "personal", map[string]interface{}{
+		"refresh_token": "rt-shared-route",
+		"email":         "route@example.com",
+		"workspace_id":  "personal-workspace",
+	}, ""); err != nil {
+		t.Fatalf("Insert personal: %v", err)
+	}
+	teamID, err := db.InsertAccountWithCredentials(context.Background(), "team", map[string]interface{}{
+		"refresh_token": "rt-shared-route",
+		"email":         "route@example.com",
+		"workspace_id":  "personal-workspace",
+		"custom_headers": map[string]string{
+			"Chatgpt-Account-Id": "team-workspace",
+		},
+	}, "")
+	if err != nil {
+		t.Fatalf("Insert team: %v", err)
+	}
+	handler := &Handler{db: db}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", teamID)}}
+	ctx.Request = httptest.NewRequest(
+		http.MethodPatch,
+		fmt.Sprintf("/api/admin/accounts/%d/scheduler", teamID),
+		strings.NewReader(`{"custom_headers":{}}`),
+	)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateAccountScheduler(ctx)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+	row, err := db.GetAccountByID(context.Background(), teamID)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if got := openaiidentity.WorkspaceOverrideFromHeaders(row.GetCredentialStringMap("custom_headers")); got != "team-workspace" {
+		t.Fatalf("workspace override changed to %q after rejected update", got)
+	}
+}
+
+func TestUpdateAccountSchedulerAllowsUnchangedWorkspaceRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	for i := 0; i < 2; i++ {
+		if _, err := db.InsertAccountWithCredentials(context.Background(), fmt.Sprintf("team-%d", i+1), map[string]interface{}{
+			"refresh_token": "rt-shared-route",
+			"email":         "route@example.com",
+			"workspace_id":  "personal-workspace",
+			"custom_headers": map[string]string{
+				"Chatgpt-Account-Id": "team-workspace",
+			},
+		}, ""); err != nil {
+			t.Fatalf("Insert team %d: %v", i+1, err)
+		}
+	}
+	rows, err := db.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	teamID := rows[1].ID
+	handler := &Handler{db: db}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", teamID)}}
+	ctx.Request = httptest.NewRequest(
+		http.MethodPatch,
+		fmt.Sprintf("/api/admin/accounts/%d/scheduler", teamID),
+		strings.NewReader(`{"custom_headers":{"chatgpt-account-id":"team-workspace","x-route-note":"kept"}}`),
+	)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateAccountScheduler(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	row, err := db.GetAccountByID(context.Background(), teamID)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	headers := row.GetCredentialStringMap("custom_headers")
+	if got := openaiidentity.WorkspaceOverrideFromHeaders(headers); got != "team-workspace" {
+		t.Fatalf("workspace override = %q, want team-workspace", got)
+	}
+	if got := headers["X-Route-Note"]; got != "kept" {
+		t.Fatalf("X-Route-Note = %q, want kept", got)
+	}
+}
+
 func TestUpdateAccountSchedulerPersistsAllowedAPIKeyIDs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -2845,6 +2983,52 @@ func TestRestoreAccountRejectsDuplicateOAuthIdentity(t *testing.T) {
 		"email":         "Restore@Example.com",
 		"account_id":    "acc-restore",
 		"workspace_id":  "workspace-restore",
+	}, "")
+	if err != nil {
+		t.Fatalf("Insert deleted: %v", err)
+	}
+	if err := db.SoftDeleteAccount(context.Background(), deletedID); err != nil {
+		t.Fatalf("SoftDeleteAccount: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", deletedID)}}
+	ctx.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/admin/accounts/%d/restore", deletedID), nil)
+
+	handler.RestoreAccount(ctx)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), fmt.Sprintf("%d", activeID)) {
+		t.Fatalf("response = %s, want active duplicate id %d", recorder.Body.String(), activeID)
+	}
+	if _, err := db.GetAccountByID(context.Background(), deletedID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted account should remain outside active pool, err=%v", err)
+	}
+}
+
+func TestRestoreAccountRejectsDuplicateCredentialWorkspaceRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	handler := &Handler{db: db}
+
+	activeID, err := db.InsertAccountWithCredentials(context.Background(), "active", map[string]interface{}{
+		"access_token": "opaque-shared-token",
+		"custom_headers": map[string]string{
+			"Chatgpt-Account-Id": "team-workspace",
+		},
+	}, "")
+	if err != nil {
+		t.Fatalf("Insert active: %v", err)
+	}
+	deletedID, err := db.InsertAccountWithCredentials(context.Background(), "deleted", map[string]interface{}{
+		"access_token": "opaque-shared-token",
+		"custom_headers": map[string]string{
+			"chatgpt-account-id": "team-workspace",
+		},
 	}, "")
 	if err != nil {
 		t.Fatalf("Insert deleted: %v", err)

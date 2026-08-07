@@ -58,6 +58,10 @@ import {
   formatLongUsageWindowLabel,
   needsUsageReload,
 } from "../lib/usageFormat";
+import {
+  applyOptionalWorkspaceRouteHeader,
+  applyWorkspaceRouteHeader,
+} from "../lib/workspaceRoute";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -797,6 +801,7 @@ export default function Accounts() {
     proxy_url: "",
   });
   const [addCustomHeadersText, setAddCustomHeadersText] = useState("");
+  const [workspaceRouteID, setWorkspaceRouteID] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [refreshingIds, setRefreshingIds] = useState<Set<number>>(new Set());
@@ -906,6 +911,7 @@ export default function Accounts() {
   const [showImportPicker, setShowImportPicker] = useState(false);
   const [importProxyUrl, setImportProxyUrl] = useState("");
   const [importCustomHeadersText, setImportCustomHeadersText] = useState("");
+  const [importWorkspaceRouteID, setImportWorkspaceRouteID] = useState("");
   const [showSub2APIImport, setShowSub2APIImport] = useState(false);
   const [showPasteImport, setShowPasteImport] = useState(false);
   const [pasteImportText, setPasteImportText] = useState("");
@@ -1230,6 +1236,33 @@ export default function Accounts() {
       />
       <p className="mt-1.5 text-xs text-muted-foreground">
         留空表示不设置；JSON 必须是对象，所有请求头值都必须是字符串。
+      </p>
+    </div>
+  );
+
+  const renderWorkspaceRouteInput = ({
+    value = workspaceRouteID,
+    onChange = setWorkspaceRouteID,
+  }: {
+    value?: string;
+    onChange?: (value: string) => void;
+  } = {}) => (
+    <div className="rounded-xl border border-sky-200 bg-sky-50/70 p-4 dark:border-sky-900 dark:bg-sky-950/30">
+      <div className="mb-2 flex items-center gap-2">
+        <Layers className="size-4 text-sky-600 dark:text-sky-400" />
+        <label className="text-sm font-semibold text-foreground">
+          {t("accounts.workspaceRouteLabel")}
+        </label>
+      </div>
+      <Input
+        value={value}
+        placeholder={t("accounts.workspaceRoutePlaceholder")}
+        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+          onChange(event.target.value)
+        }
+      />
+      <p className="mt-2 text-xs leading-5 text-muted-foreground">
+        {t("accounts.workspaceRouteHint")}
       </p>
     </div>
   );
@@ -2035,14 +2068,20 @@ export default function Accounts() {
             ...addForm,
             refresh_token: "",
             allow_duplicate: allowDuplicate,
-            custom_headers: parsedCustomHeaders.value,
+            custom_headers: applyWorkspaceRouteHeader(
+              parsedCustomHeaders.value,
+              workspaceRouteID,
+            ),
             group_ids: importGroupIds,
           }
         : {
             ...addForm,
             session_token: "",
             allow_duplicate: allowDuplicate,
-            custom_headers: parsedCustomHeaders.value,
+            custom_headers: applyWorkspaceRouteHeader(
+              parsedCustomHeaders.value,
+              workspaceRouteID,
+            ),
             group_ids: importGroupIds,
           };
     if (
@@ -2067,6 +2106,7 @@ export default function Accounts() {
         showToast(t("accounts.addSuccess"));
         setAddForm({ refresh_token: "", session_token: "", proxy_url: "" });
         setAddCustomHeadersText("");
+        setWorkspaceRouteID("");
         return;
       }
 
@@ -2075,6 +2115,7 @@ export default function Accounts() {
       setShowAdd(false);
       setAddForm({ refresh_token: "", session_token: "", proxy_url: "" });
       setAddCustomHeadersText("");
+      setWorkspaceRouteID("");
       void reload();
     } catch (error) {
       showToast(
@@ -2100,7 +2141,10 @@ export default function Accounts() {
       const res = await postAdminSSE("/accounts/at?stream=true", {
         ...atForm,
         allow_duplicate: allowDuplicate,
-        custom_headers: parsedCustomHeaders.value,
+        custom_headers: applyWorkspaceRouteHeader(
+          parsedCustomHeaders.value,
+          workspaceRouteID,
+        ),
         group_ids: importGroupIds,
       });
       setShowAdd(false);
@@ -2108,6 +2152,7 @@ export default function Accounts() {
       showToast(t("accounts.addSuccess"));
       setAtForm({ access_token: "", proxy_url: "" });
       setAddCustomHeadersText("");
+      setWorkspaceRouteID("");
     } catch (error) {
       showToast(
         t("accounts.addFailed", { error: getErrorMessage(error) }),
@@ -2201,10 +2246,17 @@ export default function Accounts() {
       const items = Array.isArray(parsed) ? parsed : [parsed];
       const blob = new Blob([JSON.stringify(items)], { type: "application/json" });
       const file = new File([blob], "session.json", { type: "application/json" });
-      await importFiles([file], "json", sessionProxyUrl, addCustomHeadersText);
+      await importFiles(
+        [file],
+        "json",
+        sessionProxyUrl,
+        addCustomHeadersText,
+        workspaceRouteID,
+      );
       setShowAdd(false);
       setSessionJson("");
       setAddCustomHeadersText("");
+      setWorkspaceRouteID("");
     } catch (error) {
       if (error instanceof SyntaxError) {
         showToast(t("accounts.sessionJsonInvalid"), "error");
@@ -2640,6 +2692,7 @@ export default function Accounts() {
     format: "txt" | "json" | "json_at" | "at_txt",
     proxyOverride?: string,
     customHeadersText?: string,
+    workspaceOverride?: string,
   ) => {
     const parsedCustomHeaders = parseCustomHeadersText(customHeadersText ?? "");
     if (!parsedCustomHeaders.ok) {
@@ -2662,10 +2715,14 @@ export default function Accounts() {
       if (format !== "txt") formData.append("format", format);
       const trimmedImportProxy = (proxyOverride ?? importProxyUrl).trim();
       if (trimmedImportProxy) formData.append("proxy_url", trimmedImportProxy);
-      if (parsedCustomHeaders.value) {
+      const routedHeaders = applyOptionalWorkspaceRouteHeader(
+        parsedCustomHeaders.value,
+        workspaceOverride,
+      );
+      if (routedHeaders) {
         formData.append(
           "custom_headers",
-          JSON.stringify(parsedCustomHeaders.value),
+          JSON.stringify(routedHeaders),
         );
       }
       if (allowDuplicate) formData.append("allow_duplicate", "true");
@@ -2864,7 +2921,13 @@ export default function Accounts() {
       return;
     }
     setShowImportPicker(false);
-    await importFiles(files, "txt", undefined, importCustomHeadersText);
+    await importFiles(
+      files,
+      "txt",
+      undefined,
+      importCustomHeadersText,
+      importWorkspaceRouteID.trim() || undefined,
+    );
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -2877,6 +2940,7 @@ export default function Accounts() {
       "json",
       undefined,
       importCustomHeadersText,
+      importWorkspaceRouteID.trim() || undefined,
     );
     if (jsonInputRef.current) jsonInputRef.current.value = "";
   };
@@ -2890,6 +2954,7 @@ export default function Accounts() {
       "json_at",
       undefined,
       importCustomHeadersText,
+      importWorkspaceRouteID.trim() || undefined,
     );
     if (jsonAtInputRef.current) jsonAtInputRef.current.value = "";
   };
@@ -2902,7 +2967,13 @@ export default function Accounts() {
       return;
     }
     setShowImportPicker(false);
-    await importFiles(files, "at_txt", undefined, importCustomHeadersText);
+    await importFiles(
+      files,
+      "at_txt",
+      undefined,
+      importCustomHeadersText,
+      importWorkspaceRouteID.trim() || undefined,
+    );
     if (atFileInputRef.current) atFileInputRef.current.value = "";
   };
 
@@ -2930,10 +3001,22 @@ export default function Accounts() {
     );
 
     if (jsonFiles.length > 0) {
-      await importFiles(jsonFiles, "json", undefined, importCustomHeadersText);
+      await importFiles(
+        jsonFiles,
+        "json",
+        undefined,
+        importCustomHeadersText,
+        importWorkspaceRouteID.trim() || undefined,
+      );
     }
     if (txtFiles.length > 0) {
-      await importFiles(txtFiles, "txt", undefined, importCustomHeadersText);
+      await importFiles(
+        txtFiles,
+        "txt",
+        undefined,
+        importCustomHeadersText,
+        importWorkspaceRouteID.trim() || undefined,
+      );
     }
 
     if (folderInputRef.current) folderInputRef.current.value = "";
@@ -2952,7 +3035,13 @@ export default function Accounts() {
     }
     const blob = new Blob([JSON.stringify(items)], { type: "application/json" });
     const file = new File([blob], "paste.json", { type: "application/json" });
-    await importFiles([file], "json", undefined, importCustomHeadersText);
+    await importFiles(
+      [file],
+      "json",
+      undefined,
+      importCustomHeadersText,
+      importWorkspaceRouteID.trim() || undefined,
+    );
     setShowPasteImport(false);
     setPasteImportText("");
   };
@@ -5673,12 +5762,24 @@ export default function Accounts() {
                                       ? formatAccountName(account)
                                       : formatAccountListEmail(account)}
                                   </button>
-                                  {account.chatgpt_account_id && (
+                                  {account.effective_workspace_id && (
                                     <span
-                                      className="max-w-full truncate font-mono text-[10px] leading-tight text-muted-foreground/70"
-                                      title={account.chatgpt_account_id}
+                                      className={cn(
+                                        "max-w-full truncate font-mono text-[10px] leading-tight",
+                                        account.workspace_id_override
+                                          ? "rounded bg-sky-500/10 px-1.5 py-0.5 font-semibold text-sky-700 dark:text-sky-300"
+                                          : "text-muted-foreground/70",
+                                      )}
+                                      title={
+                                        account.workspace_id_override
+                                          ? `${t("accounts.workspaceRouteBadge")}: ${account.effective_workspace_id}`
+                                          : account.effective_workspace_id
+                                      }
                                     >
-                                      {account.chatgpt_account_id}
+                                      {account.workspace_id_override
+                                        ? `${t("accounts.workspaceRouteBadge")} · `
+                                        : ""}
+                                      {account.effective_workspace_id}
                                     </span>
                                   )}
                                   {showEmailDomainTags &&
@@ -6078,6 +6179,7 @@ export default function Accounts() {
               setSessionJson("");
               setSessionProxyUrl("");
               setAddCustomHeadersText("");
+              setWorkspaceRouteID("");
             }}
             footer={
               <>
@@ -6118,6 +6220,7 @@ export default function Accounts() {
                     setSessionJson("");
                     setSessionProxyUrl("");
                     setAddCustomHeadersText("");
+                    setWorkspaceRouteID("");
                   }}
                 >
                   {t("common.cancel")}
@@ -6306,6 +6409,7 @@ export default function Accounts() {
                       proxy_url: value,
                     })),
                 })}
+                {renderWorkspaceRouteInput()}
                 {renderCustomHeadersTextarea({
                   value: addCustomHeadersText,
                   onChange: setAddCustomHeadersText,
@@ -6339,6 +6443,7 @@ export default function Accounts() {
                       proxy_url: value,
                     })),
                 })}
+                {renderWorkspaceRouteInput()}
                 {renderCustomHeadersTextarea({
                   value: addCustomHeadersText,
                   onChange: setAddCustomHeadersText,
@@ -6375,6 +6480,7 @@ export default function Accounts() {
                       proxy_url: value,
                     })),
                 })}
+                {renderWorkspaceRouteInput()}
                 {renderCustomHeadersTextarea({
                   value: addCustomHeadersText,
                   onChange: setAddCustomHeadersText,
@@ -6405,6 +6511,7 @@ export default function Accounts() {
                   label: t("accounts.importProxyLabel"),
                   onChange: setSessionProxyUrl,
                 })}
+                {renderWorkspaceRouteInput()}
                 {renderCustomHeadersTextarea({
                   value: addCustomHeadersText,
                   onChange: setAddCustomHeadersText,
@@ -6848,6 +6955,10 @@ export default function Accounts() {
               {renderCustomHeadersTextarea({
                 value: importCustomHeadersText,
                 onChange: setImportCustomHeadersText,
+              })}
+              {renderWorkspaceRouteInput({
+                value: importWorkspaceRouteID,
+                onChange: setImportWorkspaceRouteID,
               })}
               <label className="flex cursor-pointer items-center gap-2 pt-1 text-xs text-muted-foreground">
                 <input
