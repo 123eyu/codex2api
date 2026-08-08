@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -129,6 +130,71 @@ func TestPromptReviewConnectionTestsAllKeysConcurrentlyWithoutReturningSecrets(t
 		}
 		if strings.Contains(recorder.Body.String(), strings.TrimPrefix(authorization, "Bearer ")) {
 			t.Fatalf("response leaked key: %s", recorder.Body.String())
+		}
+	}
+	for index, result := range response.Results {
+		if result.KeyID == "" || result.KeyMasked == "" || result.KeyIndex != index+1 {
+			t.Fatalf("result %d has no stable redacted identity: %+v", index, result)
+		}
+	}
+}
+
+func TestDeletePromptReviewAPIKeyRemovesOnlySelectedKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "review-keys.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+	settings := &database.SystemSettings{
+		PromptFilterReviewEnabled: true, PromptFilterReviewAPIKey: "key-one\nkey-two",
+		PromptFilterReviewBaseURL: "https://review.example.com", PromptFilterReviewModel: "review-model",
+	}
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("UpdateSystemSettings: %v", err)
+	}
+	store := auth.NewStore(nil, nil, settings)
+	t.Cleanup(store.Stop)
+	handler := &Handler{db: db, store: store}
+
+	deleteKey := func(key string) *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Params = gin.Params{{Key: "key_id", Value: promptReviewAPIKeyID(key)}}
+		c.Request = httptest.NewRequest(http.MethodDelete, "/api/admin/prompt-filter/review/keys/selected", nil)
+		handler.DeletePromptReviewAPIKey(c)
+		return recorder
+	}
+
+	if recorder := deleteKey("key-one"); recorder.Code != http.StatusOK {
+		t.Fatalf("delete selected status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil || persisted.PromptFilterReviewAPIKey != "key-two" {
+		t.Fatalf("persisted keys=%q err=%v, want key-two", persisted.PromptFilterReviewAPIKey, err)
+	}
+	if got := store.GetPromptFilterConfig().Review.APIKeyList(); len(got) != 1 || got[0] != "key-two" {
+		t.Fatalf("runtime keys=%v, want [key-two]", got)
+	}
+	if recorder := deleteKey("key-two"); recorder.Code != http.StatusConflict {
+		t.Fatalf("delete last enabled key status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPromptReviewAPIKeyDescriptorsNeverExposeSecrets(t *testing.T) {
+	keys := []string{"sk-secret-alpha-1234", "opaque-secret-beta-9876"}
+	items := promptReviewAPIKeyDescriptors(keys)
+	if len(items) != len(keys) || items[0].ID == items[1].ID {
+		t.Fatalf("descriptors=%+v", items)
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, key := range keys {
+		if strings.Contains(string(encoded), key) {
+			t.Fatalf("descriptor response leaked key %q: %s", key, encoded)
 		}
 	}
 }

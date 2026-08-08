@@ -713,6 +713,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.DELETE("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.RevokePromptRiskTrustPolicy)
 	api.POST("/prompt-policy/conversation-locks/:lock_key/unlock", h.UnlockPromptConversation)
 	api.POST("/prompt-filter/test", h.TestPromptFilter)
+	api.GET("/prompt-filter/review/keys", h.ListPromptReviewAPIKeys)
+	api.DELETE("/prompt-filter/review/keys/:key_id", h.DeletePromptReviewAPIKey)
 	api.POST("/prompt-filter/review/test", h.TestPromptReviewConnection)
 	api.POST("/prompt-filter/rules/test", h.TestPromptFilterRulePattern)
 	api.GET("/prompt-filter/rules", h.GetPromptFilterRules)
@@ -6047,10 +6049,11 @@ func (h *Handler) GetAPIKeyAccountStats(c *gin.Context) {
 
 	cacheKey := fmt.Sprintf("%d:%d:%d", id, rangeStart.Unix()/30, rangeEnd.Unix()/30)
 	type cachedResponse struct {
-		Items           []database.APIKeyAccountStat `json:"items"`
-		Groups          []apiKeyAccountGroupUsage    `json:"groups"`
-		Summary         apiKeyAccountUsageSummary    `json:"summary"`
-		MembershipBasis string                       `json:"membership_basis"`
+		Items           []database.APIKeyAccountStat     `json:"items"`
+		Groups          []apiKeyAccountGroupUsage        `json:"groups"`
+		Summary         apiKeyAccountUsageSummary        `json:"summary"`
+		Reconciliation  apiKeyAccountUsageReconciliation `json:"reconciliation"`
+		MembershipBasis string                           `json:"membership_basis"`
 	}
 	var response cachedResponse
 	if h.getRuntimeJSON(ctx, adminAPIKeyAccountsNamespace, cacheKey, &response) {
@@ -6067,7 +6070,7 @@ func (h *Handler) GetAPIKeyAccountStats(c *gin.Context) {
 		items = []database.APIKeyAccountStat{}
 	}
 	response.Items = items
-	response.Groups, response.Summary = aggregateAPIKeyAccountGroups(items)
+	response.Groups, response.Summary, response.Reconciliation = aggregateAPIKeyAccountGroups(items)
 	response.MembershipBasis = "current_and_deleted_last_membership"
 	h.setRuntimeJSON(ctx, adminAPIKeyAccountsNamespace, cacheKey, response, adminUsageRangeCacheTTL)
 	c.JSON(http.StatusOK, response)
@@ -6092,18 +6095,46 @@ type apiKeyAccountGroupUsage struct {
 	UserBilled    float64 `json:"user_billed"`
 }
 
+type apiKeyAccountUsageReconciliation struct {
+	GroupedTotal          apiKeyAccountUsageSummary `json:"grouped_total"`
+	Ungrouped             apiKeyAccountUsageSummary `json:"ungrouped"`
+	Duplicate             apiKeyAccountUsageSummary `json:"duplicate"`
+	UniqueGroupedAccounts int                       `json:"unique_grouped_accounts"`
+	MultiGroupAccounts    int                       `json:"multi_group_accounts"`
+}
+
 // aggregateAPIKeyAccountGroups uses current memberships for active accounts and
 // the retained last membership for recycle-bin accounts. If an account belongs
 // to multiple groups, its usage is intentionally included in each group; the
 // overall summary remains de-duplicated.
-func aggregateAPIKeyAccountGroups(items []database.APIKeyAccountStat) ([]apiKeyAccountGroupUsage, apiKeyAccountUsageSummary) {
+func aggregateAPIKeyAccountGroups(items []database.APIKeyAccountStat) ([]apiKeyAccountGroupUsage, apiKeyAccountUsageSummary, apiKeyAccountUsageReconciliation) {
 	groupMap := make(map[int64]*apiKeyAccountGroupUsage)
 	summary := apiKeyAccountUsageSummary{Accounts: len(items)}
+	reconciliation := apiKeyAccountUsageReconciliation{}
 	for _, item := range items {
 		summary.Requests += item.Requests
 		summary.TotalTokens += item.TotalTokens
 		summary.AccountBilled += item.AccountBilled
 		summary.UserBilled += item.UserBilled
+		groupCount := len(item.Groups)
+		if groupCount == 0 {
+			reconciliation.Ungrouped.Accounts++
+			reconciliation.Ungrouped.Requests += item.Requests
+			reconciliation.Ungrouped.TotalTokens += item.TotalTokens
+			reconciliation.Ungrouped.AccountBilled += item.AccountBilled
+			reconciliation.Ungrouped.UserBilled += item.UserBilled
+		} else {
+			reconciliation.UniqueGroupedAccounts++
+		}
+		if groupCount > 1 {
+			reconciliation.MultiGroupAccounts++
+			extraAssignments := int64(groupCount - 1)
+			reconciliation.Duplicate.Accounts += groupCount - 1
+			reconciliation.Duplicate.Requests += item.Requests * extraAssignments
+			reconciliation.Duplicate.TotalTokens += item.TotalTokens * extraAssignments
+			reconciliation.Duplicate.AccountBilled += item.AccountBilled * float64(extraAssignments)
+			reconciliation.Duplicate.UserBilled += item.UserBilled * float64(extraAssignments)
+		}
 		for _, group := range item.Groups {
 			total := groupMap[group.ID]
 			if total == nil {
@@ -6120,6 +6151,11 @@ func aggregateAPIKeyAccountGroups(items []database.APIKeyAccountStat) ([]apiKeyA
 	groups := make([]apiKeyAccountGroupUsage, 0, len(groupMap))
 	for _, group := range groupMap {
 		groups = append(groups, *group)
+		reconciliation.GroupedTotal.Accounts += group.Accounts
+		reconciliation.GroupedTotal.Requests += group.Requests
+		reconciliation.GroupedTotal.TotalTokens += group.TotalTokens
+		reconciliation.GroupedTotal.AccountBilled += group.AccountBilled
+		reconciliation.GroupedTotal.UserBilled += group.UserBilled
 	}
 	sort.Slice(groups, func(i, j int) bool {
 		if groups[i].UserBilled == groups[j].UserBilled {
@@ -6127,7 +6163,7 @@ func aggregateAPIKeyAccountGroups(items []database.APIKeyAccountStat) ([]apiKeyA
 		}
 		return groups[i].UserBilled > groups[j].UserBilled
 	})
-	return groups, summary
+	return groups, summary, reconciliation
 }
 
 // GetChartData 返回图表聚合数据（服务端分桶 + 内存缓存）

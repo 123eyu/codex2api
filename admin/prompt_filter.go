@@ -2,7 +2,9 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -74,6 +76,8 @@ type promptReviewTestRequest struct {
 
 type promptReviewKeyTestResult struct {
 	KeyIndex             int                `json:"key_index"`
+	KeyID                string             `json:"key_id,omitempty"`
+	KeyMasked            string             `json:"key_masked,omitempty"`
 	OK                   bool               `json:"ok"`
 	Endpoint             string             `json:"endpoint,omitempty"`
 	Model                string             `json:"model,omitempty"`
@@ -88,6 +92,44 @@ type promptReviewKeyTestResult struct {
 	ModerationThresholds map[string]float64 `json:"moderation_thresholds,omitempty"`
 	LatencyMS            int64              `json:"latency_ms"`
 	Error                string             `json:"error,omitempty"`
+}
+
+type promptReviewAPIKeyDescriptor struct {
+	ID     string `json:"id"`
+	Index  int    `json:"index"`
+	Masked string `json:"masked"`
+}
+
+type promptReviewAPIKeysResponse struct {
+	Items []promptReviewAPIKeyDescriptor `json:"items"`
+	Count int                            `json:"count"`
+}
+
+func promptReviewAPIKeyID(key string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	return hex.EncodeToString(sum[:])
+}
+
+func maskPromptReviewAPIKey(key string) string {
+	key = strings.TrimSpace(key)
+	if len(key) <= 4 {
+		return "••••"
+	}
+	prefix := ""
+	if len(key) >= 3 {
+		prefix = key[:3]
+	}
+	return prefix + "••••" + key[len(key)-4:]
+}
+
+func promptReviewAPIKeyDescriptors(keys []string) []promptReviewAPIKeyDescriptor {
+	items := make([]promptReviewAPIKeyDescriptor, 0, len(keys))
+	for index, key := range keys {
+		items = append(items, promptReviewAPIKeyDescriptor{
+			ID: promptReviewAPIKeyID(key), Index: index + 1, Masked: maskPromptReviewAPIKey(key),
+		})
+	}
+	return items
 }
 
 type promptReviewTestResponse struct {
@@ -535,6 +577,7 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 			}(index, key)
 		}
 		results := make([]promptReviewKeyTestResult, len(keys))
+		descriptors := promptReviewAPIKeyDescriptors(keys)
 		allOK := true
 		var first promptfilter.ReviewOutcome
 		for range keys {
@@ -543,7 +586,8 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 				first = item.outcome
 			}
 			result := promptReviewKeyTestResult{
-				KeyIndex: item.index + 1, OK: item.err == nil, Flagged: item.outcome.Flagged,
+				KeyIndex: item.index + 1, KeyID: descriptors[item.index].ID, KeyMasked: descriptors[item.index].Masked,
+				OK: item.err == nil, Flagged: item.outcome.Flagged,
 				Endpoint: item.outcome.Endpoint, Model: item.outcome.Model, Confidence: item.outcome.Confidence,
 				Reason: item.outcome.Reason, HighestCategory: item.outcome.HighestCategory,
 				DecisionCategory: item.outcome.DecisionCategory, DecisionScore: item.outcome.DecisionScore,
@@ -591,6 +635,85 @@ func (h *Handler) TestPromptReviewConnection(c *gin.Context) {
 		LatencyMS:            time.Since(started).Milliseconds(),
 		KeyCount:             len(keys),
 	})
+}
+
+func (h *Handler) ListPromptReviewAPIKeys(c *gin.Context) {
+	if h == nil || h.store == nil {
+		writeError(c, http.StatusServiceUnavailable, "Prompt 审核配置不可用")
+		return
+	}
+	items := promptReviewAPIKeyDescriptors(h.store.GetPromptFilterConfig().Review.APIKeyList())
+	c.JSON(http.StatusOK, promptReviewAPIKeysResponse{Items: items, Count: len(items)})
+}
+
+func (h *Handler) DeletePromptReviewAPIKey(c *gin.Context) {
+	if h == nil || h.store == nil || h.db == nil {
+		writeError(c, http.StatusServiceUnavailable, "Prompt 审核配置不可用")
+		return
+	}
+	keyID := strings.ToLower(strings.TrimSpace(c.Param("key_id")))
+	if len(keyID) != sha256.Size*2 {
+		writeError(c, http.StatusBadRequest, "审查 Key 标识无效")
+		return
+	}
+	if _, err := hex.DecodeString(keyID); err != nil {
+		writeError(c, http.StatusBadRequest, "审查 Key 标识无效")
+		return
+	}
+
+	h.settingsUpdateMu.Lock()
+	defer h.settingsUpdateMu.Unlock()
+	settings, err := h.db.GetSystemSettings(c.Request.Context())
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	if settings == nil {
+		writeError(c, http.StatusNotFound, "审查 Key 不存在")
+		return
+	}
+	currentRaw := strings.TrimSpace(settings.PromptFilterReviewAPIKey)
+	keys := (promptfilter.ReviewConfig{APIKey: currentRaw}).APIKeyList()
+	remaining := make([]string, 0, len(keys))
+	found := false
+	for _, key := range keys {
+		if promptReviewAPIKeyID(key) == keyID {
+			found = true
+			continue
+		}
+		remaining = append(remaining, key)
+	}
+	if !found {
+		writeError(c, http.StatusNotFound, "审查 Key 不存在或已被删除")
+		return
+	}
+	if settings.PromptFilterReviewEnabled && len(remaining) == 0 {
+		writeError(c, http.StatusConflict, "模型复核启用时不能删除最后一个审查 Key，请先关闭模型复核或添加替代 Key")
+		return
+	}
+	replacement := strings.Join(remaining, "\n")
+	runtimeCfg := h.store.GetPromptFilterConfig()
+	runtimeCfg.Review.APIKey = replacement
+	runtimeCfg = promptfilter.NormalizeConfig(runtimeCfg)
+	if err := promptfilter.ValidateReviewConfig(runtimeCfg.Review); err != nil {
+		writeError(c, http.StatusConflict, "删除后审查配置无效: "+err.Error())
+		return
+	}
+	swapped, err := h.db.CompareAndSwapPromptFilterReviewAPIKeys(c.Request.Context(), currentRaw, replacement)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	if !swapped {
+		writeError(c, http.StatusConflict, "审查 Key 列表已被其他操作修改，请刷新后重试")
+		return
+	}
+	if err := h.store.SetPromptFilterConfigWithAdvancedRaw(runtimeCfg, h.store.GetPromptFilterAdvancedConfig()); err != nil {
+		writeError(c, http.StatusInternalServerError, "审查 Key 已保存，但运行时配置更新失败")
+		return
+	}
+	items := promptReviewAPIKeyDescriptors(remaining)
+	c.JSON(http.StatusOK, promptReviewAPIKeysResponse{Items: items, Count: len(items)})
 }
 
 func (h *Handler) TestPromptFilterRulePattern(c *gin.Context) {

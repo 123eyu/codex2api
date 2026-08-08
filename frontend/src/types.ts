@@ -1666,6 +1666,8 @@ export interface PromptReviewTestRequest {
 
 export interface PromptReviewKeyTestResult {
   key_index: number
+  key_id?: string
+  key_masked?: string
   ok: boolean
   endpoint?: string
   model?: string
@@ -1680,6 +1682,17 @@ export interface PromptReviewKeyTestResult {
   moderation_thresholds?: Record<string, number>
   latency_ms: number
   error?: string
+}
+
+export interface PromptReviewAPIKeyDescriptor {
+  id: string
+  index: number
+  masked: string
+}
+
+export interface PromptReviewAPIKeysResponse {
+  items: PromptReviewAPIKeyDescriptor[]
+  count: number
 }
 
 export interface PromptReviewTestResponse {
@@ -2215,10 +2228,19 @@ export interface APIKeyAccountUsageSummary {
   user_billed: number
 }
 
+export interface APIKeyAccountUsageReconciliation {
+  grouped_total: APIKeyAccountUsageSummary
+  ungrouped: APIKeyAccountUsageSummary
+  duplicate: APIKeyAccountUsageSummary
+  unique_grouped_accounts: number
+  multi_group_accounts: number
+}
+
 export interface APIKeyAccountStatsResponse {
   items: APIKeyAccountStat[]
   groups: APIKeyAccountGroupUsage[]
   summary: APIKeyAccountUsageSummary
+  reconciliation?: APIKeyAccountUsageReconciliation
   /** Active accounts use current memberships; deleted accounts use their last retained membership. */
   membership_basis: 'current_and_deleted_last_membership'
 }
