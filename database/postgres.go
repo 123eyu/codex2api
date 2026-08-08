@@ -2078,6 +2078,10 @@ type SystemSettings struct {
 	// When true, an existing row keeps its current custom-pattern value instead
 	// of accepting a potentially stale full-settings snapshot.
 	PreservePromptFilterCustomPatterns bool
+	// PreservePromptFilterReviewAPIKey is the same guard for the review key
+	// list: individual keys can be deleted out-of-band, so a full-settings
+	// snapshot that didn't change the field must not write it back.
+	PreservePromptFilterReviewAPIKey bool
 }
 
 func normalizeBillingTierPolicy(policy string) string {
@@ -2469,7 +2473,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				prompt_filter_custom_patterns = CASE WHEN $106 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
 				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns,
 				prompt_filter_review_enabled = EXCLUDED.prompt_filter_review_enabled,
-				prompt_filter_review_api_key = EXCLUDED.prompt_filter_review_api_key,
+				prompt_filter_review_api_key = CASE WHEN $107 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
 				prompt_filter_review_base_url = EXCLUDED.prompt_filter_review_base_url,
 				prompt_filter_review_model = EXCLUDED.prompt_filter_review_model,
 				prompt_filter_review_timeout_seconds = EXCLUDED.prompt_filter_review_timeout_seconds,
@@ -2565,7 +2569,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.CodexPreflightSSEPassthroughEnabled,
 		NormalizeUTLSShutdownTimeoutMinutes(s.UTLSShutdownTimeoutMinutes),
 		s.CodexWSWeakNetworkMode,
-		s.PreservePromptFilterCustomPatterns)
+		s.PreservePromptFilterCustomPatterns,
+		s.PreservePromptFilterReviewAPIKey)
 	return err
 }
 

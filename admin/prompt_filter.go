@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -110,16 +111,14 @@ func promptReviewAPIKeyID(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// maskPromptReviewAPIKey 按 rune 切片(字节切会截断多字节字符),且只在
+// 前后缀不可能重叠、多数字符仍被遮蔽时(≥12 字符)才展示明文片段。
 func maskPromptReviewAPIKey(key string) string {
-	key = strings.TrimSpace(key)
-	if len(key) <= 4 {
+	runes := []rune(strings.TrimSpace(key))
+	if len(runes) < 12 {
 		return "••••"
 	}
-	prefix := ""
-	if len(key) >= 3 {
-		prefix = key[:3]
-	}
-	return prefix + "••••" + key[len(key)-4:]
+	return string(runes[:3]) + "••••" + string(runes[len(runes)-4:])
 }
 
 func promptReviewAPIKeyDescriptors(keys []string) []promptReviewAPIKeyDescriptor {
@@ -672,13 +671,17 @@ func (h *Handler) DeletePromptReviewAPIKey(c *gin.Context) {
 		writeError(c, http.StatusNotFound, "审查 Key 不存在")
 		return
 	}
-	currentRaw := strings.TrimSpace(settings.PromptFilterReviewAPIKey)
-	keys := (promptfilter.ReviewConfig{APIKey: currentRaw}).APIKeyList()
+	// storedRaw 保持数据库原值不做 trim:CAS 按原值精确比较,存量值若带
+	// 换行/制表符,trim 后将永远匹配不上而恒 409。
+	storedRaw := settings.PromptFilterReviewAPIKey
+	keys := (promptfilter.ReviewConfig{APIKey: storedRaw}).APIKeyList()
 	remaining := make([]string, 0, len(keys))
 	found := false
+	deletedMasked := ""
 	for _, key := range keys {
 		if promptReviewAPIKeyID(key) == keyID {
 			found = true
+			deletedMasked = maskPromptReviewAPIKey(key)
 			continue
 		}
 		remaining = append(remaining, key)
@@ -699,7 +702,7 @@ func (h *Handler) DeletePromptReviewAPIKey(c *gin.Context) {
 		writeError(c, http.StatusConflict, "删除后审查配置无效: "+err.Error())
 		return
 	}
-	swapped, err := h.db.CompareAndSwapPromptFilterReviewAPIKeys(c.Request.Context(), currentRaw, replacement)
+	swapped, err := h.db.CompareAndSwapPromptFilterReviewAPIKeys(c.Request.Context(), storedRaw, replacement)
 	if err != nil {
 		writeInternalError(c, err)
 		return
@@ -712,6 +715,7 @@ func (h *Handler) DeletePromptReviewAPIKey(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "审查 Key 已保存，但运行时配置更新失败")
 		return
 	}
+	log.Printf("审查 Key 已删除: %s (来自 %s)，剩余 %d 个", deletedMasked, c.ClientIP(), len(remaining))
 	items := promptReviewAPIKeyDescriptors(remaining)
 	c.JSON(http.StatusOK, promptReviewAPIKeysResponse{Items: items, Count: len(items)})
 }

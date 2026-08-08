@@ -3177,7 +3177,7 @@ function OverviewView({
                         {moderationThresholdCategories.map((category) => (
                           <Field
                             key={category}
-                            label={`${t(`promptFilter.moderationCategories.${category}`)} (${category})`}
+                            label={`${t(`promptFilter.moderationCategories.${category}`, { defaultValue: category })} (${category})`}
                             hint={t('promptFilter.moderationThresholdDefault', { percent: defaultReviewAdapter.moderation_thresholds[category] * 100 })}
                           >
                             <div className="flex items-center gap-2">

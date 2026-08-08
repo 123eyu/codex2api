@@ -199,6 +199,40 @@ func TestPromptReviewAPIKeyDescriptorsNeverExposeSecrets(t *testing.T) {
 	}
 }
 
+// 短 Key 曾因前 3 位与后 4 位重叠被整串还原(如 "hunter2"→"hun••••ter2"),
+// 多字节 Key 曾被按字节切坏;掩码只允许在长度足够时露出前 3 + 后 4。
+func TestMaskPromptReviewAPIKeyNeverRevealsShortOrOverlappingKeys(t *testing.T) {
+	fullyMasked := "••••"
+	cases := []struct {
+		key  string
+		want string
+	}{
+		{"", fullyMasked},
+		{"a", fullyMasked},
+		{"abcd", fullyMasked},
+		{"abcde", fullyMasked},
+		{"hunter2", fullyMasked},
+		{"sk-12345", fullyMasked},
+		{"abcdefghijk", fullyMasked},
+		{"sk-abcdefghi", "sk-••••fghi"},
+		{"sk-secret-alpha-1234", "sk-••••1234"},
+		{"密钥密钥密钥密钥密钥", fullyMasked},
+		{"密钥一二三四五六七八九十日月", "密钥一••••九十日月"},
+	}
+	for _, tc := range cases {
+		if got := maskPromptReviewAPIKey(tc.key); got != tc.want {
+			t.Fatalf("mask(%q) = %q, want %q", tc.key, got, tc.want)
+		}
+	}
+	for _, tc := range cases {
+		masked := maskPromptReviewAPIKey(tc.key)
+		runes := []rune(tc.key)
+		if len(runes) >= 8 && len(runes) < 12 && masked != fullyMasked {
+			t.Fatalf("mask(%q) reveals fragments of a key too short to mask safely: %q", tc.key, masked)
+		}
+	}
+}
+
 func TestPromptFilterTestEndpointUsesRealGuardPipelineMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := promptfilter.DefaultConfig()

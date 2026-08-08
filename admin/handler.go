@@ -185,7 +185,9 @@ type chartCacheEntry struct {
 const (
 	adminUsageStatsCacheNamespace  = "admin:usage-stats"
 	adminChartCacheNamespace       = "admin:chart-data"
-	adminAPIKeyAccountsNamespace   = "admin:api-key-accounts"
+	// v2:响应结构新增 reconciliation 字段,升版命名空间让 Redis 里
+	// 部署前写入的旧条目失效,避免零值对账在滚动窗口内展示。
+	adminAPIKeyAccountsNamespace   = "admin:api-key-accounts:v2"
 	adminAPIKeyStatsNamespace      = "admin:api-key-stats"
 	adminAccountWindowsNamespace   = "admin:account-usage-windows"
 	adminAPIKeyCacheNamespace      = "api-key"
@@ -9748,6 +9750,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterDisabledPatterns:        promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
 		PromptFilterReviewEnabled:           promptFilterCfg.Review.Enabled,
 		PromptFilterReviewAPIKey:            promptFilterCfg.Review.APIKey,
+		PreservePromptFilterReviewAPIKey:    req.PromptFilterReviewAPIKey == nil || strings.TrimSpace(*req.PromptFilterReviewAPIKey) == "",
 		PromptFilterReviewBaseURL:           promptFilterCfg.Review.BaseURL,
 		PromptFilterReviewModel:             promptFilterCfg.Review.Model,
 		PromptFilterReviewTimeoutSeconds:    promptFilterCfg.Review.TimeoutSeconds,
