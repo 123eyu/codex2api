@@ -342,7 +342,9 @@ function UsageCostCell({ log }: { log: UsageLog }) {
   const displayCost = userBilled > 0 ? userBilled : accountBilled
   const longContextThreshold = safeNumber(log.long_context_threshold)
   const requestedTier = log.requested_service_tier || ''
-  const actualTier = log.actual_service_tier || log.service_tier || ''
+  // legacy 行（三字段拆分前）只有 service_tier 可用；新行 actual 为空表示上游未回传，
+  // 不能回退到偏好请求意图的 legacy 列冒充“上游回传 Tier”。
+  const actualTier = log.actual_service_tier || (requestedTier ? '' : log.service_tier || '')
   const billingTier = log.billing_service_tier || log.service_tier || ''
   const hasCostContext = log.status_code < 400 && (
     accountBilled > 0 ||
