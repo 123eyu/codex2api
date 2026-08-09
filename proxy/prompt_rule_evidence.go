@@ -297,15 +297,7 @@ func (h *Handler) enqueueUpstreamCyberPolicyEvidence(c *gin.Context, endpoint, m
 		"newapi_policy_status": audit.NewAPIPolicyStatus, "newapi_platform": audit.NewAPIPlatform,
 		"evidence_quality": evidenceQuality, "learning_evidence": learningBundle,
 	}
-	metadata, _ := json.Marshal(metadataFields)
-	if len(metadata) > promptPolicyLearningMetadataBytes {
-		// The incident retains the complete match JSON. Candidate evidence favors
-		// the durable learning bundle when the portable 64 KiB metadata limit is
-		// approached, especially for multibyte Prompt text.
-		delete(metadataFields, "local_matches")
-		metadataFields["local_matches_count"] = len(captured.Matches)
-		metadata, _ = json.Marshal(metadataFields)
-	}
+	metadata := marshalPromptPolicyEvidenceMetadata(metadataFields, learningBundle, len(captured.Matches))
 	rationale := "上游返回 cyber_policy，等待归因和候选规则审核"
 	if evidenceQuality == promptPolicyEvidenceQualityInsufficient {
 		rationale = "上游返回 cyber_policy，但请求文本证据不足；仅归档并等待补证，不得用于自动学习"
@@ -433,6 +425,13 @@ func promptPolicyRedactedLearningText(text string, maxRunes, maxBytes int) strin
 	if value == "" || maxBytes <= 0 {
 		return ""
 	}
+	return promptPolicyTruncateBytes(value, maxBytes)
+}
+
+func promptPolicyTruncateBytes(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
 	if len(value) <= maxBytes {
 		return value
 	}
@@ -441,6 +440,42 @@ func promptPolicyRedactedLearningText(text string, maxRunes, maxBytes int) strin
 		cut--
 	}
 	return strings.TrimSpace(value[:cut])
+}
+
+// marshalPromptPolicyEvidenceMetadata 收缩元数据直到编码后体积不超过
+// promptPolicyLearningMetadataBytes。学习包各字段的预算是原始字节,而
+// json.Marshal 会把 <>& 与控制字符转义成 \u00XX(最高 6 倍膨胀),原始
+// 预算无法保证编码后大小;若不按编码结果复查,超限元数据会被下游 64 KiB
+// 校验整体拒绝,进而丢掉整条事件记录。收缩顺序:match JSON → Prompt 文本
+// 减半 → 上下文段逐段丢弃 → 错误文本,最终兜底丢弃学习包本身,保证事件
+// 永远可持久化。
+func marshalPromptPolicyEvidenceMetadata(fields map[string]any, bundle promptPolicyLearningBundle, matchCount int) []byte {
+	encoded, _ := json.Marshal(fields)
+	if len(encoded) <= promptPolicyLearningMetadataBytes {
+		return encoded
+	}
+	delete(fields, "local_matches")
+	fields["local_matches_count"] = matchCount
+	encoded, _ = json.Marshal(fields)
+	for len(encoded) > promptPolicyLearningMetadataBytes {
+		switch {
+		case len(bundle.PromptText) > 256:
+			bundle.PromptText = promptPolicyTruncateBytes(bundle.PromptText, len(bundle.PromptText)/2)
+		case len(bundle.Context) > 0:
+			bundle.Context = bundle.Context[:len(bundle.Context)-1]
+		case len(bundle.UpstreamError) > 256:
+			bundle.UpstreamError = promptPolicyTruncateBytes(bundle.UpstreamError, len(bundle.UpstreamError)/2)
+		case bundle.PromptText != "" || bundle.UpstreamError != "" || bundle.ReviewError != "":
+			bundle.PromptText, bundle.UpstreamError, bundle.ReviewError = "", "", ""
+		default:
+			delete(fields, "learning_evidence")
+			encoded, _ = json.Marshal(fields)
+			return encoded
+		}
+		fields["learning_evidence"] = bundle
+		encoded, _ = json.Marshal(fields)
+	}
+	return encoded
 }
 
 func promptPolicyLearningContextSegmentEligible(segment promptfilter.Segment) bool {

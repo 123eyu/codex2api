@@ -469,3 +469,26 @@ func TestUsageLogIncidentIDSurvivesEveryDetailQueryPath(t *testing.T) {
 	}
 	assertID("paged", paged.Logs, nil)
 }
+
+// TestMergePromptPolicyCandidateEvidenceMetadataEscapeInflation 验证 JSON
+// HTML 转义膨胀(<>& → \u00XX)不会让对账报错回滚整个日志事务:学习包正文
+// 按编码后体积收缩,对账结论字段始终保留。
+func TestMergePromptPolicyCandidateEvidenceMetadataEscapeInflation(t *testing.T) {
+	bundle := fmt.Sprintf(`{"version":1,"quality":"complete","prompt_text":%q,"context":[{"origin":"history","text":%q}],"upstream_error":%q}`,
+		strings.Repeat("<", 20000), strings.Repeat("&", 11000), strings.Repeat(">", 4000))
+	raw := `{"evidence_quality":"complete","incident_id":"escape","learning_evidence":` + bundle + `}`
+	merged, err := mergePromptPolicyCandidateEvidenceMetadata(raw, PromptPolicyOutcomeAuditHit, PromptPolicyComparisonLocalDetected, 42, "rc", "current_user", `[]`)
+	if err != nil {
+		t.Fatalf("escape-heavy merge must not fail: %v", err)
+	}
+	if len(merged) > 64*1024 || !json.Valid([]byte(merged)) {
+		t.Fatalf("merged bytes=%d valid=%t", len(merged), json.Valid([]byte(merged)))
+	}
+	parsed := map[string]any{}
+	if err := json.Unmarshal([]byte(merged), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed["local_outcome"] != PromptPolicyOutcomeAuditHit || parsed["local_comparison"] != PromptPolicyComparisonLocalDetected {
+		t.Fatalf("reconciled decision fields lost: %v", parsed)
+	}
+}

@@ -540,17 +540,21 @@ func promptIntelligenceLearningEvidenceFromMetadata(raw, fallbackPreview string)
 		EvidenceQuality string                             `json:"evidence_quality"`
 		Learning        promptIntelligenceLearningEvidence `json:"learning_evidence"`
 	}
+	hasQualityVerdict := false
 	if json.Unmarshal([]byte(raw), &metadata) == nil {
 		result = metadata.Learning
 		if result.Quality == "" {
 			result.Quality = metadata.EvidenceQuality
 		}
+		// 采集侧已对这条证据给出质量裁决(包括 insufficient 隔离与
+		// context_only 的出处标注),预览回退仅适用于裁决产生之前的存量行:
+		// 把 insufficient 行升格为可学习、或把 context_only 的预览冒充直接
+		// Prompt,都会绕过采集侧的隔离语义。
+		hasQualityVerdict = result.Quality != "" || metadata.Learning.Version > 0
 	}
-	if strings.TrimSpace(result.PromptText) == "" && strings.TrimSpace(fallbackPreview) != "" {
+	if !hasQualityVerdict && strings.TrimSpace(result.PromptText) == "" && strings.TrimSpace(fallbackPreview) != "" {
 		result.PromptText = fallbackPreview
-		if result.Quality == "" || result.Quality == "insufficient" {
-			result.Quality = "legacy_preview"
-		}
+		result.Quality = "legacy_preview"
 	}
 	if result.Quality == "" {
 		result.Quality = "insufficient"
@@ -596,14 +600,22 @@ func selectPromptIntelligenceLearnableEvidence(evidence []*database.PromptRuleCa
 }
 
 func countPromptIntelligenceDirectEvidence(evidence []*database.PromptRuleCandidateEvidence) int {
-	count := 0
+	// 受控自动应用的证据门槛按去重后的独立 Prompt 计数:同一条攻击文本被
+	// 重放多次只算一条,否则重复注入即可凑满门槛。
+	seen := make(map[string]struct{}, len(evidence))
 	for _, row := range evidence {
 		learning := promptIntelligenceLearningEvidenceFromMetadata(row.MetadataJSON, row.SamplePreview)
-		if strings.TrimSpace(learning.PromptText) != "" && learning.Quality != "context_only" && learning.Quality != "insufficient" {
-			count++
+		text := strings.TrimSpace(learning.PromptText)
+		if text == "" || learning.Quality == "context_only" || learning.Quality == "insufficient" {
+			continue
 		}
+		fingerprint := promptfilter.PromptEvidenceFingerprint(text)
+		if fingerprint == "" {
+			fingerprint = row.SourceRefHash
+		}
+		seen[fingerprint] = struct{}{}
 	}
-	return count
+	return len(seen)
 }
 
 func countPromptIntelligenceLearnableEvidence(evidence []*database.PromptRuleCandidateEvidence) int {

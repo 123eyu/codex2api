@@ -441,10 +441,14 @@ const defaultForm: PromptFilterForm = {
   prompt_filter_review_fail_closed: true,
 }
 
+// 必须与后端 security/promptfilter/review.go 的 parseReviewAPIKeys 保持同一
+// 切分语义(空白/逗号/分号 + 去重保序):测试结果的 key_index 按后端解析顺序
+// 编号,前端用它反查草稿位置,两侧分词一旦分歧就会定位到错误的 Key。
+// U+0085(NEL)属 Go 的 unicode.IsSpace 但不在 JS 的 \s 内,需显式补上。
 function parsePromptReviewAPIKeyInput(raw: string): string[] {
   const seen = new Set<string>()
   return raw
-    .split(/[\s,;]+/)
+    .split(/[\s\u0085,;]+/)
     .map((key) => key.trim())
     .filter((key) => {
       if (!key || seen.has(key)) return false
@@ -2769,6 +2773,7 @@ function OverviewView({
   const [reviewTestResult, setReviewTestResult] = useState<PromptReviewTestResponse | null>(null)
   const [configuredReviewKeys, setConfiguredReviewKeys] = useState<PromptReviewAPIKeyDescriptor[]>([])
   const [reviewKeysLoading, setReviewKeysLoading] = useState(false)
+  const [reviewKeysRefreshTick, setReviewKeysRefreshTick] = useState(0)
   const [deletingReviewKeyID, setDeletingReviewKeyID] = useState<string | null>(null)
   const { confirm, confirmDialog } = useConfirmDialog()
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -2901,7 +2906,7 @@ function OverviewView({
         if (!cancelled) setReviewKeysLoading(false)
       })
     return () => { cancelled = true }
-  }, [reviewSettingsOpen, settingsSaveRevision, showToast])
+  }, [reviewSettingsOpen, settingsSaveRevision, reviewKeysRefreshTick, showToast])
   const deleteReviewKey = async (keyID: string, masked: string) => {
     const approved = await confirm({
       title: t('promptFilter.reviewKeyDeleteTitle'),
@@ -2915,6 +2920,9 @@ function OverviewView({
     try {
       const result = await api.deletePromptReviewAPIKey(keyID)
       setConfiguredReviewKeys(result.items)
+      // 保存触发的列表拉取可能仍在途,其删除前快照晚到会把已删 Key“复活”;
+      // 换代重拉一次,顺带让旧请求走 cancelled 丢弃。
+      setReviewKeysRefreshTick((tick) => tick + 1)
       setForm((current) => ({
         ...current,
         prompt_filter_review_api_key_configured: result.count > 0,
@@ -2940,12 +2948,10 @@ function OverviewView({
       if (draftIndex < 0 || draftIndex >= draftReviewKeys.length) return
       const remaining = draftReviewKeys.filter((_, index) => index !== draftIndex)
       setForm((current) => ({ ...current, prompt_filter_review_api_key: remaining.join('\n') }))
-      setReviewTestResult((current) => current ? {
-        ...current,
-        key_count: remaining.length,
-        results: current.results?.filter((result) => result.key_id !== item.key_id),
-      } : null)
-      showToast(t('promptFilter.reviewKeyRemovedFromDraft', { key: masked }))
+      // key_index 是位置映射,移除后剩余卡片的下标即失效;整组测试结果作废,
+      // 保留会让下一次点击删错 Key。
+      setReviewTestResult(null)
+      showToast(t(remaining.length === 0 ? 'promptFilter.reviewKeyRemovedFromDraftEmpty' : 'promptFilter.reviewKeyRemovedFromDraft', { key: masked }))
       return
     }
     if (configuredReviewKeys.some((key) => key.id === item.key_id)) {
@@ -3162,7 +3168,11 @@ function OverviewView({
                       className="font-mono"
                       value={form.prompt_filter_review_api_key ?? ''}
                       placeholder={form.prompt_filter_review_api_key_configured ? t('promptFilter.reviewApiKeyConfigured', { n: form.prompt_filter_review_api_key_count }) : t('promptFilter.reviewApiKeyPlaceholder')}
-                      onChange={(event) => setForm((current) => ({ ...current, prompt_filter_review_api_key: event.target.value }))}
+                      onChange={(event) => {
+                        setForm((current) => ({ ...current, prompt_filter_review_api_key: event.target.value }))
+                        // 草稿变更后旧测试结果的 key_index 映射即失效,保留会误删。
+                        setReviewTestResult(null)
+                      }}
                     />
                     <span className="block text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewApiKeyHint')}</span>
                   </Field>

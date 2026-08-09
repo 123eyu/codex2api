@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -598,10 +599,50 @@ func mergePromptPolicyCandidateEvidenceMetadata(raw, outcome, comparison string,
 			return "", err
 		}
 	}
-	if len(encoded) > 64*1024 {
-		return "", errors.New("reconciled candidate learning evidence exceeds 64 KiB")
+	// JSON 转义(<>& 与控制字符→\u00XX)可把学习包的原始字节预算膨胀至 6 倍,
+	// 上面的降级无法保证收敛;继续按编码后体积收缩学习包正文,最终兜底丢弃
+	// 学习包。对账与持久化永远不因体积失败——报错会回滚整个日志事务,连带
+	// 丢掉安全遥测。
+	for len(encoded) > 64*1024 {
+		if text, ok := learning["prompt_text"].(string); ok && text != "" {
+			if len(text) > 256 {
+				learning["prompt_text"] = truncateEvidenceBytesRuneSafe(text, len(text)/2)
+			} else {
+				delete(learning, "prompt_text")
+			}
+		} else if _, ok := learning["context"]; ok {
+			delete(learning, "context")
+		} else if text, ok := learning["upstream_error"].(string); ok && text != "" {
+			if len(text) > 256 {
+				learning["upstream_error"] = truncateEvidenceBytesRuneSafe(text, len(text)/2)
+			} else {
+				delete(learning, "upstream_error")
+			}
+		} else if _, ok := metadata["learning_evidence"]; ok {
+			delete(metadata, "learning_evidence")
+		} else {
+			return "", errors.New("reconciled candidate evidence metadata exceeds 64 KiB")
+		}
+		encoded, err = json.Marshal(metadata)
+		if err != nil {
+			return "", err
+		}
 	}
 	return string(encoded), nil
+}
+
+func truncateEvidenceBytesRuneSafe(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(value[:cut])
 }
 
 func (db *DB) PersistPromptPolicyIncident(ctx context.Context, rawIncident PromptPolicyIncidentInput, rawCandidate PromptRuleCandidateInput, rawEvidence PromptRuleCandidateEvidenceInput) error {

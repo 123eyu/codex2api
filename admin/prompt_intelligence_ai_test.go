@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -404,5 +405,48 @@ func TestPromptIntelligenceAIAnalysisManualApplyAndRollback(t *testing.T) {
 	var rolledBackList promptIntelligenceCandidatesResponse
 	if rolledBackListRecorder.Code != http.StatusOK || json.Unmarshal(rolledBackListRecorder.Body.Bytes(), &rolledBackList) != nil || len(rolledBackList.Candidates) != 1 || rolledBackList.Candidates[0].LatestAIAnalysis == nil || !rolledBackList.Candidates[0].LatestAIAnalysis.IdentityUpdate.RolledBack || rolledBackList.Candidates[0].LatestAIAnalysis.IdentityUpdate.Applied {
 		t.Fatalf("rolled back restored list=%s", rolledBackListRecorder.Body.String())
+	}
+}
+
+// TestPromptIntelligenceLearningEvidenceQualityGate 验证预览回退只服务于
+// 无质量裁决的存量行:insufficient 隔离与 context_only 的出处标注不可被
+// SamplePreview 升格绕过。
+func TestPromptIntelligenceLearningEvidenceQualityGate(t *testing.T) {
+	ev := promptIntelligenceLearningEvidenceFromMetadata(`{"evidence_quality":"insufficient","learning_evidence":{"version":1,"quality":"insufficient"}}`, "tool output preview")
+	if ev.Quality != "insufficient" || ev.PromptText != "" {
+		t.Fatalf("insufficient row upgraded by preview: quality=%q prompt=%q", ev.Quality, ev.PromptText)
+	}
+	ev = promptIntelligenceLearningEvidenceFromMetadata(`{"evidence_quality":"context_only","learning_evidence":{"version":1,"quality":"context_only","context":[{"origin":"history","text":"linked"}]}}`, "preview")
+	if ev.Quality != "context_only" || ev.PromptText != "" {
+		t.Fatalf("context_only row gained prompt text from preview: quality=%q prompt=%q", ev.Quality, ev.PromptText)
+	}
+	ev = promptIntelligenceLearningEvidenceFromMetadata(`{"incident_id":"legacy-row"}`, "legacy preview text")
+	if ev.Quality != "legacy_preview" || ev.PromptText != "legacy preview text" {
+		t.Fatalf("true legacy row must fall back to preview: quality=%q prompt=%q", ev.Quality, ev.PromptText)
+	}
+	ev = promptIntelligenceLearningEvidenceFromMetadata(`{"incident_id":"legacy-empty"}`, " ")
+	if ev.Quality != "insufficient" {
+		t.Fatalf("legacy row without preview must stay insufficient: %q", ev.Quality)
+	}
+}
+
+// TestCountPromptIntelligenceDirectEvidenceDeduplicatesReplays 验证受控自动
+// 应用的证据门槛按独立 Prompt 指纹计数,重放同一文本不能凑数。
+func TestCountPromptIntelligenceDirectEvidenceDeduplicatesReplays(t *testing.T) {
+	row := func(id, text string) *database.PromptRuleCandidateEvidence {
+		return &database.PromptRuleCandidateEvidence{
+			SourceRefHash: id,
+			MetadataJSON:  fmt.Sprintf(`{"evidence_quality":"complete","learning_evidence":{"version":1,"quality":"complete","prompt_text":%q}}`, text),
+		}
+	}
+	replayed := []*database.PromptRuleCandidateEvidence{
+		row("a", "same attack prompt"), row("b", "same attack prompt"), row("c", "same attack prompt"),
+	}
+	if got := countPromptIntelligenceDirectEvidence(replayed); got != 1 {
+		t.Fatalf("replayed rows must count once, got %d", got)
+	}
+	distinct := append(replayed, row("d", "a different prompt"))
+	if got := countPromptIntelligenceDirectEvidence(distinct); got != 2 {
+		t.Fatalf("distinct prompts must count separately, got %d", got)
 	}
 }

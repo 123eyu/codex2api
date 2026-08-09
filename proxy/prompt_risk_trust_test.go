@@ -160,3 +160,34 @@ func TestPromptRiskAdaptiveReviewCoalescesConcurrentForcedReview(t *testing.T) {
 		t.Fatalf("concurrent forced reviews = %d, want exactly 1", required)
 	}
 }
+
+func TestPromptRiskTrustReviewLeaseExpiryReleaseAndSweep(t *testing.T) {
+	key := "test-subject-lease-lifecycle"
+	promptRiskTrustReviewLeases.Delete(key)
+	t.Cleanup(func() { promptRiskTrustReviewLeases.Delete(key) })
+	t0 := time.Now()
+	if !promptRiskTrustAcquireReviewLease(key, t0) {
+		t.Fatal("first acquire must succeed")
+	}
+	if promptRiskTrustAcquireReviewLease(key, t0.Add(time.Second)) {
+		t.Fatal("in-window acquire must fail")
+	}
+	// 过期后必须能经 CompareAndSwap 分支重新拿到 lease。
+	if !promptRiskTrustAcquireReviewLease(key, t0.Add(promptRiskTrustReviewLeaseDuration+time.Second)) {
+		t.Fatal("expired lease must be re-acquirable")
+	}
+	// 审查失败释放后,同 subject 应立即可重试,而不是等满租期。
+	promptRiskTrustReleaseReviewLease(key)
+	if !promptRiskTrustAcquireReviewLease(key, t0.Add(promptRiskTrustReviewLeaseDuration+2*time.Second)) {
+		t.Fatal("released lease must be immediately acquirable")
+	}
+
+	staleKey := "test-subject-lease-sweep"
+	promptRiskTrustReviewLeases.Store(staleKey, t0.Add(-2*promptRiskTrustReviewLeaseDuration))
+	t.Cleanup(func() { promptRiskTrustReviewLeases.Delete(staleKey) })
+	promptRiskTrustLeaseSweepAtNanos.Store(0)
+	sweepPromptRiskTrustReviewLeases(t0)
+	if _, ok := promptRiskTrustReviewLeases.Load(staleKey); ok {
+		t.Fatal("long-expired lease entry must be swept")
+	}
+}

@@ -2412,6 +2412,7 @@
     "reviewKeyDeleted": "Deleted review key {{key}}",
     "reviewKeyRemoveDraftAria": "Remove review key {{key}} from the pending list",
     "reviewKeyRemovedFromDraft": "Removed {{key}} from the pending list; save settings to apply the change",
+    "reviewKeyRemovedFromDraftEmpty": "Removed {{key}}; the pending list is now empty, so saving keeps the currently configured keys unchanged",
     "reviewRequestMode": "Request Adapter",
     "reviewModeChat": "Chat Completions compatible",
     "reviewModeModerations": "Moderations compatible",

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -407,6 +408,69 @@ func TestPromptPolicyRedactedLearningTextHonorsByteBudget(t *testing.T) {
 	}
 	if !utf8.ValidString(got) {
 		t.Fatal("learning text was truncated inside a UTF-8 rune")
+	}
+	// 预算刻意落在多字节字符中间,验证按字节截断会回退到字符起点。
+	got = promptPolicyRedactedLearningText(strings.Repeat("测试🙂", 10000), 20000, 20001)
+	if len(got) > 20001 || !utf8.ValidString(got) {
+		t.Fatalf("mid-rune budget: bytes=%d valid=%t", len(got), utf8.ValidString(got))
+	}
+	if got = promptPolicyRedactedLearningText(strings.Repeat("🙂", 10), 100, 5); got != "🙂" {
+		t.Fatalf("mid-rune budget 5 over 4-byte runes = %q, want single 🙂", got)
+	}
+	if got = promptPolicyRedactedLearningText("text", 100, 0); got != "" {
+		t.Fatalf("zero byte budget = %q, want empty", got)
+	}
+}
+
+// TestMarshalPromptPolicyEvidenceMetadataSurvivesEscapeInflation 复现 JSON
+// HTML 转义膨胀:20000 字节的 < 编码后约 120 KB,若不按编码后体积收缩,
+// 元数据会被 64 KiB 校验拒绝并连带丢弃整条事件记录。
+func TestMarshalPromptPolicyEvidenceMetadataSurvivesEscapeInflation(t *testing.T) {
+	bundle := promptPolicyLearningBundle{
+		Version: 1, Quality: promptPolicyEvidenceQualityComplete,
+		PromptText: strings.Repeat("<", promptPolicyLearningPromptBytes),
+		Context: []promptPolicyLearningContextSegment{
+			{Origin: "history", Text: strings.Repeat("&", 6000), Linked: true},
+			{Origin: "tool_output", Text: strings.Repeat(">", 6000)},
+		},
+		UpstreamError: strings.Repeat("<", promptPolicyLearningUpstreamErrorBytes),
+	}
+	fields := map[string]any{
+		"incident_id":       "escape-inflation",
+		"local_matches":     []promptfilter.Match{{Name: "x", Weight: 1}},
+		"evidence_quality":  bundle.Quality,
+		"learning_evidence": bundle,
+	}
+	encoded := marshalPromptPolicyEvidenceMetadata(fields, bundle, 1)
+	if len(encoded) > promptPolicyLearningMetadataBytes {
+		t.Fatalf("metadata bytes = %d, want <= %d", len(encoded), promptPolicyLearningMetadataBytes)
+	}
+	if !json.Valid(encoded) {
+		t.Fatal("shrunk metadata is not valid JSON")
+	}
+	parsed := map[string]any{}
+	if err := json.Unmarshal(encoded, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := parsed["incident_id"]; !ok {
+		t.Fatal("incident fields must survive shrinking")
+	}
+	if _, ok := parsed["local_matches_count"]; !ok {
+		t.Fatal("match count must replace dropped local_matches")
+	}
+	if learning, ok := parsed["learning_evidence"].(map[string]any); ok {
+		if text, _ := learning["prompt_text"].(string); len(text) >= promptPolicyLearningPromptBytes {
+			t.Fatalf("prompt_text was not shrunk: %d bytes", len(text))
+		}
+	}
+	// 小体积元数据必须原样通过。
+	small := map[string]any{"incident_id": "small", "learning_evidence": promptPolicyLearningBundle{Version: 1, Quality: "complete", PromptText: "hello"}}
+	if encoded := marshalPromptPolicyEvidenceMetadata(small, promptPolicyLearningBundle{Version: 1, PromptText: "hello"}, 0); !json.Valid(encoded) {
+		t.Fatal("small metadata must marshal untouched")
+	} else if parsed := map[string]any{}; json.Unmarshal(encoded, &parsed) == nil {
+		if _, ok := parsed["local_matches_count"]; ok {
+			t.Fatal("small metadata must not trigger match-count fallback")
+		}
 	}
 }
 
