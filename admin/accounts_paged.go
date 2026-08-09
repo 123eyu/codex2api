@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -639,6 +640,9 @@ func (h *Handler) refreshRequestCountsAsync() {
 		defer cancel()
 		counts, err := h.db.GetAccountRequestCounts(ctx)
 		if err != nil {
+			// 静默失败会让请求数/用量排序与统计永久停在 warming 且无从排查
+			// (issue #493),失败必须留痕。
+			log.Printf("刷新账号请求统计失败(排序/统计将继续使用旧值): %v", err)
 			return
 		}
 		h.reqCountMu.Lock()

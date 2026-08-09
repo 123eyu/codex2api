@@ -1787,7 +1787,10 @@ export default function Accounts() {
       .then((response) => {
         if (!cancelled) setPagedHealthBars(response.buckets ?? {});
       })
-      .catch(() => undefined);
+      .catch((err: unknown) => {
+        // 健康条缺失只是降级显示,但失败必须留痕,否则无从排查(issue #493)。
+        console.warn("account health bars load failed:", err);
+      });
     return () => { cancelled = true; };
   }, [accountPageIDsKey]);
 
@@ -1806,7 +1809,11 @@ export default function Accounts() {
           }),
         }));
       })
-      .catch(() => undefined);
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        // 该请求失败时成本/用量列会静默空白,必须留痕(issue #493)。
+        console.warn("account page stats load failed:", err);
+      });
     return () => controller.abort();
   }, [accountPageIDsKey, setData]);
   const usageReloadAttemptsRef = useRef<Map<number, number>>(new Map());
@@ -1838,12 +1845,14 @@ export default function Accounts() {
     if (pageModeAutoAppliedRef.current) return;
     if (loading) return;
     pageModeAutoAppliedRef.current = true;
-    setPageMode(
-      data.total < ACCOUNT_PERSONAL_MODE_AUTO_THRESHOLD
-        ? "personal"
-        : "pool",
-    );
-  }, [loading, data.total]);
+    const personal = data.total < ACCOUNT_PERSONAL_MODE_AUTO_THRESHOLD;
+    setPageMode(personal ? "personal" : "pool");
+    // 静默换布局曾被当成"排序/成本功能消失"上报(issue #493),
+    // 自动切换必须告知用户以及怎么切回去。
+    if (personal) {
+      showToast(t("accounts.personalModeAutoApplied"));
+    }
+  }, [loading, data.total, showToast, t]);
 
   useEffect(() => {
     setGroupFilter((current) => pruneAccountGroupFilter(current, allGroups));
@@ -5188,6 +5197,51 @@ export default function Accounts() {
                     </span>
                   ) : null}
                 </Button>
+                {/* 卡片布局(自用模式/网格/移动端)没有可排序表头,这里补一个
+                    紧凑排序入口,避免升级后"排序功能消失"(issue #493)。 */}
+                {!shouldRenderDesktopTable && (
+                  <>
+                    <Select
+                      className="w-32"
+                      compact
+                      value={
+                        sortKey === "requests" || sortKey === "usage" || sortKey === "importTime"
+                          ? sortKey
+                          : "default"
+                      }
+                      onValueChange={(value) => {
+                        if (value === "default") {
+                          setSortKey(null);
+                        } else {
+                          setSortKey(value as "requests" | "usage" | "importTime");
+                          setSortDir("desc");
+                        }
+                        setPage(1);
+                      }}
+                      options={[
+                        { value: "default", label: t("accounts.cardSortDefault") },
+                        { value: "requests", label: t("accounts.requests") },
+                        { value: "usage", label: t("accounts.usage") },
+                        { value: "importTime", label: t("accounts.importTime") },
+                      ]}
+                    />
+                    {(sortKey === "requests" || sortKey === "usage" || sortKey === "importTime") && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="min-w-0"
+                        aria-label={t("accounts.cardSortDirection")}
+                        onClick={() => {
+                          setSortDir((current) => (current === "desc" ? "asc" : "desc"));
+                          setPage(1);
+                        }}
+                      >
+                        <span aria-hidden="true">{sortDir === "desc" ? "↓" : "↑"}</span>
+                      </Button>
+                    )}
+                  </>
+                )}
                 <Button
                   type="button"
                   variant="outline"

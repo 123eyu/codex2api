@@ -535,6 +535,14 @@ func (h *Handler) UpdateOAuthAccountCode(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "Token 写入数据库失败: "+err.Error())
 		return
 	}
+	// 与重新导入合并路径(upsertOAuthIdentityAccount)对齐:拿到新凭证后,
+	// 错误/401 态就地清除、交由探针重新判定,而不是让账号一直挂在"异常"
+	// 等一次可能失败的异步探针(issue #493)。限流冷却不在清除范围内。
+	if accountErrorStateNeedsReset(row) {
+		if err := h.db.ClearError(ctx, id); err != nil {
+			log.Printf("重新授权清除账号 %d 错误状态失败: %v", id, err)
+		}
+	}
 
 	if err := h.reloadTokenAccount(ctx, id, "oauth_reauth"); err != nil {
 		writeError(c, http.StatusInternalServerError, "重新加载运行时账号失败: "+err.Error())
