@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -442,7 +443,35 @@ func (h *Handler) refreshAccountListSnapshotAsync(channel string) {
 	}()
 }
 
+// shouldInvalidateAccountSnapshotCaches 判定一次管理请求是否改动了账号数据:
+// 非只读方法 + 账号/分组路由前缀 + 2xx/3xx。挂在路由组中间件上,覆盖全部
+// 现有与未来的账号变更端点(含流式批量操作),避免逐 handler 手工失效。
+func shouldInvalidateAccountSnapshotCaches(method, path string, status int) bool {
+	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
+		return false
+	}
+	if status >= http.StatusBadRequest {
+		return false
+	}
+	return strings.HasPrefix(path, "/api/admin/accounts") ||
+		strings.HasPrefix(path, "/api/admin/account-groups")
+}
+
+// invalidateAccountSnapshotCaches 在账号发生变更(删除/封禁/禁用/导入等)后
+// 丢弃列表快照与分析缓存,让下一次读取同步重建。否则 stale-while-revalidate
+// 的读路径会把变更前的统计卡/筛选计数原样返回给变更后的第一次刷新。
+func (h *Handler) invalidateAccountSnapshotCaches() {
+	h.accountCachesGen.Add(1)
+	h.accountListCacheMu.Lock()
+	h.accountListCache = nil
+	h.accountListCacheMu.Unlock()
+	h.accountAnalysisCacheMu.Lock()
+	h.accountAnalysisCache = nil
+	h.accountAnalysisCacheMu.Unlock()
+}
+
 func (h *Handler) rebuildAccountListSnapshot(ctx context.Context, channel string) (*accountListSnapshot, error) {
+	gen := h.accountCachesGen.Load()
 	rows, err := h.db.ListAccountListProjection(ctx, channel)
 	if err != nil {
 		return nil, err
@@ -464,13 +493,22 @@ func (h *Handler) rebuildAccountListSnapshot(ctx context.Context, channel string
 	}
 	snapshot.ExpiresAt = snapshot.BuiltAt.Add(accountListSnapshotTTL)
 	snapshot.Summary, snapshot.Facets = summarizeAccountList(items, channel)
+	h.installAccountListSnapshot(channel, snapshot, gen)
+	return snapshot, nil
+}
+
+// installAccountListSnapshot 只在代数未漂移时入缓存:读库期间发生过账号
+// 变更的快照可能早于变更,返回给当前调用方无妨,但不能留给后续请求。
+func (h *Handler) installAccountListSnapshot(channel string, snapshot *accountListSnapshot, gen uint64) {
+	if h.accountCachesGen.Load() != gen {
+		return
+	}
 	h.accountListCacheMu.Lock()
 	if h.accountListCache == nil {
 		h.accountListCache = make(map[string]*accountListSnapshot)
 	}
 	h.accountListCache[channel] = snapshot
 	h.accountListCacheMu.Unlock()
-	return snapshot, nil
 }
 
 func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, requestCounts map[int64]*database.AccountRequestCount, groupNames, groupSort map[int64]string) *accountListSnapshotItem {

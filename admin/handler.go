@@ -88,6 +88,9 @@ type Handler struct {
 	accountListCacheMu sync.RWMutex
 	accountListCache   map[string]*accountListSnapshot
 	accountListBuildMu sync.Mutex
+	// accountCachesGen 在账号变更时递增;重建协程安装快照前校验代数,
+	// 防止变更前就开始读库的在途重建把旧数据写回缓存。
+	accountCachesGen atomic.Uint64
 
 	// 分析图表使用固定大小的聚合结果，避免把完整号池传给浏览器。与账号
 	// 快照分开缓存，只有展开分析区或 Dashboard runway 时才会构建。
@@ -597,6 +600,12 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 
 	api := r.Group("/api/admin")
 	api.Use(h.adminAuthMiddleware())
+	api.Use(func(c *gin.Context) {
+		c.Next()
+		if shouldInvalidateAccountSnapshotCaches(c.Request.Method, c.Request.URL.Path, c.Writer.Status()) {
+			h.invalidateAccountSnapshotCaches()
+		}
+	})
 	api.GET("/stats", h.GetStats)
 	api.GET("/accounts", h.ListAccounts)
 	api.GET("/accounts/analysis", h.GetAccountAnalysis)

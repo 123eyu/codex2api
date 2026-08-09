@@ -1703,15 +1703,6 @@ export default function Accounts() {
     }
   }, []);
 
-  useEffect(() => {
-    if (!showAnalysisCharts) {
-      accountAnalysisAbortRef.current?.abort();
-      return undefined;
-    }
-    void loadAccountAnalysis();
-    return () => accountAnalysisAbortRef.current?.abort();
-  }, [loadAccountAnalysis, showAnalysisCharts]);
-
   // Auxiliary data is intentionally independent from the account page request:
   // failures or slow settings/overview/group calls must not hold up the first row.
   useEffect(() => {
@@ -1748,6 +1739,16 @@ export default function Accounts() {
     },
     load: loadAccounts,
   });
+  // data.snapshotAt 变化说明列表快照重建过(含删除/封禁后的缓存失效),
+  // 分析图跟着重取,避免统计卡已更新而额度分布仍显示旧账号集。
+  useEffect(() => {
+    if (!showAnalysisCharts) {
+      accountAnalysisAbortRef.current?.abort();
+      return undefined;
+    }
+    void loadAccountAnalysis();
+    return () => accountAnalysisAbortRef.current?.abort();
+  }, [loadAccountAnalysis, showAnalysisCharts, data.snapshotAt]);
   const refreshAccountRow = useCallback(async (id: number) => {
     const account = await api.getAccount(id);
     setDetailAccountData((current) => current?.id === id ? account : current);

@@ -388,3 +388,88 @@ func TestBatchOperationsRejectIDsTogetherWithSelector(t *testing.T) {
 		})
 	}
 }
+
+// 删除/封禁后统计卡曾因快照缓存(5s TTL + stale-while-revalidate)不失效而
+// 显示变更前数字;失效后同一 TTL 窗口内必须立刻拿到重建的新 summary。
+func TestAccountMutationInvalidationServesFreshSummary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, codexIDs, _ := newPagedAccountsHandler(t)
+	ctx := context.Background()
+
+	before, err := handler.getAccountListSnapshot(ctx, database.UpstreamChannelCodex)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if before.Summary.Total != len(codexIDs) {
+		t.Fatalf("summary total = %d, want %d", before.Summary.Total, len(codexIDs))
+	}
+
+	if err := handler.db.SoftDeleteAccount(ctx, codexIDs[0]); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	// 未失效时,新鲜窗口内仍返回变更前快照 —— 这是 bug 曾经的表现,
+	// 也证明修复必须依赖显式失效而非 TTL。
+	stale, err := handler.getAccountListSnapshot(ctx, database.UpstreamChannelCodex)
+	if err != nil {
+		t.Fatalf("stale read: %v", err)
+	}
+	if stale.Summary.Total != len(codexIDs) {
+		t.Fatalf("pre-invalidation total = %d, want stale %d", stale.Summary.Total, len(codexIDs))
+	}
+
+	handler.invalidateAccountSnapshotCaches()
+	fresh, err := handler.getAccountListSnapshot(ctx, database.UpstreamChannelCodex)
+	if err != nil {
+		t.Fatalf("fresh read: %v", err)
+	}
+	if fresh.Summary.Total != len(codexIDs)-1 {
+		t.Fatalf("post-invalidation total = %d, want %d", fresh.Summary.Total, len(codexIDs)-1)
+	}
+}
+
+// 在途重建若跨越了失效点(读库早于账号变更),不得把旧快照写回缓存。
+func TestInstallSkipsCacheWhenGenerationMoved(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, _, _ := newPagedAccountsHandler(t)
+	staleGen := handler.accountCachesGen.Load()
+	handler.invalidateAccountSnapshotCaches() // 模拟重建读库之后才提交的账号变更
+	snapshot := &accountListSnapshot{Channel: database.UpstreamChannelCodex}
+	handler.installAccountListSnapshot(database.UpstreamChannelCodex, snapshot, staleGen)
+	handler.accountListCacheMu.RLock()
+	cached := handler.accountListCache[database.UpstreamChannelCodex]
+	handler.accountListCacheMu.RUnlock()
+	if cached != nil {
+		t.Fatalf("stale-generation snapshot was cached")
+	}
+	handler.installAccountListSnapshot(database.UpstreamChannelCodex, snapshot, handler.accountCachesGen.Load())
+	handler.accountListCacheMu.RLock()
+	cached = handler.accountListCache[database.UpstreamChannelCodex]
+	handler.accountListCacheMu.RUnlock()
+	if cached != snapshot {
+		t.Fatalf("current-generation snapshot was not cached")
+	}
+}
+
+func TestShouldInvalidateAccountSnapshotCaches(t *testing.T) {
+	cases := []struct {
+		method string
+		path   string
+		status int
+		want   bool
+	}{
+		{http.MethodDelete, "/api/admin/accounts/7", http.StatusOK, true},
+		{http.MethodPost, "/api/admin/accounts/batch-delete", http.StatusOK, true},
+		{http.MethodPost, "/api/admin/accounts/7/enable", http.StatusOK, true},
+		{http.MethodPatch, "/api/admin/accounts/7/note", http.StatusOK, true},
+		{http.MethodDelete, "/api/admin/account-groups/3", http.StatusOK, true},
+		{http.MethodGet, "/api/admin/accounts", http.StatusOK, false},
+		{http.MethodDelete, "/api/admin/accounts/7", http.StatusNotFound, false},
+		{http.MethodPost, "/api/admin/keys", http.StatusOK, false},
+		{http.MethodPost, "/api/admin/prompt-filter/review/keys/x", http.StatusOK, false},
+	}
+	for _, tc := range cases {
+		if got := shouldInvalidateAccountSnapshotCaches(tc.method, tc.path, tc.status); got != tc.want {
+			t.Fatalf("shouldInvalidate(%s %s %d) = %t, want %t", tc.method, tc.path, tc.status, got, tc.want)
+		}
+	}
+}
