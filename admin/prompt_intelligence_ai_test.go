@@ -86,6 +86,54 @@ func TestPromptIntelligenceCoverageAllowsNoChangeWhenEveryCYWasBlocked(t *testin
 	}
 }
 
+func TestPromptIntelligenceLearnableEvidenceSelectionRejectsInsufficientAndDeduplicates(t *testing.T) {
+	insufficient := []*database.PromptRuleCandidateEvidence{
+		{SourceRefHash: "one", MetadataJSON: `{"evidence_quality":"insufficient","learning_evidence":{"version":1,"quality":"insufficient"}}`},
+		{SourceRefHash: "two", MetadataJSON: `{"evidence_quality":"insufficient","learning_evidence":{"version":1,"quality":"insufficient"}}`},
+	}
+	if selected := selectPromptIntelligenceLearnableEvidence(insufficient, 20); len(selected) != 0 {
+		t.Fatalf("insufficient evidence selected for AI: %#v", selected)
+	}
+	evidence := []*database.PromptRuleCandidateEvidence{
+		{SourceRefHash: "one", MetadataJSON: `{"evidence_quality":"complete","learning_evidence":{"version":1,"quality":"complete","prompt_text":"same request"}}`},
+		{SourceRefHash: "two", MetadataJSON: `{"evidence_quality":"complete","learning_evidence":{"version":1,"quality":"complete","prompt_text":"same request"}}`},
+		{SourceRefHash: "three", MetadataJSON: `{"evidence_quality":"context_only","learning_evidence":{"version":1,"quality":"context_only","context":[{"origin":"history","text":"linked context"}]}}`},
+	}
+	selected := selectPromptIntelligenceLearnableEvidence(evidence, 20)
+	if len(selected) != 2 {
+		t.Fatalf("representative evidence len=%d want=2", len(selected))
+	}
+	if direct := countPromptIntelligenceDirectEvidence(selected); direct != 1 {
+		t.Fatalf("direct evidence count=%d want=1", direct)
+	}
+}
+
+func TestPromptIntelligenceEvidenceInputIncludesDurableLearningBundle(t *testing.T) {
+	evidence := []*database.PromptRuleCandidateEvidence{{
+		SourceKind:    database.PromptRuleCandidateSourceUpstreamCyberPolicy,
+		SamplePreview: "preview",
+		MetadataJSON: `{
+			"local_action":"allow","local_outcome":"no_hit","local_comparison":"confirmed_miss",
+			"evidence_quality":"complete","learning_evidence":{
+				"version":1,"quality":"complete","prompt_text":"full request Authorization: Bearer secret-token",
+				"context":[{"origin":"history","text":"linked context"}],
+				"upstream_error":"cyber_policy details","transport":"sse","status_code":400,"attempt_index":2,
+				"review_model":"deepseek-test","review_flagged":false,"review_error":"timeout"
+			}
+		}`,
+		Protocol: "responses", Provider: "openai", Model: "gpt-5.6-sol", ObservedAt: time.Now(),
+	}}
+	input := buildPromptIntelligenceAIEvidenceInput(&database.PromptRuleCandidate{ID: 7, EvidenceCount: 1}, evidence)
+	for _, expected := range []string{"full request", "linked context", "cyber_policy details", "deepseek-test", `"status_code":400`, `"learnable_evidence_count":1`} {
+		if !strings.Contains(input, expected) {
+			t.Fatalf("AI evidence input missing %q: %s", expected, input)
+		}
+	}
+	if strings.Contains(input, "secret-token") || !strings.Contains(input, "[REDACTED]") {
+		t.Fatalf("AI evidence input was not redacted: %s", input)
+	}
+}
+
 func TestPromptIntelligenceReviewProviderUsesBoundedParallelKeys(t *testing.T) {
 	var active atomic.Int32
 	var maximum atomic.Int32
