@@ -317,21 +317,96 @@ func TestPromptPolicyIncidentUsesStableFingerprintWhenPromptUnavailable(t *testi
 	}
 	defer db.Close()
 	handler := NewHandler(auth.NewStore(nil, nil, &database.SystemSettings{PromptFilterEnabled: true}), db, nil, nil)
+	incidentIDs := make([]string, 0, 2)
+	for _, requestID := range []string{"unavailable-one", "unavailable-two"} {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		ctx.Request.Header.Set("X-Request-ID", requestID)
+		incidentID, accepted := handler.logUpstreamCyberPolicy(ctx, "/v1/responses", "gpt-5.6-sol", []byte(`{"error":{"code":"cyber_policy"}}`))
+		if !accepted || incidentID == "" {
+			t.Fatalf("incident enqueue accepted=%t id=%q", accepted, incidentID)
+		}
+		incidentIDs = append(incidentIDs, incidentID)
+	}
+	waitPromptFilterAuditIdle(t, db)
+	want := promptfilter.StableEvidenceFingerprint("cyber-insufficient", "/v1/responses\x00\x00\x00cyber_policy")
+	for _, incidentID := range incidentIDs {
+		incident, err := db.GetPromptPolicyIncident(context.Background(), incidentID)
+		if err != nil {
+			t.Fatalf("GetPromptPolicyIncident: %v", err)
+		}
+		if incident.PromptFingerprint != want {
+			t.Fatalf("unavailable prompt fingerprint = %q, want %q", incident.PromptFingerprint, want)
+		}
+	}
+	candidate, err := db.GetPromptRuleCandidateByFingerprint(context.Background(), want)
+	if err != nil {
+		t.Fatalf("GetPromptRuleCandidateByFingerprint: %v", err)
+	}
+	if candidate.EvidenceCount != 2 || candidate.SamplePreview != "" {
+		t.Fatalf("insufficient evidence quarantine candidate=%#v", candidate)
+	}
+	evidence, err := db.ListPromptRuleCandidateEvidence(context.Background(), candidate.ID, 10)
+	if err != nil || len(evidence) != 2 {
+		t.Fatalf("ListPromptRuleCandidateEvidence len=%d err=%v", len(evidence), err)
+	}
+	for _, row := range evidence {
+		if !strings.Contains(row.MetadataJSON, `"evidence_quality":"insufficient"`) || !strings.Contains(row.MetadataJSON, `"quality":"insufficient"`) {
+			t.Fatalf("insufficient evidence quality metadata missing: %s", row.MetadataJSON)
+		}
+	}
+}
+
+func TestPromptPolicyLearningEvidenceIncludesBoundedContextAndReview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "cyber-learning-bundle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	handler := NewHandler(auth.NewStore(nil, nil, &database.SystemSettings{PromptFilterEnabled: true}), db, nil, nil)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-
-	incidentID, accepted := handler.logUpstreamCyberPolicy(ctx, "/v1/responses", "gpt-5.6-sol", []byte(`{"error":{"code":"cyber_policy"}}`))
-	if !accepted || incidentID == "" {
-		t.Fatalf("incident enqueue accepted=%t id=%q", accepted, incidentID)
+	handler.capturePromptRuleLearningEvidence(ctx, "/v1/responses", "gpt-5.6-sol", promptGuardEvaluation{
+		Envelope: promptfilter.RequestEnvelope{Protocol: promptfilter.ProtocolResponses, ModelFamily: promptfilter.ModelFamilyOpenAI, Segments: []promptfilter.Segment{
+			{Origin: promptfilter.OriginHistory, Role: "user", Text: "linked defensive context", Linked: true, Trust: promptfilter.SegmentTrustClientSupplied},
+			{Origin: promptfilter.OriginCurrentUser, Role: "user", Text: "current security request", Trust: promptfilter.SegmentTrustClientSupplied},
+			{Origin: promptfilter.OriginSystem, Role: "system", Text: "fixed application boilerplate", Trust: promptfilter.SegmentTrustServerInjected},
+		}},
+		Decision: promptfilter.Decision{Action: promptfilter.ActionAllow, PrimaryOrigin: promptfilter.OriginCurrentUser},
+		Verdict:  promptfilter.Verdict{Enabled: true, Action: promptfilter.ActionAllow, ReviewModel: "review-model", ReviewError: "review timeout"},
+	})
+	incidentID, accepted := handler.logUpstreamCyberPolicy(ctx, "/v1/responses", "gpt-5.6-sol", []byte(`{"error":{"code":"cyber_policy","message":"blocked evidence"}}`))
+	if !accepted {
+		t.Fatal("learning evidence was not enqueued")
 	}
 	waitPromptFilterAuditIdle(t, db)
 	incident, err := db.GetPromptPolicyIncident(context.Background(), incidentID)
 	if err != nil {
-		t.Fatalf("GetPromptPolicyIncident: %v", err)
+		t.Fatal(err)
 	}
-	want := promptfilter.StableEvidenceFingerprint("cyber-unavailable", incident.RequestCorrelationID+"\x00/v1/responses\x00gpt-5.6-sol")
-	if incident.PromptFingerprint != want {
-		t.Fatalf("unavailable prompt fingerprint = %q, want %q", incident.PromptFingerprint, want)
+	evidence, err := db.ListPromptRuleCandidateEvidence(context.Background(), incident.CandidateID, 10)
+	if err != nil || len(evidence) != 1 {
+		t.Fatalf("evidence len=%d err=%v", len(evidence), err)
+	}
+	metadata := evidence[0].MetadataJSON
+	for _, expected := range []string{`"evidence_quality":"complete"`, `"prompt_text":"current security request"`, `"linked defensive context"`, `"review_model":"review-model"`, `"review_error":"review timeout"`, `"upstream_error"`} {
+		if !strings.Contains(metadata, expected) {
+			t.Fatalf("learning evidence metadata missing %s: %s", expected, metadata)
+		}
+	}
+	if strings.Contains(metadata, "fixed application boilerplate") {
+		t.Fatalf("server-injected boilerplate leaked into learning evidence: %s", metadata)
+	}
+}
+
+func TestPromptPolicyRedactedLearningTextHonorsByteBudget(t *testing.T) {
+	got := promptPolicyRedactedLearningText(strings.Repeat("测试🙂", 10000), 20000, 20000)
+	if len(got) > 20000 {
+		t.Fatalf("learning text bytes = %d, want <= 20000", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("learning text was truncated inside a UTF-8 rune")
 	}
 }
 

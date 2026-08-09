@@ -12,9 +12,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const promptRiskTrustBypassAuditInterval = 10 * time.Minute
+const (
+	promptRiskTrustBypassAuditInterval = 10 * time.Minute
+	promptRiskTrustReviewLeaseDuration = 30 * time.Second
+)
 
-var promptRiskTrustBypassAudit sync.Map // subject key -> time.Time
+var promptRiskTrustBypassAudit sync.Map  // subject key -> time.Time
+var promptRiskTrustReviewLeases sync.Map // subject key -> time.Time lease expiry
 
 func (h *Handler) promptRiskTrustPolicyForRequest(c *gin.Context) (database.PromptRiskTrustPolicy, string, bool) {
 	if h == nil || h.store == nil || c == nil {
@@ -37,10 +41,36 @@ func promptRiskTrustCanBypassReview(decision promptfilter.Decision, verdict prom
 	if reviewText == "" || decision.Action != promptfilter.ActionAllow || verdict.Action != promptfilter.ActionAllow {
 		return false
 	}
-	if decision.AuditScore > 0 || decision.AuditRawScore > 0 || len(decision.Signals) > 0 || len(verdict.Matched) > 0 {
+	if len(decision.Errors) > 0 || verdict.ReviewError != "" || decision.Terminal || verdict.StrictHit || verdict.TerminalStrictHit || verdict.TerminalCategoryHit || verdict.SensitiveIntent {
 		return false
 	}
-	return len(decision.Errors) == 0 && verdict.ReviewError == ""
+	threshold := verdict.Threshold
+	if threshold <= 0 {
+		threshold = promptfilter.DefaultThreshold
+	}
+	if decision.AuditScore >= threshold || decision.AuditRawScore >= threshold*2 {
+		return false
+	}
+	return promptRiskTrustHasOnlyLowImpactAuditSignals(decision.Signals, verdict.Matched)
+}
+
+func promptRiskTrustHasOnlyLowImpactAuditSignals(signals []promptfilter.Signal, matches []promptfilter.Match) bool {
+	for _, match := range matches {
+		if !match.SignalOnly || match.Strict {
+			return false
+		}
+	}
+	for _, signal := range signals {
+		if signal.TerminalCandidate || signal.StrikeEligible || signal.SuggestedAction == promptfilter.ActionWarn || signal.SuggestedAction == promptfilter.ActionBlock || len(signal.Matches) == 0 {
+			return false
+		}
+		for _, match := range signal.Matches {
+			if !match.SignalOnly || match.Strict {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func promptRiskTrustShouldSuspend(decision promptfilter.Decision, verdict promptfilter.Verdict) bool {
@@ -65,14 +95,34 @@ func promptRiskTrustReviewRequired(c *gin.Context, cfg promptfilter.Config, poli
 	forceInterval := time.Duration(adaptive.ForceReviewIntervalMinutes) * time.Minute
 	forceDue := policy.LastModelReviewAt == nil || forceInterval <= 0 || now.Sub(policy.LastModelReviewAt.UTC()) >= forceInterval
 	if forceDue {
-		return true
+		return promptRiskTrustAcquireReviewLease(subjectKey, now)
 	}
 	if adaptive.SamplePercent <= 0 {
 		return false
 	}
 	correlationID := ensurePromptPolicyRequestCorrelationID(c)
 	bucket := crc32.ChecksumIEEE([]byte(subjectKey+"\x00"+correlationID)) % 100
-	return int(bucket) < adaptive.SamplePercent
+	return int(bucket) < adaptive.SamplePercent && promptRiskTrustAcquireReviewLease(subjectKey, now)
+}
+
+func promptRiskTrustAcquireReviewLease(subjectKey string, now time.Time) bool {
+	if subjectKey == "" {
+		return true
+	}
+	next := now.Add(promptRiskTrustReviewLeaseDuration)
+	for {
+		current, loaded := promptRiskTrustReviewLeases.LoadOrStore(subjectKey, next)
+		if !loaded {
+			return true
+		}
+		expiresAt, ok := current.(time.Time)
+		if ok && now.Before(expiresAt) {
+			return false
+		}
+		if promptRiskTrustReviewLeases.CompareAndSwap(subjectKey, current, next) {
+			return true
+		}
+	}
 }
 
 func (h *Handler) recordPromptRiskTrustBypass(c *gin.Context, policy database.PromptRiskTrustPolicy, subjectKey string) {
