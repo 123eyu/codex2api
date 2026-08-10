@@ -849,7 +849,7 @@ func TestResponsesWebSocketFallsBackToHTTPWhenUpstreamMessageTooBig(t *testing.T
 	defer conn.Close()
 
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{
-		"model":"gpt-5.4",
+		"model":"gpt-5.6-sol",
 		"input":[{"type":"function_call","name":"run","namespace":"code_tools","arguments":"{}","call_id":"call_1"}],
 		"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}
 	}`)); err != nil {
@@ -971,7 +971,7 @@ func TestResponsesHTTPIngressFallsBackToHTTPWhenForcedWebsocketMessageTooBig(t *
 	store.AddAccount(secondary)
 	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
 
-	body := []byte(`{"model":"gpt-5.4","input":"hello","stream":true}`)
+	body := []byte(`{"model":"gpt-5.6-sol","input":"hello","stream":true}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Codex2API-Affinity-Key", "tenant-user-42")
@@ -1909,14 +1909,14 @@ func TestResponsesCompactCodexReadErrorRetryReturnsBadGatewayAndSyncsUsage(t *te
 	account := &auth.Account{
 		DBID:        1,
 		AccessToken: "at-1",
-		Models:      []string{"gpt-5.4"},
+		Models:      []string{"gpt-5.6-sol"},
 		PlanType:    "team",
 		Status:      auth.StatusReady,
 	}
 	store.AddAccount(account)
 	handler := NewHandler(store, nil, nil, nil)
 
-	body := []byte(`{"model":"gpt-5.4","input":"hello"}`)
+	body := []byte(`{"model":"gpt-5.6-sol","input":"hello"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(codexResponsesLiteHeader, "true")

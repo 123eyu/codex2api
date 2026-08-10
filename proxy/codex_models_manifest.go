@@ -72,7 +72,13 @@ const manifestLearnCacheTTL = 10 * time.Minute
 // learnManifestModelsAsync 判断清单里是否有缓存未见过的 slug，有则后台学习。
 // 学习失败只记日志，绝不影响清单透传本身。
 func (h *Handler) learnManifestModelsAsync(manifestBody []byte) {
-	if h == nil || h.db == nil || len(manifestBody) == 0 {
+	if len(manifestBody) == 0 {
+		return
+	}
+	// lite 能力学习不依赖 DB：清单每次透传都刷新 use_responses_lite 真值，
+	// 供发出前剥离"非 lite 模型 + lite 信号"的必死组合。
+	RecordResponsesLiteSupportFromManifest(manifestBody)
+	if h == nil || h.db == nil {
 		return
 	}
 	slugs := ExtractManifestModelSlugs(manifestBody)

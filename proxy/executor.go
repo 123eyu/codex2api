@@ -396,6 +396,10 @@ func prepareCodexResponsesLiteTransport(requestBody []byte, headers http.Header,
 			if err == nil {
 				requestBody = updated
 			}
+		} else if updated, err := sjson.DeleteBytes(requestBody, codexResponsesLiteWSMetadataPath); err == nil {
+			// 信号被模型门禁剥离（或下游标记非 true）时，清掉体内残留标记，
+			// 避免不支持 lite 的模型把标记带上 WS 上游触发 400。
+			requestBody = updated
 		}
 		return requestBody, forwardHeaders
 	}
@@ -504,7 +508,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
-	responsesLite := codexResponsesLiteRequested(requestBody, headers)
 
 	// Payload 规则改写：在 WS/HTTP 分叉前统一应用，两条上游路径共享改写结果。
 	// 生图请求跳过——其 instructions/工具由网关自行构造，改写会破坏桥接协议。
@@ -516,6 +519,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// requested tier 归因走 EffectiveRequestedServiceTier（净化前取值），不受影响。
 		requestBody = sanitizeServiceTierForUpstream(requestBody)
 	}
+	// lite 信号收敛：签名在 payload 规则改写后采集（规则可注入/删除 WS 标记，改写
+	// 前采集会让注入失效、删除被回填），模型也已被入口映射/规则定稿——已知不支持
+	// lite 的模型带信号上游必 400，发出前剥离。
+	responsesLite := gateResponsesLiteForModel(codexResponsesLiteRequested(requestBody, headers), requestBody)
 	wantWebsocket := CurrentRuntimeSettings().CodexForceWebsocket
 	if len(useWebsocket) > 0 {
 		wantWebsocket = useWebsocket[0]
@@ -680,7 +687,7 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
-	responsesLite := codexResponsesLiteRequested(requestBody, headers)
+	responsesLite := gateResponsesLiteForModel(codexResponsesLiteRequested(requestBody, headers), requestBody)
 	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
@@ -820,7 +827,7 @@ func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Acc
 	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
-	responsesLite := codexResponsesLiteRequested(requestBody, headers)
+	responsesLite := gateResponsesLiteForModel(codexResponsesLiteRequested(requestBody, headers), requestBody)
 	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
@@ -858,7 +865,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
-	responsesLite := codexResponsesLiteRequested(requestBody, headers)
+	responsesLite := gateResponsesLiteForModel(codexResponsesLiteRequested(requestBody, headers), requestBody)
 
 	account.Mu().RLock()
 	accessToken := account.AccessToken

@@ -3565,6 +3565,7 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 		writeError(c, http.StatusBadGateway, fmt.Sprintf("拉取上游模型清单失败: %s", err.Error()))
 		return
 	}
+	proxy.RecordResponsesLiteSupportFromManifest(manifest.Body)
 	models := auth.NormalizeAccountModels(proxy.ExtractManifestModelSlugs(manifest.Body))
 	if len(models) == 0 {
 		writeError(c, http.StatusBadGateway, "上游模型清单未返回可用模型")
