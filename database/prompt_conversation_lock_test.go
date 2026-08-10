@@ -49,3 +49,25 @@ func TestPromptConversationLockLifecycleAndDecisionReplay(t *testing.T) {
 		t.Fatalf("new CYB relock = %#v changed=%t err=%v", relocked, changed, err)
 	}
 }
+
+func TestPromptConversationLockExpiresAfterTTL(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	input := PromptConversationLockInput{
+		LockKey:  "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		Platform: "newapi", NewAPIUserID: "42",
+		SessionFingerprint: "abcdef0123456789abcdef0123456789", SessionHash: "expired-session",
+		IncidentID: "incident-expired", DecisionID: "decision-expired", ReasonCode: "upstream_cyber_policy",
+		LockedAt: time.Now().UTC().Add(-2 * time.Hour),
+	}
+	if _, _, err := db.LockPromptConversation(ctx, input); err != nil {
+		t.Fatalf("LockPromptConversation: %v", err)
+	}
+	if _, err := db.GetActivePromptConversationLockWithTTL(ctx, input.LockKey, time.Hour); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expired lock lookup err=%v, want sql.ErrNoRows", err)
+	}
+	stored, err := db.GetPromptConversationLock(ctx, input.LockKey)
+	if err != nil || stored.Status != PromptConversationLockStatusUnlocked || stored.UnlockReason != "automatic expiry after conversation-lock TTL" {
+		t.Fatalf("expired stored lock = %#v err=%v", stored, err)
+	}
+}

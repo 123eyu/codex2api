@@ -246,6 +246,13 @@ test('Prompt Filter consolidates advanced controls and tests all configured revi
 	  assert.ok(reviewTemplates > reviewPanel && reviewTemplates < expertPanel, 'review request templates must stay inside the model review section')
 })
 
+test('conversation CY locks expose a bounded automatic expiry control', () => {
+  const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
+  assert.match(source, /conversation_lock_ttl_hours: 168/)
+  assert.match(source, /conversationLockTTL/)
+  assert.match(source, /min=\{1\} max=\{720\}/)
+})
+
 test('review prompt defaults are owned by the backend rather than duplicated in the UI', () => {
   const frontendSource = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
   const backendSource = readFileSync(new URL('../../../security/promptfilter/review.go', import.meta.url), 'utf8')

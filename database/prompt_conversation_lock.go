@@ -217,11 +217,57 @@ func (db *DB) GetActivePromptConversationLock(ctx context.Context, lockKey strin
 	return scanPromptConversationLock(db.conn.QueryRowContext(ctx, promptConversationLockSelect+` WHERE lock_key=$1 AND status='active'`, strings.ToLower(strings.TrimSpace(lockKey))))
 }
 
+func (db *DB) GetActivePromptConversationLockWithTTL(ctx context.Context, lockKey string, ttl time.Duration) (*PromptConversationLock, error) {
+	item, err := db.GetActivePromptConversationLock(ctx, lockKey)
+	if err != nil || ttl <= 0 {
+		return item, err
+	}
+	return db.expirePromptConversationLockIfNeeded(ctx, item, ttl, func() (*PromptConversationLock, error) {
+		return db.GetActivePromptConversationLock(ctx, lockKey)
+	})
+}
+
 func (db *DB) GetActivePromptConversationLockBySessionHash(ctx context.Context, sessionHash string) (*PromptConversationLock, error) {
 	if err := db.ensurePromptConversationLocksTable(ctx); err != nil {
 		return nil, err
 	}
 	return scanPromptConversationLock(db.conn.QueryRowContext(ctx, promptConversationLockSelect+` WHERE session_hash=$1 AND status='active' ORDER BY updated_at DESC LIMIT 1`, strings.ToLower(strings.TrimSpace(sessionHash))))
+}
+
+func (db *DB) GetActivePromptConversationLockBySessionHashWithTTL(ctx context.Context, sessionHash string, ttl time.Duration) (*PromptConversationLock, error) {
+	item, err := db.GetActivePromptConversationLockBySessionHash(ctx, sessionHash)
+	if err != nil || ttl <= 0 {
+		return item, err
+	}
+	return db.expirePromptConversationLockIfNeeded(ctx, item, ttl, func() (*PromptConversationLock, error) {
+		return db.GetActivePromptConversationLockBySessionHash(ctx, sessionHash)
+	})
+}
+
+func (db *DB) expirePromptConversationLockIfNeeded(ctx context.Context, item *PromptConversationLock, ttl time.Duration, reload func() (*PromptConversationLock, error)) (*PromptConversationLock, error) {
+	if item == nil || ttl <= 0 {
+		return item, nil
+	}
+	cutoff := time.Now().UTC().Add(-ttl)
+	if item.LockedAt.After(cutoff) {
+		return item, nil
+	}
+	result, err := db.conn.ExecContext(ctx, `UPDATE prompt_conversation_locks SET
+		status='unlocked', unlock_count=unlock_count+1, unlocked_at=$2,
+		unlock_reason=$3, updated_at=$2
+		WHERE id=$1 AND status='active' AND locked_at<=$4`,
+		item.ID, time.Now().UTC(), "automatic expiry after conversation-lock TTL", cutoff)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if rows > 0 {
+		return nil, sql.ErrNoRows
+	}
+	return reload()
 }
 
 func (db *DB) UnlockPromptConversation(ctx context.Context, lockKey, reason string) (*PromptConversationLock, error) {

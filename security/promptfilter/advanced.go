@@ -133,10 +133,11 @@ type NewAPIConfig struct {
 }
 
 type EnforcementConfig struct {
-	TerminalCategories      []string `json:"terminal_categories"`
-	TerminalBypassModels    []string `json:"terminal_bypass_models"`
-	ConversationLockEnabled bool     `json:"conversation_lock_enabled"`
-	CYBStrikeEnabled        bool     `json:"cyb_strike_enabled"`
+	TerminalCategories       []string `json:"terminal_categories"`
+	TerminalBypassModels     []string `json:"terminal_bypass_models"`
+	ConversationLockEnabled  bool     `json:"conversation_lock_enabled"`
+	ConversationLockTTLHours int      `json:"conversation_lock_ttl_hours"`
+	CYBStrikeEnabled         bool     `json:"cyb_strike_enabled"`
 }
 
 type NormalizationConfig struct {
@@ -272,7 +273,7 @@ func DefaultAdvancedConfig() AdvancedConfig {
 		Output:          OutputConfig{BufferBytes: 4096, OverlapBytes: 512, StrictOnly: true},
 		Intelligence:    IntelligenceConfig{IntervalHours: 24, Queries: DefaultIntelligenceQueries(), MaxSearchResults: 20, Model: "gpt-5.4", MaxModelCalls: 1},
 		NewAPI:          NewAPIConfig{MaxClockSkewSeconds: 120},
-		Enforcement:     EnforcementConfig{TerminalBypassModels: []string{"codex-auto-review"}, ConversationLockEnabled: true, CYBStrikeEnabled: false},
+		Enforcement:     EnforcementConfig{TerminalBypassModels: []string{"codex-auto-review"}, ConversationLockEnabled: true, ConversationLockTTLHours: 168, CYBStrikeEnabled: false},
 		Guard:           DefaultGuardConfig(),
 	}
 }
@@ -744,6 +745,12 @@ func NormalizeAdvancedConfig(cfg AdvancedConfig) AdvancedConfig {
 		}
 	}
 	cfg.Enforcement.TerminalBypassModels = normalizedBypassModels
+	if cfg.Enforcement.ConversationLockTTLHours <= 0 {
+		cfg.Enforcement.ConversationLockTTLHours = d.Enforcement.ConversationLockTTLHours
+	}
+	if cfg.Enforcement.ConversationLockTTLHours > 30*24 {
+		cfg.Enforcement.ConversationLockTTLHours = 30 * 24
+	}
 	if cfg.Normalization.MaxDecodeRuns <= 0 {
 		cfg.Normalization.MaxDecodeRuns = d.Normalization.MaxDecodeRuns
 	}

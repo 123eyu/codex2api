@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/cache"
@@ -137,5 +138,36 @@ func TestConversationLockStorageFailureDoesNotClaimConversationWasLocked(t *test
 	}
 	if message := newAPIPolicyDecisionAPIError(metadata).Message; message != upstreamCyberPolicyUserMessage || strings.Contains(message, "已锁定当前对话") {
 		t.Fatalf("database failure CYB message = %q", message)
+	}
+}
+
+func TestExpiredConversationLockDoesNotBlockSignedConversation(t *testing.T) {
+	handler, db := newPromptConversationLockTestHandler(t)
+	cfg := handler.store.GetPromptFilterConfig()
+	cfg.Advanced.Enforcement.ConversationLockTTLHours = 1
+	handler.store.SetPromptFilterConfig(cfg)
+	body := []byte(`{"model":"gpt-5.5","input":"ordinary request"}`)
+	fingerprint := "0123456789abcdef0123456789abcdef"
+	c := signedBoundNewAPIPolicyContext(t, "expired-lock", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, body, 101, "gateway-a", "gateway-a-secret", fingerprint)
+	setIngressRequestBodyIfAbsent(c, body)
+	requestConfig := handler.promptFilterConfigForRequest(c)
+	policyContext, verified := handler.verifyNewAPIPolicyContext(c, requestConfig.Advanced.NewAPI, body)
+	identity, ok := verifiedPromptConversationLockIdentity(c, policyContext)
+	if !verified || !ok {
+		t.Fatal("signed lock identity unavailable")
+	}
+	if _, _, err := db.LockPromptConversation(t.Context(), database.PromptConversationLockInput{
+		LockKey: identity.LockKey, Platform: identity.Platform, NewAPIUserID: identity.NewAPIUserID,
+		SessionFingerprint: identity.SessionFingerprint, SessionHash: identity.SessionHash,
+		IncidentID: "incident-expired", DecisionID: "decision-expired", ReasonCode: newAPIUpstreamCyberPolicyReasonCode,
+		LockedAt: time.Now().UTC().Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatalf("LockPromptConversation: %v", err)
+	}
+	if blocked := handler.inspectPromptFilterOpenAI(c, body, "/v1/responses", "gpt-5.5"); blocked {
+		t.Fatal("expired conversation lock blocked request")
+	}
+	if _, err := db.GetActivePromptConversationLock(t.Context(), identity.LockKey); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expired conversation lock remained active: %v", err)
 	}
 }

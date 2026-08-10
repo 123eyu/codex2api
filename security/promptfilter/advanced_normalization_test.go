@@ -174,6 +174,18 @@ func TestAdaptiveReviewCompatibilityAndRecommendedDefaults(t *testing.T) {
 	}
 }
 
+func TestConversationLockTTLDefaultsAndClamps(t *testing.T) {
+	cfg := NormalizeAdvancedConfig(AdvancedConfig{})
+	if cfg.Enforcement.ConversationLockTTLHours != 168 {
+		t.Fatalf("default conversation lock TTL = %d, want 168", cfg.Enforcement.ConversationLockTTLHours)
+	}
+	cfg.Enforcement.ConversationLockTTLHours = 9999
+	cfg = NormalizeAdvancedConfig(cfg)
+	if cfg.Enforcement.ConversationLockTTLHours != 720 {
+		t.Fatalf("clamped conversation lock TTL = %d, want 720", cfg.Enforcement.ConversationLockTTLHours)
+	}
+}
+
 func compressedBase64(t *testing.T, value string, useGzip bool) string {
 	t.Helper()
 	var compressed bytes.Buffer

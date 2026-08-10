@@ -49,6 +49,15 @@ func verifiedPromptConversationLockIdentity(c *gin.Context, policyContext verifi
 	}, true
 }
 
+func promptConversationLockTTL(cfg promptfilter.Config) time.Duration {
+	hours := promptfilter.NormalizeAdvancedConfig(cfg.Advanced).Enforcement.ConversationLockTTLHours
+	return time.Duration(hours) * time.Hour
+}
+
+func promptConversationLockExpired(item *database.PromptConversationLock, ttl time.Duration) bool {
+	return item == nil || (ttl > 0 && !item.LockedAt.After(time.Now().UTC().Add(-ttl)))
+}
+
 func (h *Handler) activePromptConversationLock(c *gin.Context, cfg promptfilter.Config, signedBody []byte) (*database.PromptConversationLock, bool) {
 	if h == nil || h.db == nil || c == nil || !cfg.Advanced.Enforcement.ConversationLockEnabled {
 		return nil, false
@@ -61,17 +70,19 @@ func (h *Handler) activePromptConversationLock(c *gin.Context, cfg promptfilter.
 	if !ok {
 		return nil, false
 	}
+	lockTTL := promptConversationLockTTL(cfg)
 	if h.cache != nil {
 		if raw, found, err := h.cache.GetRuntime(c.Request.Context(), database.PromptConversationLockCacheNamespace, identity.LockKey); err == nil && found {
 			var item database.PromptConversationLock
-			if json.Unmarshal(raw, &item) == nil && item.Status == database.PromptConversationLockStatusActive {
+			if json.Unmarshal(raw, &item) == nil && item.Status == database.PromptConversationLockStatusActive && !promptConversationLockExpired(&item, lockTTL) {
 				return &item, true
 			}
+			_ = h.cache.DeleteRuntime(c.Request.Context(), database.PromptConversationLockCacheNamespace, identity.LockKey)
 		}
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
-	item, err := h.db.GetActivePromptConversationLock(ctx, identity.LockKey)
+	item, err := h.db.GetActivePromptConversationLockWithTTL(ctx, identity.LockKey, lockTTL)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false
 	}
@@ -79,17 +90,27 @@ func (h *Handler) activePromptConversationLock(c *gin.Context, cfg promptfilter.
 		log.Printf("check prompt conversation lock failed key=%s: %v", identity.LockKey[:12], err)
 		return nil, false
 	}
-	h.cachePromptConversationLock(c.Request.Context(), item)
+	h.cachePromptConversationLock(c.Request.Context(), item, lockTTL)
 	return item, true
 }
 
-func (h *Handler) cachePromptConversationLock(ctx context.Context, item *database.PromptConversationLock) {
+func (h *Handler) cachePromptConversationLock(ctx context.Context, item *database.PromptConversationLock, lockTTL time.Duration) {
 	if h == nil || h.cache == nil || item == nil || item.Status != database.PromptConversationLockStatusActive {
 		return
 	}
+	cacheTTL := promptConversationLockCacheTTL
+	if lockTTL > 0 {
+		remaining := time.Until(item.LockedAt.Add(lockTTL))
+		if remaining <= 0 {
+			return
+		}
+		if remaining < cacheTTL {
+			cacheTTL = remaining
+		}
+	}
 	raw, err := json.Marshal(item)
 	if err == nil {
-		_ = h.cache.SetRuntime(ctx, database.PromptConversationLockCacheNamespace, item.LockKey, raw, promptConversationLockCacheTTL)
+		_ = h.cache.SetRuntime(ctx, database.PromptConversationLockCacheNamespace, item.LockKey, raw, cacheTTL)
 	}
 }
 
@@ -121,7 +142,7 @@ func (h *Handler) lockPromptConversationAfterUpstreamCYB(c *gin.Context, endpoin
 		log.Printf("persist prompt conversation lock failed decision=%s: %v", metadata.DecisionID, err)
 		return false
 	}
-	h.cachePromptConversationLock(c.Request.Context(), item)
+	h.cachePromptConversationLock(c.Request.Context(), item, promptConversationLockTTL(cfg))
 	return item != nil && item.Status == database.PromptConversationLockStatusActive
 }
 

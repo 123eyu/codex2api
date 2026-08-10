@@ -43,6 +43,32 @@ type promptPolicyIncidentDetailResponse struct {
 	Evidence  *database.PromptRuleCandidateEvidence `json:"evidence,omitempty"`
 }
 
+type promptPolicyAuditQueueHealth struct {
+	Enqueued      uint64 `json:"enqueued"`
+	Completed     uint64 `json:"completed"`
+	DroppedHigh   uint64 `json:"dropped_high"`
+	DroppedLow    uint64 `json:"dropped_low"`
+	Failed        uint64 `json:"failed"`
+	PendingHigh   int    `json:"pending_high"`
+	PendingLow    int    `json:"pending_low"`
+	RetainedBytes int64  `json:"retained_bytes"`
+}
+
+type promptPolicyAuditHealthResponse struct {
+	OK                      bool                             `json:"ok"`
+	Status                  string                           `json:"status"`
+	StorageReady            bool                             `json:"storage_ready"`
+	PromptFilterEnabled     bool                             `json:"prompt_filter_enabled"`
+	ReviewEnabled           bool                             `json:"review_enabled"`
+	ReviewFailClosed        bool                             `json:"review_fail_closed"`
+	ReviewPool              promptfilter.ReviewKeyPoolHealth `json:"review_pool"`
+	ConversationLockEnabled bool                             `json:"conversation_lock_enabled"`
+	IncidentCount           int                              `json:"incident_count"`
+	LatestIncidentID        string                           `json:"latest_incident_id,omitempty"`
+	LatestIncidentAt        *time.Time                       `json:"latest_incident_at,omitempty"`
+	Queue                   promptPolicyAuditQueueHealth     `json:"queue"`
+}
+
 type promptFilterTestRequest struct {
 	Text     string `json:"text"`
 	Endpoint string `json:"endpoint"`
@@ -306,6 +332,47 @@ func (h *Handler) ClearPromptPolicyIncidents(c *gin.Context) {
 		return
 	}
 	writeMessage(c, http.StatusOK, "上游 CY 事件已清空；风险画像已保留")
+}
+
+func (h *Handler) GetPromptPolicyAuditHealth(c *gin.Context) {
+	if h == nil || h.db == nil {
+		writeError(c, http.StatusServiceUnavailable, "CY 审计存储不可用")
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	incidents, total, err := h.db.ListPromptPolicyIncidentsPage(ctx, database.PromptPolicyIncidentQuery{Page: 1, PageSize: 1})
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	stats := h.db.PromptFilterAuditStats()
+	cfg := promptfilter.DefaultConfig()
+	if h.store != nil {
+		cfg = h.store.GetPromptFilterConfig()
+	}
+	response := promptPolicyAuditHealthResponse{
+		OK: true, Status: "healthy", StorageReady: true,
+		PromptFilterEnabled: cfg.Enabled, ReviewEnabled: cfg.Review.Enabled,
+		ReviewFailClosed: cfg.Review.FailClosed, ReviewPool: promptfilter.ReviewKeyPoolStatus(cfg.Review),
+		ConversationLockEnabled: cfg.Advanced.Enforcement.ConversationLockEnabled,
+		IncidentCount:           total,
+		Queue: promptPolicyAuditQueueHealth{
+			Enqueued: stats.Enqueued, Completed: stats.Completed, DroppedHigh: stats.DroppedHigh,
+			DroppedLow: stats.DroppedLow, Failed: stats.Failed, PendingHigh: stats.PendingHigh,
+			PendingLow: stats.PendingLow, RetainedBytes: stats.RetainedBytes,
+		},
+	}
+	if !response.PromptFilterEnabled || !response.ReviewEnabled || !response.ConversationLockEnabled || response.ReviewPool.Configured == 0 || response.ReviewPool.Available == 0 || stats.DroppedHigh > 0 || stats.Failed > 0 {
+		response.OK = false
+		response.Status = "degraded"
+	}
+	if len(incidents) > 0 && incidents[0] != nil {
+		response.LatestIncidentID = incidents[0].IncidentID
+		latest := incidents[0].CreatedAt
+		response.LatestIncidentAt = &latest
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListPromptPolicyIncidents(c *gin.Context) {
