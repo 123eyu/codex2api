@@ -181,7 +181,9 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", defaultCodexCLIUserAgent)
+	// UA 版本段与 Version 头、client_version query 三者保持同一版本，
+	// 避免出站身份自相矛盾（UA 钉内置常量、Version 跟随同步值）。
+	req.Header.Set("User-Agent", replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, clientVersion))
 	req.Header.Set("Originator", Originator)
 	req.Header.Set("Version", clientVersion)
 	if ifNoneMatch = strings.TrimSpace(ifNoneMatch); ifNoneMatch != "" {

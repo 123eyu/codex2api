@@ -3252,7 +3252,7 @@
     "codexCliVersionSyncInterval": "Auto-sync interval",
     "codexCliVersionSyncIntervalDesc": "Wait time between automatic syncs (hours, range 1-720).",
     "codexUserAgentRaw": "Raw User-Agent Override",
-    "codexUserAgentRawDesc": "Optional exact header value. Leave blank to build from the fields below.",
+    "codexUserAgentRawDesc": "Optional exact header value. Leave blank to build from the fields below. Version segments are rebuilt to the current effective Codex CLI version on egress.",
     "codexUAClientName": "Client Name",
     "codexUAClientNameDesc": "Client token before the slash and in the trailing marker.",
     "codexUAClientVersion": "Client Version",
