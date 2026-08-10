@@ -2670,6 +2670,8 @@ func (h *Handler) Responses(c *gin.Context) {
 			var readErr error
 			var writeErr error
 			wroteAnyBody := false
+			// 断流现场判据(issue #491):区分下游背压与上游重置。
+			streamDiag := newStreamPhaseDiagnostics()
 			// 首 token 前收到不可重试的 response.failed 时置位:中止 SSE 转发、
 			// 不做 transport flush(避免提前提交 200 header),循环外按真实错误码返回 JSON。
 			abortedForHTTPError := false
@@ -2695,9 +2697,11 @@ func (h *Handler) Responses(c *gin.Context) {
 					return
 				}
 				streamWriter := h.newStreamFlushWriter(c, c.Writer, flusher)
+				streamWriter.diag = streamDiag
 				clientGone := false
 				var pendingFirstTokenEvents bytes.Buffer
 				readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+					streamDiag.markUpstreamFrame()
 					parsed := gjson.ParseBytes(data)
 					eventType := parsed.Get("type").String()
 					ttftGuard.MarkProgress(eventType)
@@ -2793,6 +2797,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			if ttftGuard.TimedOut() && !ttftRecorded && !gotTerminal {
 				outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
 			}
+			outcome = annotateStreamBreakDiagnostics(outcome, streamDiag)
 			ttftGuard.Stop()
 			if outcome.verifyAccountAuth {
 				h.store.VerifyAccountAuthAsync(account)
@@ -3152,6 +3157,8 @@ func (h *Handler) Responses(c *gin.Context) {
 		var streamedOutputItems []json.RawMessage
 		promptPolicyIncidentID := ""
 		upstreamCyberPolicyLogged := false
+		// 断流现场判据(issue #491):区分下游背压拖停上游读取 vs 上游自己重置。
+		streamDiag := newStreamPhaseDiagnostics()
 
 		if isStream {
 			// 流式透传 + TTFT 跟踪
@@ -3171,6 +3178,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				return
 			}
 			streamWriter := h.newStreamFlushWriter(c, c.Writer, flusher)
+			streamWriter.diag = streamDiag
 
 			// clientGone：客户端写失败后置位，后续事件不再写客户端，
 			// 但继续读上游直到 response.completed/failed，以拿到准确 usage。
@@ -3185,6 +3193,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			// 热更新对新请求生效，流转发中途不切换缓冲策略。
 			preflightPassthrough := CurrentRuntimeSettings().CodexPreflightSSEPassthrough
 			forward := func(data []byte) bool {
+				streamDiag.markUpstreamFrame()
 				downstreamMu.Lock()
 				defer downstreamMu.Unlock()
 				parsed := gjson.ParseBytes(data)
@@ -3439,6 +3448,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		if ttftGuard.TimedOut() && !ttftRecorded && !gotTerminal {
 			outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
 		}
+		outcome = annotateStreamBreakDiagnostics(outcome, streamDiag)
 		ttftGuard.Stop()
 		if outcome.verifyAccountAuth {
 			h.store.VerifyAccountAuthAsync(account)
