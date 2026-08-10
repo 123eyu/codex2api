@@ -214,6 +214,74 @@ func TestPrepareResponsesBody_DropsUnsupportedClientServiceTier(t *testing.T) {
 	}
 }
 
+func TestTranslateRequest_BridgesToolMessageImage(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[
+			{"role":"user","content":"look"},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"shot","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":[
+				{"type":"text","text":"here it is"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,QQQ"}}
+			]}
+		]
+	}`)
+
+	got, err := TranslateRequest(raw)
+	if err != nil {
+		t.Fatalf("TranslateRequest returned error: %v", err)
+	}
+
+	out := gjson.GetBytes(got, `input.#(type=="function_call_output").output`).String()
+	if out != "here it is" {
+		t.Fatalf("function_call_output.output = %q, want text only", out)
+	}
+	if strings.Contains(out, "data:image") {
+		t.Fatalf("function_call_output leaked image: %q", out)
+	}
+	// 定位带 input_image 的合成 user 消息（可能不是第一条 user 消息）。
+	var found bool
+	for _, item := range gjson.GetBytes(got, "input").Array() {
+		if item.Get("role").String() != "user" {
+			continue
+		}
+		img := item.Get(`content.#(type=="input_image").image_url`).String()
+		if strings.Contains(img, "data:image/png;base64,QQQ") {
+			found = true
+			attr := item.Get(`content.#(type=="input_text").text`).String()
+			if !strings.Contains(attr, "Tool output image for call call_1") {
+				t.Fatalf("attribution text = %q, want call_1 attribution", attr)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("synthesized user message missing input_image; body=%s", got)
+	}
+}
+
+func TestTranslateRequest_ToolMessageWithoutImageUnchanged(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"shot","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"plain string result"}
+		]
+	}`)
+
+	got, err := TranslateRequest(raw)
+	if err != nil {
+		t.Fatalf("TranslateRequest returned error: %v", err)
+	}
+	out := gjson.GetBytes(got, `input.#(type=="function_call_output").output`).String()
+	if out != "plain string result" {
+		t.Fatalf("function_call_output.output = %q, want unchanged string", out)
+	}
+	// tool 消息无图片时不产生合成 user 消息（只有原始的 assistant/function_call）。
+	if gjson.GetBytes(got, `input.#(type=="message")#|#(role=="user")`).Exists() {
+		t.Fatalf("unexpected synthesized user message; body=%s", got)
+	}
+}
+
 func TestTranslateRequest_NormalizesReasoningEffortAliases(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",

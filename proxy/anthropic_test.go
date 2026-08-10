@@ -448,6 +448,93 @@ func TestSanitizeToolInputJSON(t *testing.T) {
 	}
 }
 
+func TestTranslateAnthropicToCodexBridgesToolResultImage(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{
+			"role":"user",
+			"content":[{
+				"type":"tool_result",
+				"tool_use_id":"toolu_img",
+				"content":[
+					{"type":"text","text":"screenshot captured"},
+					{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAB"}}
+				]
+			}]
+		}]
+	}`)
+
+	body, _, err := TranslateAnthropicToCodexWithModels(raw, "", []string{"gpt-5.4"})
+	if err != nil {
+		t.Fatalf("TranslateAnthropicToCodexWithModels returned error: %v", err)
+	}
+
+	// function_call_output 保留文本、不含图片。
+	out := gjson.GetBytes(body, `input.#(type=="function_call_output").output`).String()
+	if out != "screenshot captured" {
+		t.Fatalf("function_call_output.output = %q, want text only", out)
+	}
+	if strings.Contains(out, "data:image") {
+		t.Fatalf("function_call_output leaked image data: %q", out)
+	}
+
+	// 紧随其后有一条 user 消息带 input_image。
+	img := gjson.GetBytes(body, `input.#(type=="message")#|#(role=="user").content.#(type=="input_image").image_url`)
+	if !strings.Contains(img.String(), "data:image/png;base64,AAAB") {
+		t.Fatalf("synthesized user message missing input_image; body=%s", body)
+	}
+	attr := gjson.GetBytes(body, `input.#(type=="message")#|#(role=="user").content.#(type=="input_text").text`).String()
+	if !strings.Contains(attr, "Tool output image for call") {
+		t.Fatalf("attribution text = %q, want call attribution", attr)
+	}
+}
+
+func TestTranslateAnthropicToCodexImageOnlyToolResultUsesMarker(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{
+			"role":"user",
+			"content":[{
+				"type":"tool_result",
+				"tool_use_id":"toolu_img",
+				"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"ZZZ"}}]
+			}]
+		}]
+	}`)
+
+	body, _, err := TranslateAnthropicToCodexWithModels(raw, "", []string{"gpt-5.4"})
+	if err != nil {
+		t.Fatalf("TranslateAnthropicToCodexWithModels returned error: %v", err)
+	}
+	out := gjson.GetBytes(body, `input.#(type=="function_call_output").output`).String()
+	if out != toolResultImageMovedMarker {
+		t.Fatalf("image-only tool result output = %q, want marker", out)
+	}
+}
+
+func TestTranslateAnthropicToCodexTextOnlyToolResultNoSyntheticMessage(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{
+			"role":"user",
+			"content":[{
+				"type":"tool_result",
+				"tool_use_id":"toolu_txt",
+				"content":[{"type":"text","text":"plain result"}]
+			}]
+		}]
+	}`)
+
+	body, _, err := TranslateAnthropicToCodexWithModels(raw, "", []string{"gpt-5.4"})
+	if err != nil {
+		t.Fatalf("TranslateAnthropicToCodexWithModels returned error: %v", err)
+	}
+	// 无图片时不应产生任何 user 消息（仅 function_call_output）。
+	if gjson.GetBytes(body, `input.#(type=="message")#|#(role=="user")`).Exists() {
+		t.Fatalf("unexpected synthesized user message for text-only tool result; body=%s", body)
+	}
+}
+
 func TestTranslateAnthropicToCodexPreservesToolInputByToolName(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-sonnet-4-5",

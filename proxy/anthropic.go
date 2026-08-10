@@ -417,11 +417,33 @@ func appendUserBlocks(input []any, blocks []anthropicContentBlock) []any {
 		case "tool_result":
 			// tool_result → function_call_output（独立 item）
 			output := extractToolResultText(b)
+			images := extractToolResultImages(b)
+			if output == "" && len(images) > 0 {
+				// 纯图片工具结果：function_call_output 不能为空，留占位指向随后的 user 消息。
+				output = toolResultImageMovedMarker
+			}
+			callID := toCodexCallID(b.ToolUseID)
 			input = append(input, map[string]any{
 				"type":    "function_call_output",
-				"call_id": toCodexCallID(b.ToolUseID),
+				"call_id": callID,
 				"output":  output,
 			})
+			// Chat/Responses 协议下 function_call_output 只能是文本，图片视觉模型看不见；
+			// 抽出来放进紧随其后的合成 user 消息，附带 call 归属说明。
+			if len(images) > 0 {
+				mediaParts := []any{map[string]any{
+					"type": "input_text",
+					"text": fmt.Sprintf(toolResultImageAttribution, callID),
+				}}
+				for _, dataURI := range images {
+					mediaParts = append(mediaParts, map[string]any{"type": "input_image", "image_url": dataURI})
+				}
+				input = append(input, map[string]any{
+					"type":    "message",
+					"role":    "user",
+					"content": mediaParts,
+				})
+			}
 		}
 	}
 	if len(contentParts) > 0 {
@@ -498,6 +520,31 @@ func appendAssistantBlocks(input []any, blocks []anthropicContentBlock) []any {
 		})
 	}
 	return input
+}
+
+const (
+	toolResultImageMovedMarker = "[Tool output image moved to the following user message]"
+	toolResultImageAttribution = "[Tool output image for call %s]"
+)
+
+// extractToolResultImages 从 tool_result 块的 content 中提取图片，返回 data URI 列表。
+// 只识别 content 为 []block 时的 image 块（Anthropic base64 source）；字符串或非法
+// content 不含结构化图片，返回 nil。图片能力缺失时该函数是无副作用的 no-op。
+func extractToolResultImages(b anthropicContentBlock) []string {
+	if len(b.Content) == 0 || string(b.Content) == "null" {
+		return nil
+	}
+	var blocks []anthropicContentBlock
+	if json.Unmarshal(b.Content, &blocks) != nil {
+		return nil
+	}
+	var images []string
+	for _, cb := range blocks {
+		if cb.Type == "image" && cb.Source != nil && cb.Source.Data != "" {
+			images = append(images, fmt.Sprintf("data:%s;base64,%s", cb.Source.MediaType, cb.Source.Data))
+		}
+	}
+	return images
 }
 
 // extractToolResultText 从 tool_result 块提取文本输出

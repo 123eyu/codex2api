@@ -2230,11 +2230,28 @@ func convertMessagesToInputSlice(messages []openAIMessage) []any {
 	for _, m := range messages {
 		switch m.Role {
 		case "tool":
+			output, images := toolMessageOutputAndImages(m.Content)
 			input = append(input, map[string]any{
 				"type":    "function_call_output",
 				"call_id": m.ToolCallID,
-				"output":  rawMessageToString(m.Content),
+				"output":  output,
 			})
+			// function_call_output 只能是文本；数组 content 里的图片抽出来放进
+			// 紧随其后的合成 user 消息，附带 call 归属说明。
+			if len(images) > 0 {
+				mediaParts := []any{map[string]any{
+					"type": "input_text",
+					"text": fmt.Sprintf(toolResultImageAttribution, m.ToolCallID),
+				}}
+				for _, url := range images {
+					mediaParts = append(mediaParts, map[string]any{"type": "input_image", "image_url": url})
+				}
+				input = append(input, map[string]any{
+					"type":    "message",
+					"role":    "user",
+					"content": mediaParts,
+				})
+			}
 
 		case "assistant":
 			if len(m.ToolCalls) > 0 {
@@ -2321,6 +2338,40 @@ func buildContentPartsSlice(role string, raw json.RawMessage) []any {
 	default:
 		return parts
 	}
+}
+
+// toolMessageOutputAndImages 计算 tool 消息的 function_call_output 文本，并抽出
+// 数组 content 里的图片 URL。无图片时 output 与 rawMessageToString 完全一致（含数组
+// 原始字节），保证无图请求的 prompt-cache 前缀不变。
+func toolMessageOutputAndImages(raw json.RawMessage) (string, []string) {
+	if firstNonSpace(raw) != '[' {
+		return rawMessageToString(raw), nil
+	}
+	var arr []openAIContentPart
+	if json.Unmarshal(raw, &arr) != nil {
+		return rawMessageToString(raw), nil
+	}
+	var images []string
+	for _, item := range arr {
+		if item.Type == "image_url" && item.ImageURL != nil && item.ImageURL.URL != "" {
+			images = append(images, item.ImageURL.URL)
+		}
+	}
+	if len(images) == 0 {
+		// 无图片：保持原字节路径，不改写。
+		return rawMessageToString(raw), nil
+	}
+	var textParts []string
+	for _, item := range arr {
+		if item.Type == "text" && item.Text != "" {
+			textParts = append(textParts, item.Text)
+		}
+	}
+	output := strings.Join(textParts, "\n")
+	if output == "" {
+		output = toolResultImageMovedMarker
+	}
+	return output, images
 }
 
 // rawMessageToString 安全地将 json.RawMessage 转为 Go string
