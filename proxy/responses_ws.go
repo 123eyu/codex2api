@@ -249,6 +249,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
+	hasPreviousResponse := strings.TrimSpace(gjson.GetBytes(rawBody, "previous_response_id").String()) != ""
 	respCacheOwner := responseCacheOwner(apiKeyID)
 	ruleIdentity := h.payloadRuleIdentity(c)
 	// 上下文压缩轮豁免首字超时看门狗（issue #381）：压缩首帧天然慢，超时换号无益。
@@ -324,7 +325,11 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	for attempt := 0; ; attempt++ {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
-			account, stickyProxyURL = h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
+			if hasPreviousResponse {
+				account, stickyProxyURL = h.nextRetryAccountForContinuation(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
+			} else {
+				account, stickyProxyURL = h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
+			}
 		}
 		if account == nil {
 			if lastRetryableUpstreamErr != nil {
@@ -414,7 +419,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
-			if !stickyRetry {
+			if !stickyRetry && !hasPreviousResponse {
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			}
 			if timedOut && shouldRetry {
@@ -471,7 +476,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					}
 					log.Printf("Responses WebSocket upstream rejected encrypted_content, stripped encrypted reasoning context and retried once (attempt %d)", attempt+1)
 					h.store.Release(account)
-					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					if !hasPreviousResponse {
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					}
 					continue
 				}
 			}
@@ -481,7 +488,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			}
 			SyncCodexUsageState(h.store, account, resp)
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			if !hasPreviousResponse {
+				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			}
 			retryExclusions.MarkHard(account.ID())
 
 			log.Printf("Responses WebSocket upstream returned error (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorConsoleBody(errBody))
@@ -543,7 +552,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 			fallbackLog = &wsHTTPFallback
 		}
-		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, expandedInputRaw, start, ttftGuard, silentRetryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1, options); err != nil {
+		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, hasPreviousResponse, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, expandedInputRaw, start, ttftGuard, silentRetryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1, options); err != nil {
 			var retryErr *responsesWSRetryableStreamError
 			if errors.As(err, &retryErr) {
 				lastRetryableUpstreamErr = api.NewAPIError(api.ErrCodeUpstreamError, retryErr.outcome.failureMessage, api.ErrorTypeUpstream)
@@ -574,7 +583,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if errors.Is(err, errResponsesWSClientGone) {
 				return err
 			}
-			if shouldRetryErr, ok := err.(*responsesWSCloseError); ok && shouldRetryErr.code == websocket.CloseTryAgainLater {
+			if shouldRetryErr, ok := err.(*responsesWSCloseError); ok && shouldRetryErr.code == websocket.CloseTryAgainLater && !hasPreviousResponse {
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			}
 			return err
@@ -590,6 +599,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	account *auth.Account,
 	proxyURL string,
 	affinityKey string,
+	preserveAffinity bool,
 	model string,
 	effectiveModel string,
 	logEffectiveModel string,
@@ -820,7 +830,9 @@ func (h *Handler) streamResponsesWSUpstream(
 			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)
-		h.store.UnbindSessionAffinity(affinityKey, account.ID())
+		if !preserveAffinity {
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+		}
 		return &responsesWSRetryableStreamError{outcome: outcome}
 	}
 	if outcome.logStatusCode != http.StatusOK {
@@ -880,7 +892,9 @@ func (h *Handler) streamResponsesWSUpstream(
 	if outcome.penalize {
 		recyclePooledClient(account, proxyURL)
 		h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
-		h.store.UnbindSessionAffinity(affinityKey, account.ID())
+		if !preserveAffinity {
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+		}
 	} else if outcome.logStatusCode == http.StatusOK {
 		h.store.ClearModelCooldown(account, effectiveModel)
 		h.store.ConfirmResponsesAvailableSince(account, start)

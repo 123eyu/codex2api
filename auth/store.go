@@ -5219,6 +5219,17 @@ func (s *Store) NextForSession(key string, apiKeyID int64, exclude map[int64]boo
 // 解除发生时绕过 binding 走完整挑号策略(NextExcludingWithFilter),后续 BindSessionAffinity
 // 会重新建立绑定。
 func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
+	return s.nextForSessionWithFilter(key, apiKeyID, exclude, filter, false)
+}
+
+// NextForContinuationWithFilter preserves an existing account binding for a
+// stateful upstream continuation. A previous_response_id belongs to the OAuth
+// account that created it, so bounded-affinity escape must not rotate accounts.
+func (s *Store) NextForContinuationWithFilter(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
+	return s.nextForSessionWithFilter(key, apiKeyID, exclude, filter, true)
+}
+
+func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, preserveBinding bool) (*Account, string) {
 	if s == nil {
 		return nil, ""
 	}
@@ -5239,12 +5250,15 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			mode = override
 		}
 	}
-	if mode == AffinityModeOff {
+	if mode == AffinityModeOff && !preserveBinding {
 		return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
 	}
 
 	if ok {
 		if !s.affinityProxyStillValid(binding.accountID, binding.proxyURL) {
+			if preserveBinding {
+				return s.takeByIDExcluding(binding.accountID, apiKeyID, exclude, filter), ""
+			}
 			s.UnbindSessionAffinity(key, binding.accountID)
 			ok = false
 		}
@@ -5253,7 +5267,7 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		expired := !binding.expiresAt.After(now)
 		// bounded 模式下追加逃逸条件检查
 		escape := false
-		if mode == AffinityModeBounded {
+		if mode == AffinityModeBounded && !preserveBinding {
 			if binding.requestCount >= defaultMaxAffinityRequests {
 				escape = true
 			} else if !binding.boundAt.IsZero() && now.Sub(binding.boundAt) >= defaultMaxAffinityDuration {
@@ -5274,10 +5288,15 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			}
 			s.sessionMu.Unlock()
 			return acc, binding.proxyURL
+		} else if preserveBinding {
+			return nil, ""
 		}
 	}
 	if binding, ok := s.getCachedSessionAffinity(key); ok {
 		if !s.affinityProxyStillValid(binding.accountID, binding.proxyURL) {
+			if preserveBinding {
+				return s.takeByIDExcluding(binding.accountID, apiKeyID, exclude, filter), ""
+			}
 			s.UnbindSessionAffinity(key, binding.accountID)
 			return s.nextAccountForFreshAffinity(key, apiKeyID, exclude, filter), ""
 		}
@@ -5286,7 +5305,7 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		if override := s.resolveGrokAffinityOverride(binding.accountID); override != "" {
 			cacheMode = override
 		}
-		if cacheMode == AffinityModeBounded && !s.affinityAccountStillHealthy(binding.accountID) {
+		if cacheMode == AffinityModeBounded && !preserveBinding && !s.affinityAccountStillHealthy(binding.accountID) {
 			// 不复用,落到完整挑号
 		} else if acc := s.takeByIDExcluding(binding.accountID, apiKeyID, exclude, filter); acc != nil {
 			s.sessionMu.Lock()
@@ -5296,6 +5315,8 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			s.sessionBindings[key] = binding
 			s.sessionMu.Unlock()
 			return acc, binding.proxyURL
+		} else if preserveBinding {
+			return nil, ""
 		}
 	}
 
@@ -5600,6 +5621,16 @@ func (s *Store) hasDispatchCandidateWithFilter(apiKeyID int64, exclude map[int64
 
 // WaitForSessionAvailableWithFilter waits for an account that satisfies the request-level filter.
 func (s *Store) WaitForSessionAvailableWithFilter(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
+	return s.waitForSessionAvailableWithFilter(ctx, key, timeout, apiKeyID, exclude, filter, false)
+}
+
+// WaitForContinuationAvailableWithFilter waits for the account already bound
+// to a stateful continuation instead of falling through to another account.
+func (s *Store) WaitForContinuationAvailableWithFilter(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
+	return s.waitForSessionAvailableWithFilter(ctx, key, timeout, apiKeyID, exclude, filter, true)
+}
+
+func (s *Store) waitForSessionAvailableWithFilter(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, preserveBinding bool) (*Account, string) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -5627,7 +5658,13 @@ func (s *Store) WaitForSessionAvailableWithFilter(ctx context.Context, key strin
 		case <-deadline.C:
 			return nil, ""
 		default:
-			acc, proxyURL := s.NextForSessionWithFilter(key, apiKeyID, exclude, filter)
+			var acc *Account
+			var proxyURL string
+			if preserveBinding {
+				acc, proxyURL = s.NextForContinuationWithFilter(key, apiKeyID, exclude, filter)
+			} else {
+				acc, proxyURL = s.NextForSessionWithFilter(key, apiKeyID, exclude, filter)
+			}
 			if acc != nil {
 				return acc, proxyURL
 			}
