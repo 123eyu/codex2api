@@ -500,6 +500,96 @@ func TestResponsesWebSocketForwardsResponsesEvents(t *testing.T) {
 	}
 }
 
+func TestResponsesWebSocketContinuationKeepsBoundAccountPastBoundedLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+	})
+
+	var store *auth.Store
+	var mu sync.Mutex
+	responseOwners := make(map[string]int64)
+	responseSequence := 0
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		previousResponseID := gjson.GetBytes(requestBody, "previous_response_id").String()
+		if ownerID := responseOwners[previousResponseID]; previousResponseID != "" && ownerID != account.ID() {
+			body := fmt.Sprintf(`{"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id '%s' not found."}}`, previousResponseID)
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		}
+
+		responseSequence++
+		responseID := fmt.Sprintf("resp_%d", responseSequence)
+		responseOwners[responseID] = account.ID()
+		if responseSequence == 1 {
+			priority := int64(20)
+			if !store.ApplyAccountSchedulerPriority(2, &priority) {
+				t.Fatal("failed to raise fallback account scheduler priority")
+			}
+		}
+		sse := fmt.Sprintf(`data: {"type":"response.completed","response":{"id":"%s","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`+"\n\n", responseID)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}, nil
+	}
+
+	store = auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	primary := &auth.Account{DBID: 1, AccessToken: "at-1", PlanType: "plus", AccountID: "acct-1"}
+	primary.SetSchedulerPriority(10)
+	store.AddAccount(primary)
+	store.AddAccount(&auth.Account{DBID: 2, AccessToken: "at-2", PlanType: "plus", AccountID: "acct-2"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	previousResponseID := ""
+	for turn := 1; turn <= 52; turn++ {
+		payload := fmt.Sprintf(`{"type":"response.create","model":"gpt-5.4","prompt_cache_key":"conversation-1","input":"turn-%d"}`, turn)
+		if previousResponseID != "" {
+			payload = fmt.Sprintf(`{"type":"response.create","model":"gpt-5.4","prompt_cache_key":"conversation-1","previous_response_id":"%s","input":"turn-%d"}`, previousResponseID, turn)
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
+			t.Fatalf("turn %d write request: %v", turn, err)
+		}
+
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		_, event, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("turn %d read event: %v", turn, err)
+		}
+		if eventType := gjson.GetBytes(event, "type").String(); eventType != "response.completed" {
+			t.Fatalf("turn %d event type = %q, want response.completed; body=%s", turn, eventType, event)
+		}
+		previousResponseID = gjson.GetBytes(event, "response.id").String()
+		if previousResponseID == "" {
+			t.Fatalf("turn %d response.id missing: %s", turn, event)
+		}
+	}
+}
+
 func TestResponsesWebSocketSuccessPreservesNewerUsageLimitCooldown(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
