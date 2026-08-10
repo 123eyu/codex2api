@@ -18,7 +18,7 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 	fromClause := `FROM accounts
 		CROSS JOIN LATERAL jsonb_to_record(accounts.credentials) AS account_public(
 			upstream_type text, email text, base_url text, plan_type text,
-			models jsonb, api_key text, refresh_token text
+			models jsonb, api_key text, refresh_token text, scheduler_priority text
 		)`
 	credentialColumns := `
 		COALESCE(account_public.upstream_type, ''),
@@ -27,7 +27,8 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 		COALESCE(account_public.plan_type, ''),
 		COALESCE(account_public.models, '[]'::jsonb)::text,
 		COALESCE(account_public.api_key, '') <> '',
-		COALESCE(account_public.refresh_token, '') <> ''`
+		COALESCE(account_public.refresh_token, '') <> '',
+		COALESCE(account_public.scheduler_priority, '')`
 	if db.isSQLite() {
 		upstreamExpr = `LOWER(COALESCE(json_extract(credentials, '$.upstream_type'), ''))`
 		fromClause = `FROM accounts`
@@ -38,7 +39,8 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 			COALESCE(json_extract(credentials, '$.plan_type'), ''),
 			COALESCE(json_extract(credentials, '$.models'), '[]'),
 			CASE WHEN COALESCE(json_extract(credentials, '$.api_key'), '') <> '' THEN 1 ELSE 0 END,
-			CASE WHEN COALESCE(json_extract(credentials, '$.refresh_token'), '') <> '' THEN 1 ELSE 0 END`
+			CASE WHEN COALESCE(json_extract(credentials, '$.refresh_token'), '') <> '' THEN 1 ELSE 0 END,
+			COALESCE(CAST(json_extract(credentials, '$.scheduler_priority') AS TEXT), '')`
 	}
 	switch channel {
 	case UpstreamChannelGrok:
@@ -73,14 +75,14 @@ type accountProjectionScanner interface {
 func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, error) {
 	row := &AccountRow{}
 	var cooldownRaw, tagsRaw, createdRaw, updatedRaw interface{}
-	var upstreamType, email, baseURL, planType string
+	var upstreamType, email, baseURL, planType, schedulerPriority string
 	var modelsRaw interface{}
 	var hasAPIKey, hasRefreshToken bool
 	if err := scanner.Scan(
 		&row.ID, &row.Name, &row.Type, &row.ProxyURL, &row.Status, &row.CooldownReason, &cooldownRaw,
 		&row.ErrorMessage, &row.Enabled, &row.Locked, &row.ScoreBiasOverride, &row.BaseConcurrencyOverride,
 		&tagsRaw, &createdRaw, &updatedRaw, &upstreamType, &email, &baseURL, &planType, &modelsRaw,
-		&hasAPIKey, &hasRefreshToken,
+		&hasAPIKey, &hasRefreshToken, &schedulerPriority,
 	); err != nil {
 		return nil, fmt.Errorf("扫描账号列表投影失败: %w", err)
 	}
@@ -103,6 +105,11 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 		"email":         email,
 		"base_url":      baseURL,
 		"plan_type":     planType,
+	}
+	// 调度优先级参与列表排序(issue 截图反馈:排序不生效),投影缺了它会让
+	// 快照全员按 0 打平、退化成 ID 序。以文本取出交给 GetCredentialInt64 解析。
+	if trimmed := strings.TrimSpace(schedulerPriority); trimmed != "" {
+		row.Credentials["scheduler_priority"] = trimmed
 	}
 	if models := decodeProjectionStringSlice(modelsRaw); len(models) > 0 {
 		row.Credentials["models"] = models

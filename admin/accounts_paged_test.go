@@ -473,3 +473,46 @@ func TestShouldInvalidateAccountSnapshotCaches(t *testing.T) {
 		}
 	}
 }
+
+// 回归:调度优先级排序依赖列表投影带出 scheduler_priority;投影缺字段时
+// 快照全员按 0 打平,排序退化成 ID 序(账号页"排序不生效"反馈)。
+func TestListAccountsPageSortsBySchedulerPriority(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, codexIDs, _ := newPagedAccountsHandler(t)
+	ctx := context.Background()
+	// codexIDs[0] 不设置(视同 0),其余两个分别 50 / 40。
+	if err := handler.db.UpdateCredentials(ctx, codexIDs[1], map[string]interface{}{"scheduler_priority": int64(50)}); err != nil {
+		t.Fatalf("set priority 50: %v", err)
+	}
+	if err := handler.db.UpdateCredentials(ctx, codexIDs[2], map[string]interface{}{"scheduler_priority": int64(40)}); err != nil {
+		t.Fatalf("set priority 40: %v", err)
+	}
+
+	assertOrder := func(order string, want []int64) {
+		t.Helper()
+		recorder := invokeListAccounts(t, handler,
+			"/api/admin/accounts?view=page&channel=codex&page=1&page_size=10&sort=scheduler_priority&order="+order)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+		}
+		var page accountsPageResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &page); err != nil {
+			t.Fatalf("decode page: %v", err)
+		}
+		got := make([]int64, 0, len(page.Accounts))
+		for _, account := range page.Accounts {
+			got = append(got, account.ID)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("order=%s got %v, want %v", order, got, want)
+		}
+		for index := range want {
+			if got[index] != want[index] {
+				t.Fatalf("order=%s got %v, want %v", order, got, want)
+			}
+		}
+	}
+
+	assertOrder("desc", []int64{codexIDs[1], codexIDs[2], codexIDs[0]})
+	assertOrder("asc", []int64{codexIDs[0], codexIDs[2], codexIDs[1]})
+}
