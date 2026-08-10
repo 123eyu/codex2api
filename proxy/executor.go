@@ -643,6 +643,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 		// ==================== 请求头（伪装 Codex CLI） ====================
 		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+		// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
+		ApplyCodexRoutingHint(req.Header, account, requestBody)
 
 		// Resin 反代：注入账号身份头
 		if IsResinEnabled() {
@@ -916,6 +918,8 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+	// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
+	ApplyCodexRoutingHint(req.Header, account, requestBody)
 
 	if IsResinEnabled() {
 		req.Header.Set("X-Resin-Account", ResinAccountID(account))

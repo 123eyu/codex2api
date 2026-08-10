@@ -143,7 +143,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 
 	// 准备请求头
-	headers := e.prepareWebsocketHeaders(accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders)
+	headers := e.prepareWebsocketHeaders(accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody)
 	// Record the attempted handshake UA immediately so failed handshakes are
 	// still auditable. A reused connection replaces this below with the UA that
 	// was actually sent when that connection was established.
@@ -293,7 +293,7 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 }
 
 // prepareWebsocketHeaders 准备 WebSocket 请求头
-func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Account, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header) http.Header {
+func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Account, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header, wsBody []byte) http.Header {
 	headers := http.Header{}
 
 	// 认证头
@@ -353,6 +353,10 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 		}
 		headers.Set(name, value)
 	}
+
+	// routing hint 由网关按最终 WS 帧体合成，在账号自定义头之后设置。
+	// 握手头逐连接冻结：复用连接沿用建连时的 hint，语义为拨号期软亲和。
+	proxy.ApplyCodexRoutingHint(headers, account, wsBody)
 
 	return headers
 }
