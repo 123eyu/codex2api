@@ -5176,6 +5176,29 @@ func (s *Store) bindSessionAffinity(key string, account *Account, proxyURL strin
 	}
 }
 
+// SessionAffinityAccountID 返回该亲和键当前绑定的账号 ID（含跨进程缓存里的绑定）。
+// 续链请求用它判断"绑定账号是不是已经被本次请求排除掉了"——是的话再等它空出来
+// 没有意义，调用方可以直接降级换号，省掉一轮 30s 空等。
+func (s *Store) SessionAffinityAccountID(key string) (int64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return 0, false
+	}
+	s.sessionMu.RLock()
+	binding, ok := s.sessionBindings[key]
+	s.sessionMu.RUnlock()
+	if ok {
+		return binding.accountID, true
+	}
+	if cached, cachedOK := s.getCachedSessionAffinity(key); cachedOK {
+		return cached.accountID, true
+	}
+	return 0, false
+}
+
 // UnbindSessionAffinity removes a session binding when it still points to the failed account.
 func (s *Store) UnbindSessionAffinity(key string, accountID int64) {
 	if s == nil || accountID == 0 {
@@ -5229,6 +5252,15 @@ func (s *Store) NextForContinuationWithFilter(key string, apiKeyID int64, exclud
 	return s.nextForSessionWithFilter(key, apiKeyID, exclude, filter, true)
 }
 
+// nextForSessionWithFilter 是会话选号的统一实现。preserveBinding=true(续链请求)时
+// 语义收紧为"只认绑定账号"：
+//   - 忽略 affinity_mode=off 与 bounded 的全部逃逸条件（请求数/时长/健康档位）——
+//     续链 id 只在创建它的账号上有效，换号必然 previous_response_not_found，
+//     所以这里刻意覆盖运营者的粘性配置；
+//   - 绑定账号当前取不到（超并发/冷却/被本次请求排除）时返回 nil 而不是回退到
+//     别的账号。调用方据此决定是等它空出来，还是剥离续链 id 降级换号。
+//
+// 绑定本身不存在（新会话/绑定已 TTL 过期）时仍走完整挑号，与普通请求一致。
 func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, preserveBinding bool) (*Account, string) {
 	if s == nil {
 		return nil, ""

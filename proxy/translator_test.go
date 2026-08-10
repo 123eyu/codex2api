@@ -2185,6 +2185,53 @@ func TestInvalidEncryptedContentErrorDetection(t *testing.T) {
 	}
 }
 
+func TestIsPreviousResponseNotFoundBody(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{
+			name:    "http error body",
+			payload: `{"error":{"code":"previous_response_not_found","type":"invalid_request_error","message":"Previous response with id 'resp_1' not found."}}`,
+			want:    true,
+		},
+		{
+			name:    "response.failed frame",
+			payload: `{"type":"response.failed","response":{"status":"failed","error":{"code":"previous_response_not_found","type":"invalid_request_error","message":"Previous response with id 'resp_1' not found."}}}`,
+			want:    true,
+		},
+		{
+			name:    "bare error frame",
+			payload: `{"type":"error","code":"previous_response_not_found","message":"Previous response with id 'resp_1' not found."}`,
+			want:    true,
+		},
+		{
+			name:    "message only",
+			payload: `{"error":{"type":"invalid_request_error","message":"Previous response with id 'resp_1' not found."}}`,
+			want:    true,
+		},
+		{
+			name:    "unrelated upstream error",
+			payload: `{"error":{"code":"rate_limit_exceeded","type":"rate_limit_error","message":"slow down"}}`,
+			want:    false,
+		},
+		{
+			name:    "empty payload",
+			payload: ``,
+			want:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPreviousResponseNotFoundBody([]byte(tc.payload)); got != tc.want {
+				t.Fatalf("isPreviousResponseNotFoundBody(%s) = %v, want %v", tc.payload, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestStripInvalidEncryptedContentFromResponsesBody(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
