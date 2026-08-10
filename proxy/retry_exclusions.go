@@ -121,6 +121,12 @@ func (r *retryAccountExclusions) MarkHard(accountID int64) {
 }
 
 func (r *retryAccountExclusions) MarkSoftFirstTokenTimeout(accountID int64) {
+	r.MarkSoft(accountID)
+}
+
+// MarkSoft 把账号加入本次请求的软排除集：调度选号时跳过它，但账号池试完后由
+// ResetSoft 清空重来，不会永久搁置请求。用于"重试时暂时避开该账号但不惩罚它"。
+func (r *retryAccountExclusions) MarkSoft(accountID int64) {
 	if r == nil || accountID == 0 {
 		return
 	}

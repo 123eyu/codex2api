@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1337,6 +1338,10 @@ type streamOutcome struct {
 	failureKind    string
 	failureMessage string
 	penalize       bool
+	// capacityShed 标记这是一次上游容量降载（server_is_overloaded / slow_down）。
+	// penalize 仍为 true 以复用首包前帧缓冲/透明重试机制，但账号连击/健康度不因此
+	// 受罚，且透明重试优先在同账号退避几次而非立即换号（见 reportStreamOutcomeFailure）。
+	capacityShed bool
 	// verifyAccountAuth 标记这是一次 WS 上游读流失败（如 close 1008 policy violation）。
 	// WS 通道下 token 失效表现为上游主动关闭而非 401，需异步跑一次探针确认账号鉴权状态，
 	// 命中 401 才按 unauthorized 冷却，避免失效账号不被封、反复被调度。
@@ -1425,7 +1430,43 @@ func classifyResponseFailedOutcome(payload []byte) streamOutcome {
 		failureKind:    kind,
 		failureMessage: message,
 		penalize:       !cyberPolicy && (statusCode == http.StatusUnauthorized || statusCode == http.StatusTooManyRequests || statusCode >= 500 || modelUnsupported),
+		capacityShed:   !capacityShedHandlingDisabled() && isCapacityShedPayload(payload),
 	}
+}
+
+// reportStreamOutcomeFailure 上报流内 response.failed 类故障到账号健康度，但容量降载
+// 例外：它是按模型/身份容量分桶的请求级瞬时信号，换号不改变被降载因素，计入连击只会
+// 在高峰期把整池账号逐个调度降权。跳过上报即"软信号保留、硬惩罚移除"。
+func (h *Handler) reportStreamOutcomeFailure(account *auth.Account, outcome streamOutcome, d time.Duration) {
+	if outcome.capacityShed {
+		return
+	}
+	h.store.ReportRequestFailure(account, outcome.failureKind, d)
+}
+
+// unbindOrRetainAffinityForCapacityShed 在首包前透明重试时决定是否保留会话亲和。
+// 容量降载先在同账号退避重试 maxCapacityShedSameAccountRetries 次（保留亲和 → 下一轮
+// 仍优先选回同账号），预算耗尽后解绑并软排除该账号强制换号；其余故障一律立即解绑换号。
+// retries 是请求作用域的按账号计数器，每个降载账号各有一份退避预算。
+//
+// 必须软排除而非仅解绑：降载不惩罚账号健康度，若只解绑亲和，调度会立刻把这个仍是
+// 满血的账号重新选回并重绑，"耗尽后换号"就名存实亡。软排除在账号池试完后由 ResetSoft
+// 清空，不会永久搁置请求。
+func (h *Handler) unbindOrRetainAffinityForCapacityShed(exclusions *retryAccountExclusions, affinityKey string, account *auth.Account, outcome streamOutcome, retries map[int64]int) {
+	id := account.ID()
+	if capacityShedRetainsAffinity(outcome, retries[id]) {
+		retries[id]++
+		return
+	}
+	h.store.UnbindSessionAffinity(affinityKey, id)
+	if outcome.capacityShed {
+		exclusions.MarkSoft(id)
+	}
+}
+
+// capacityShedRetainsAffinity 判断本次容量降载是否仍在该账号的同账号退避重试预算内。
+func capacityShedRetainsAffinity(outcome streamOutcome, retriesSoFar int) bool {
+	return outcome.capacityShed && retriesSoFar < maxCapacityShedSameAccountRetries
 }
 
 func responseFailedErrorBody(payload []byte) []byte {
@@ -1478,6 +1519,38 @@ func isRetryableUpstreamErrorFrame(eventType string, payload []byte) bool {
 // （提示 "Selected model is at capacity. Please try a different model." 并终止
 // 会话），而 server_error 等闭集之外的错误码会进入客户端内置的退避重试。
 const capacityShedRetryableClientCode = "server_error"
+
+// maxCapacityShedSameAccountRetries 是容量降载时在同一账号上退避重试的次数上限。
+// 降载是按客户端身份/模型容量分桶的请求级信号，换号并不改变被降载的因素，先在
+// 同账号退避重试若干次，耗尽后再换号（且全程不计入账号连击/健康度）。
+const maxCapacityShedSameAccountRetries = 2
+
+// capacityShedHandlingDisabled 报告是否通过环境变量退回旧行为（把降载当普通 500
+// 惩罚账号并立即换号）。CODEX_DISABLE_CAPACITY_SHED_HANDLING=1（或 true）时生效。
+func capacityShedHandlingDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_DISABLE_CAPACITY_SHED_HANDLING"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// isCapacityShedPayload 判断 response.failed / error 帧是否为上游容量降载
+// （server_is_overloaded / slow_down）。复用 sanitizeCapacityShedEventForClient
+// 的三条 code path，供分类与失败上报两侧共用。
+func isCapacityShedPayload(payload []byte) bool {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+	for _, path := range []string{"error.code", "response.error.code", "response.status_details.error.code"} {
+		switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, path).String())) {
+		case "server_is_overloaded", "slow_down":
+			return true
+		}
+	}
+	return false
+}
 
 // sanitizeCapacityShedEventForClient 把即将写给下游的 error / response.failed
 // 事件中的容量降载错误码改写为客户端可重试的错误码。走到写出这一步说明网关侧
@@ -2408,6 +2481,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 	}()
 
+	capacityShedRetries := map[int64]int{}
 	for attempt := 0; ; attempt++ {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
@@ -2837,11 +2911,11 @@ func (h *Handler) Responses(c *gin.Context) {
 				if isFirstTokenTimeoutOutcome(outcome) {
 					retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 				} else {
-					h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+					h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 				}
 				resp.Body.Close()
 				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				h.unbindOrRetainAffinityForCapacityShed(retryExclusions, affinityKey, account, outcome, capacityShedRetries)
 				// 首字超时已白等一轮,不再叠加重试间隔;其余首包前断流按配置间隔等待
 				if !isFirstTokenTimeoutOutcome(outcome) && !h.waitBeforeRetry(c.Request.Context()) {
 					return
@@ -2927,7 +3001,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			resp.Body.Close()
 			if outcome.penalize {
 				recyclePooledClient(account, proxyURL)
-				h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			} else if outcome.logStatusCode == http.StatusOK {
 				h.store.ClearModelCooldown(account, attemptEffectiveModel)
@@ -3496,11 +3570,11 @@ func (h *Handler) Responses(c *gin.Context) {
 			if isFirstTokenTimeoutOutcome(outcome) {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 			} else {
-				h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 			}
 			resp.Body.Close()
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			h.unbindOrRetainAffinityForCapacityShed(retryExclusions, affinityKey, account, outcome, capacityShedRetries)
 			// 首字超时已白等一轮,不再叠加重试间隔;其余首包前断流按配置间隔等待
 			if !isFirstTokenTimeoutOutcome(outcome) && !h.waitBeforeRetry(c.Request.Context()) {
 				return
@@ -3618,7 +3692,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 		if outcome.penalize {
 			recyclePooledClient(account, proxyURL)
-			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 		} else if outcome.logStatusCode == http.StatusOK {
 			h.store.ClearModelCooldown(account, effectiveModel)
@@ -4315,6 +4389,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 	}()
 
+	capacityShedRetries := map[int64]int{}
 	for attempt := 0; ; attempt++ {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
@@ -4794,11 +4869,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if isFirstTokenTimeoutOutcome(outcome) {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 			} else {
-				h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 			}
 			resp.Body.Close()
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			h.unbindOrRetainAffinityForCapacityShed(retryExclusions, affinityKey, account, outcome, capacityShedRetries)
 			// 首字超时已白等一轮,不再叠加重试间隔;其余首包前断流按配置间隔等待
 			if !isFirstTokenTimeoutOutcome(outcome) && !h.waitBeforeRetry(c.Request.Context()) {
 				return
@@ -4894,7 +4969,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		resp.Body.Close()
 		if outcome.penalize {
 			recyclePooledClient(account, proxyURL)
-			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 		} else if outcome.logStatusCode == http.StatusOK {
 			h.store.ClearModelCooldown(account, attemptEffectiveModel)

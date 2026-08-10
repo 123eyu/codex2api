@@ -41,6 +41,115 @@ func TestIsRetryableUpstreamErrorFrame(t *testing.T) {
 	}
 }
 
+// isCapacityShedPayload 识别 response.failed / error 帧里的容量降载码，两种嵌套形态都认，
+// server_error / rate_limit 等不算降载。
+func TestIsCapacityShedPayload(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{"裸 error.code overloaded", `{"error":{"code":"server_is_overloaded"}}`, true},
+		{"裸 error.code slow_down", `{"error":{"code":"SLOW_DOWN"}}`, true},
+		{"嵌套 response.error.code", `{"response":{"error":{"code":"server_is_overloaded"}}}`, true},
+		{"status_details.error.code", `{"response":{"status_details":{"error":{"code":"slow_down"}}}}`, true},
+		{"server_error 不算降载", `{"error":{"code":"server_error"}}`, false},
+		{"rate_limit 不算降载", `{"error":{"code":"rate_limit_exceeded"}}`, false},
+		{"空 payload", ``, false},
+		{"非 JSON", `not json`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCapacityShedPayload([]byte(tc.payload)); got != tc.want {
+				t.Errorf("isCapacityShedPayload(%s) = %v, want %v", tc.payload, got, tc.want)
+			}
+		})
+	}
+}
+
+// 降载事件在 classify 里既保持 penalize=true（复用首包前帧缓冲/透明重试机制），
+// 又置 capacityShed=true（供上报侧跳过账号连击）。环境变量可整体退回旧行为。
+func TestClassifyResponseFailedOutcomeCapacityShed(t *testing.T) {
+	shed := []byte(`{"type":"response.failed","response":{"status":"failed","error":{"code":"server_is_overloaded","message":"overloaded"}}}`)
+
+	got := classifyResponseFailedOutcome(shed)
+	if !got.capacityShed {
+		t.Fatalf("capacityShed = false, want true for shed payload")
+	}
+	if !got.penalize {
+		t.Fatalf("penalize = false, want true (帧缓冲/透明重试依赖它)")
+	}
+
+	// 普通 500 不是降载。
+	server := []byte(`{"type":"response.failed","response":{"status":"failed","error":{"code":"internal_error","status_code":500}}}`)
+	if classifyResponseFailedOutcome(server).capacityShed {
+		t.Fatalf("capacityShed = true for generic 500, want false")
+	}
+
+	// 逃生阀:整体退回旧行为。
+	t.Setenv("CODEX_DISABLE_CAPACITY_SHED_HANDLING", "1")
+	if classifyResponseFailedOutcome(shed).capacityShed {
+		t.Fatalf("capacityShed = true when disabled by env, want false")
+	}
+	if !classifyResponseFailedOutcome(shed).penalize {
+		t.Fatalf("penalize = false when disabled, want true (旧行为仍换号重试)")
+	}
+}
+
+// 容量降载先在同账号退避重试 maxCapacityShedSameAccountRetries 次（保留亲和），耗尽后换号；
+// 非降载故障一律不保留亲和。预算按账号独立计（map 语义）。
+func TestCapacityShedRetainsAffinity(t *testing.T) {
+	shed := streamOutcome{capacityShed: true, penalize: true}
+	for i := 0; i < maxCapacityShedSameAccountRetries; i++ {
+		if !capacityShedRetainsAffinity(shed, i) {
+			t.Fatalf("retriesSoFar=%d: want retain affinity", i)
+		}
+	}
+	if capacityShedRetainsAffinity(shed, maxCapacityShedSameAccountRetries) {
+		t.Fatalf("retriesSoFar=%d: want switch (budget exhausted)", maxCapacityShedSameAccountRetries)
+	}
+	nonShed := streamOutcome{capacityShed: false, penalize: true}
+	if capacityShedRetainsAffinity(nonShed, 0) {
+		t.Fatalf("non-shed outcome should never retain affinity")
+	}
+
+	// 按账号独立预算：账号 A 用满后换到账号 B，B 从 0 起仍有自己的退避预算。
+	retries := map[int64]int{}
+	const accountA, accountB = int64(11), int64(22)
+	for capacityShedRetainsAffinity(shed, retries[accountA]) {
+		retries[accountA]++
+	}
+	if retries[accountA] != maxCapacityShedSameAccountRetries {
+		t.Fatalf("accountA budget = %d, want %d", retries[accountA], maxCapacityShedSameAccountRetries)
+	}
+	if !capacityShedRetainsAffinity(shed, retries[accountB]) {
+		t.Fatalf("accountB should have its own fresh budget, not inherit A's exhaustion")
+	}
+}
+
+// 预算耗尽后必须软排除该账号：降载不惩罚健康度，仅解绑亲和不足以换号，软排除才能
+// 让调度选到兄弟账号，池试完后 ResetSoft 清空不会永久搁置。
+func TestCapacityShedExhaustionSoftExcludes(t *testing.T) {
+	ex := newRetryAccountExclusions()
+	ex.MarkSoft(11)
+	if sel := ex.ForSelection(); !sel[11] {
+		t.Fatalf("MarkSoft(11) should exclude account 11 from selection")
+	}
+	if !ex.ResetSoft() {
+		t.Fatalf("ResetSoft should report it cleared a soft entry")
+	}
+	if sel := ex.ForSelection(); sel[11] {
+		t.Fatalf("ResetSoft should clear soft exclusion of 11")
+	}
+	// 软排除不得覆盖硬排除。
+	ex.MarkHard(33)
+	ex.MarkSoft(33)
+	ex.ResetSoft()
+	if sel := ex.ForSelection(); !sel[33] {
+		t.Fatalf("hard exclusion of 33 must survive ResetSoft")
+	}
+}
+
 // 只有降载码（server_is_overloaded/slow_down）被改写为客户端可重试的 server_error，
 // 其余错误码（尤其 rate_limit_exceeded，客户端依赖其原码解析重试延时）必须原样保留；
 // 错误消息一律不动。

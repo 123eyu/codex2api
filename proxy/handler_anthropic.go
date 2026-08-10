@@ -201,6 +201,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 	}()
 
+	capacityShedRetries := map[int64]int{}
 	for attempt := 0; ; attempt++ {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
@@ -670,11 +671,11 @@ func (h *Handler) Messages(c *gin.Context) {
 			if isFirstTokenTimeoutOutcome(outcome) {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 			} else {
-				h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 			}
 			resp.Body.Close()
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			h.unbindOrRetainAffinityForCapacityShed(retryExclusions, affinityKey, account, outcome, capacityShedRetries)
 			continue
 		}
 
@@ -758,7 +759,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		SyncCodexUsageState(h.store, account, resp)
 		if outcome.penalize {
 			recyclePooledClient(account, proxyURL)
-			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 		} else if outcome.logStatusCode == http.StatusOK {
 			h.store.ClearModelCooldown(account, attemptEffectiveModel)

@@ -817,7 +817,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		}, promptPolicyIncidentID)
 		resp.Body.Close()
 		if !isFirstTokenTimeoutOutcome(outcome) {
-			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)
 		h.store.UnbindSessionAffinity(affinityKey, account.ID())
@@ -879,7 +879,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	resp.Body.Close()
 	if outcome.penalize {
 		recyclePooledClient(account, proxyURL)
-		h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+		h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 		h.store.UnbindSessionAffinity(affinityKey, account.ID())
 	} else if outcome.logStatusCode == http.StatusOK {
 		h.store.ClearModelCooldown(account, effectiveModel)
