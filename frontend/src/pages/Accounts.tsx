@@ -42,6 +42,7 @@ import type {
   AccountListSummary,
   AccountEmailDomainFacet,
   AccountOperationSelector,
+  AccountPageStatsItem,
 } from "../types";
 import { getErrorMessage } from "../utils/error";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
@@ -1763,9 +1764,28 @@ export default function Accounts() {
       account.detail_loaded ? Promise.resolve(account) : api.getAccount(account.id),
     [],
   );
+  // page-stats 存独立 state 并在渲染时合并:分页基础行不含成本/用量明细,
+  // 若把 stats 写回 data.accounts,任何静默列表刷新都会用基础行整体覆盖,
+  // 成本列在 ID 不变时永久变 "-" (issue #499)。
+  const [accountPageStats, setAccountPageStats] = useState<Record<string, AccountPageStatsItem>>({});
   // Codex 视图的统计卡/额度分布/列表/批量操作一律排除 Grok 账号
   // （Grok 账号由顶部切换后的 Grok 页单独统计与管理）。
-  const allAccounts = data.accounts;
+  const allAccounts = useMemo(
+    () =>
+      data.accounts.map((account) => {
+        const stats = accountPageStats[String(account.id)];
+        if (!stats) return account;
+        // 行自身已带的字段优先(如 refreshAccountRow 拉回的完整详情比
+        // 本页 stats 快照更新),page-stats 只补基础行缺失的部分。
+        const merged = { ...account };
+        if (merged.billed_5h == null && stats.billed_5h != null) merged.billed_5h = stats.billed_5h;
+        if (merged.billed_7d == null && stats.billed_7d != null) merged.billed_7d = stats.billed_7d;
+        if (!merged.usage_5h_detail && stats.usage_5h_detail) merged.usage_5h_detail = stats.usage_5h_detail;
+        if (!merged.usage_7d_detail && stats.usage_7d_detail) merged.usage_7d_detail = stats.usage_7d_detail;
+        return merged;
+      }),
+    [data.accounts, accountPageStats],
+  );
   const accounts = useMemo(
     () => allAccounts.filter((account) => !account.grok_api),
     [allAccounts],
@@ -1795,19 +1815,16 @@ export default function Accounts() {
   }, [accountPageIDsKey]);
 
   useEffect(() => {
-    if (!accountPageIDsKey) return undefined;
+    if (!accountPageIDsKey) {
+      setAccountPageStats({});
+      return undefined;
+    }
     const controller = new AbortController();
     const ids = accountPageIDsKey.split(",").map(Number);
     void api.getAccountPageStats(ids, controller.signal)
       .then((response) => {
         if (controller.signal.aborted) return;
-        setData((current) => ({
-          ...current,
-          accounts: current.accounts.map((account) => {
-            const stats = response.stats[String(account.id)];
-            return stats ? { ...account, ...stats } : account;
-          }),
-        }));
+        setAccountPageStats(response.stats ?? {});
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
@@ -1815,7 +1832,7 @@ export default function Accounts() {
         console.warn("account page stats load failed:", err);
       });
     return () => controller.abort();
-  }, [accountPageIDsKey, setData]);
+  }, [accountPageIDsKey]);
   const usageReloadAttemptsRef = useRef<Map<number, number>>(new Map());
   // 测试连接后需要强制刷新用量的账号 id：即使其用量数据已存在（如已显示 100%），
   // 也要在后台探针跑完后重新拉取，确保进度条更新为最新值。
