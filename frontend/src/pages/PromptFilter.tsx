@@ -16,7 +16,7 @@ import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
 import { getPromptFilterScoreBand, normalizePromptFilterScore } from '../lib/promptFilterScore'
 import { parseAdvancedConfigDocument, patchAdvancedConfigDocument, readAdvancedConfigPath } from '../types'
-import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings } from '../types'
+import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -206,7 +206,7 @@ type PromptGuardEditorConfig = Omit<PromptGuardConfig, 'performance'>
 
 type AdvancedProtectionConfig = {
   guard: PromptGuardEditorConfig
-  enforcement: { terminal_categories: string[]; terminal_bypass_models: string[]; conversation_lock_enabled: boolean; cyb_strike_enabled: boolean }
+  enforcement: { terminal_categories: string[]; terminal_bypass_models: string[]; conversation_lock_enabled: boolean; conversation_lock_ttl_hours: number; cyb_strike_enabled: boolean }
   normalization: {
     enabled: boolean
     decode_url: boolean
@@ -297,7 +297,7 @@ const defaultPromptGuard: PromptGuardEditorConfig = {
 
 const defaultAdvancedProtection: AdvancedProtectionConfig = {
   guard: defaultPromptGuard,
-  enforcement: { terminal_categories: [], terminal_bypass_models: ['codex-auto-review'], conversation_lock_enabled: true, cyb_strike_enabled: false },
+  enforcement: { terminal_categories: [], terminal_bypass_models: ['codex-auto-review'], conversation_lock_enabled: true, conversation_lock_ttl_hours: 168, cyb_strike_enabled: false },
   normalization: {
     enabled: true,
     decode_url: true,
@@ -396,6 +396,9 @@ function parseAdvancedProtection(value: AdvancedConfigObject): AdvancedProtectio
       conversation_lock_enabled: typeof enforcement.conversation_lock_enabled === 'boolean'
         ? enforcement.conversation_lock_enabled
         : defaultAdvancedProtection.enforcement.conversation_lock_enabled,
+      conversation_lock_ttl_hours: typeof enforcement.conversation_lock_ttl_hours === 'number' && enforcement.conversation_lock_ttl_hours > 0
+        ? enforcement.conversation_lock_ttl_hours
+        : defaultAdvancedProtection.enforcement.conversation_lock_ttl_hours,
       cyb_strike_enabled: typeof enforcement.cyb_strike_enabled === 'boolean'
         ? enforcement.cyb_strike_enabled
         : defaultAdvancedProtection.enforcement.cyb_strike_enabled,
@@ -1172,6 +1175,7 @@ function AdvancedProtectionEditor({
             <CompactField label={t('promptFilter.terminalBypassModels')} hint={t('promptFilter.help.terminalBypassModels')}><Input value={terminalBypassModelsText} placeholder="codex-auto-review" onChange={(e) => update('enforcement', { terminal_bypass_models: e.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} /></CompactField>
             <p className="text-[11px] leading-relaxed text-muted-foreground">{t('promptFilter.terminalBypassModelsHint')}</p>
             <SwitchField label={t('promptFilter.conversationLockEnabled')} hint={t('promptFilter.help.conversationLockEnabled')} checked={config.enforcement.conversation_lock_enabled} onCheckedChange={(next) => update('enforcement', { conversation_lock_enabled: next })} />
+            {config.enforcement.conversation_lock_enabled ? <CompactField label={t('promptFilter.conversationLockTTL')} hint={t('promptFilter.help.conversationLockTTL')}><DraftNumberInput min={1} max={720} value={config.enforcement.conversation_lock_ttl_hours} onValueChange={(next) => update('enforcement', { conversation_lock_ttl_hours: next })} /></CompactField> : null}
             <SwitchField label={t('promptFilter.cybStrikeEnabled')} hint={t('promptFilter.help.cybStrikeEnabled')} checked={config.enforcement.cyb_strike_enabled} onCheckedChange={(next) => update('enforcement', { cyb_strike_enabled: next })} />
           </div>
         </details>
@@ -3541,6 +3545,10 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
   const [reviewError, setReviewError] = useState<string | null>(null)
   const [incidentError, setIncidentError] = useState<string | null>(null)
   const [clearingSection, setClearingSection] = useState<PromptLogClearSection | null>(null)
+  const [auditHealth, setAuditHealth] = useState<PromptPolicyAuditHealth | null>(null)
+  const [auditHealthOpen, setAuditHealthOpen] = useState(false)
+  const [auditHealthLoading, setAuditHealthLoading] = useState(false)
+  const [auditHealthError, setAuditHealthError] = useState<string | null>(null)
 
   const loadLocalLogs = useCallback(async () => {
     setLocalLoading(true)
@@ -3627,6 +3635,19 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
     await Promise.all([loadIncidents(), loadReviewLogs(), loadLocalLogs()])
   }, [loadIncidents, loadLocalLogs, loadReviewLogs])
 
+  const showAuditHealth = async () => {
+    setAuditHealthOpen(true)
+    setAuditHealthLoading(true)
+    setAuditHealthError(null)
+    try {
+      setAuditHealth(await api.getPromptPolicyAuditHealth())
+    } catch (err) {
+      setAuditHealthError(getErrorMessage(err))
+    } finally {
+      setAuditHealthLoading(false)
+    }
+  }
+
   const clearLogSection = async (section: PromptLogClearSection) => {
     setClearingSection(section)
     try {
@@ -3693,6 +3714,10 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
                 <p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.sectionRefreshHint')}</p>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={() => void showAuditHealth()} disabled={auditHealthLoading}>
+                  <Activity className="size-3.5" />
+                  {t('promptFilter.auditHealth.action')}
+                </Button>
                 <Button size="sm" variant="outline" onClick={() => void loadIncidents()} disabled={incidentLoading || clearingSection !== null}>
                   <RefreshCw className="size-3.5" />
                   {t('common.refresh')}
@@ -3781,7 +3806,82 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
           </section>
         </div>
       </CardContent>
+      <Dialog open={auditHealthOpen} onOpenChange={setAuditHealthOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{t('promptFilter.auditHealth.title')}</DialogTitle>
+            <DialogDescription>{t('promptFilter.auditHealth.description')}</DialogDescription>
+          </DialogHeader>
+          {auditHealthLoading ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">{t('common.loading')}</div>
+          ) : auditHealthError ? (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{auditHealthError}</div>
+          ) : auditHealth ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={auditHealth.ok ? 'default' : 'destructive'}>
+                  {auditHealth.ok ? t('promptFilter.auditHealth.healthy') : t('promptFilter.auditHealth.degraded')}
+                </Badge>
+                <span className="text-sm text-muted-foreground">{t('promptFilter.auditHealth.incidentCount', { count: auditHealth.incident_count })}</span>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <AuditHealthFlag label={t('promptFilter.auditHealth.storage')} enabled={auditHealth.storage_ready} />
+                <AuditHealthFlag label={t('promptFilter.auditHealth.promptFilter')} enabled={auditHealth.prompt_filter_enabled} />
+                <AuditHealthFlag label={t('promptFilter.auditHealth.modelReview')} enabled={auditHealth.review_enabled} />
+                <AuditHealthFlag label={t('promptFilter.auditHealth.conversationLock')} enabled={auditHealth.conversation_lock_enabled} />
+                <AuditHealthMetric label={t('promptFilter.auditHealth.reviewKeys')} value={`${auditHealth.review_pool.available} / ${auditHealth.review_pool.configured}`} danger={auditHealth.review_pool.available === 0} />
+                <AuditHealthMetric label={t('promptFilter.auditHealth.queuePending')} value={auditHealth.queue.pending_high + auditHealth.queue.pending_low} />
+                <AuditHealthMetric label={t('promptFilter.auditHealth.queueFailures')} value={auditHealth.queue.failed + auditHealth.queue.dropped_high} danger={auditHealth.queue.failed + auditHealth.queue.dropped_high > 0} />
+              </div>
+              <div className={cn('rounded-lg border p-3 text-sm', auditHealth.review_pool.available === 0 && 'border-amber-500/40 bg-amber-500/5')}>
+                <div className="font-medium">{auditHealth.review_fail_closed ? t('promptFilter.auditHealth.fallbackBlock') : t('promptFilter.auditHealth.fallbackLocal')}</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {t('promptFilter.auditHealth.reviewPoolDetail', { cooling: auditHealth.review_pool.cooling_down, probing: auditHealth.review_pool.probing })}
+                  {auditHealth.review_pool.next_retry_at ? ` · ${t('promptFilter.auditHealth.nextRetry', { time: formatBeijingTime(auditHealth.review_pool.next_retry_at) })}` : ''}
+                </div>
+              </div>
+              {auditHealth.latest_incident_id ? (
+                <div className="rounded-lg border p-3 text-sm">
+                  <div className="text-xs text-muted-foreground">{t('promptFilter.auditHealth.latestIncident')}</div>
+                  <div className="mt-1 break-all font-mono text-xs">{auditHealth.latest_incident_id}</div>
+                  {auditHealth.latest_incident_at ? <div className="mt-1 text-xs text-muted-foreground">{formatBeijingTime(auditHealth.latest_incident_at)}</div> : null}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">{t('promptFilter.auditHealth.noIncident')}</div>
+              )}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAuditHealthOpen(false)}>{t('common.close')}</Button>
+            <Button onClick={() => void showAuditHealth()} disabled={auditHealthLoading}>
+              <RefreshCw className="size-4" />
+              {t('common.refresh')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
+  )
+}
+
+function AuditHealthFlag({ label, enabled }: { label: string; enabled: boolean }) {
+  const { t } = useTranslation()
+  return (
+    <div className="rounded-lg border p-3">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className={cn('mt-1 text-sm font-medium', enabled ? 'text-emerald-600' : 'text-destructive')}>
+        {enabled ? t('common.enabled') : t('common.disabled')}
+      </div>
+    </div>
+  )
+}
+
+function AuditHealthMetric({ label, value, danger = false }: { label: string; value: ReactNode; danger?: boolean }) {
+  return (
+    <div className="rounded-lg border p-3">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className={cn('mt-1 text-sm font-semibold', danger && 'text-destructive')}>{value}</div>
+    </div>
   )
 }
 
@@ -4904,6 +5004,17 @@ function formatPromptPolicyScore(value: number | null | undefined, unscored: str
   return value === null || value === undefined ? unscored : String(value)
 }
 
+function promptFilterDecisionSource(log: PromptFilterLog): 'model' | 'local' | 'combined' | 'conversation' | null {
+  if (log.action !== 'block' && log.action !== 'warn') return null
+  if (log.reason_code === 'conversation_cyber_locked') return 'conversation'
+  const model = Boolean(log.reviewed && log.review_flagged)
+  const local = log.score > 0 || parseLogMatches(log.matched_patterns).length > 0
+  if (model && local) return 'combined'
+  if (model) return 'model'
+  if (local) return 'local'
+  return null
+}
+
 function PromptReviewLogsTable({ logs }: { logs: PromptFilterLog[] }) {
   const { t } = useTranslation()
   return (
@@ -4957,7 +5068,10 @@ function PromptReviewLogsTable({ logs }: { logs: PromptFilterLog[] }) {
                   {log.review_reason ? <p className="mt-2 text-xs leading-5">{log.review_reason}</p> : null}
                   {log.review_error ? <p className="mt-2 break-words text-xs leading-5 text-destructive">{log.review_error}</p> : null}
                 </TableCell>
-                <TableCell className="align-top"><ActionBadge action={log.action} /></TableCell>
+                <TableCell className="align-top">
+                  <ActionBadge action={log.action} />
+                  {promptFilterDecisionSource(log) ? <div className="mt-1 text-[11px] font-medium text-muted-foreground">{t(`promptFilter.decisionSource.${promptFilterDecisionSource(log)}`)}</div> : null}
+                </TableCell>
                 <TableCell className="align-top text-xs">
                   <div>{log.api_key_name || log.api_key_masked || (log.api_key_id ? `#${log.api_key_id}` : '-')}</div>
                   {log.newapi_user_id ? <div className="mt-1 truncate text-muted-foreground" title={log.newapi_user_id}>{t('promptFilter.newapiUser')} {log.newapi_user_id}</div> : null}
@@ -5283,6 +5397,7 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
     auxiliaryOrigin
   const auditScore = typeof log.audit_score === 'number' ? log.audit_score : undefined
   const apiKeyLabel = log.api_key_name || log.api_key_masked || '-'
+  const decisionSource = promptFilterDecisionSource(log)
   return (
     <>
     <TableRow>
@@ -5294,6 +5409,7 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
         <div className="min-w-0 rounded-lg border border-border/70 bg-muted/20 p-2">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             <ActionBadge action={log.action} />
+            {decisionSource ? <Badge variant="outline" className="max-w-full text-[10px]" title={t(`promptFilter.decisionSource.${decisionSource}`)}>{t(`promptFilter.decisionSource.${decisionSource}`)}</Badge> : null}
             {log.policy_profile ? (
               <span className="min-w-0 truncate text-[11px] font-semibold text-muted-foreground" title={policyProfileLabel}>
                 {policyProfileLabel}

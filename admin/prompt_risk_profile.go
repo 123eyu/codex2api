@@ -224,11 +224,16 @@ func (h *Handler) attachPromptConversationLocks(ctx context.Context, profiles []
 	if h == nil || h.db == nil {
 		return
 	}
+	lockTTL := time.Duration(promptfilter.DefaultAdvancedConfig().Enforcement.ConversationLockTTLHours) * time.Hour
+	if h.store != nil {
+		cfg := h.store.GetPromptFilterConfig()
+		lockTTL = time.Duration(promptfilter.NormalizeAdvancedConfig(cfg.Advanced).Enforcement.ConversationLockTTLHours) * time.Hour
+	}
 	for _, profile := range profiles {
 		if profile == nil || profile.SubjectType != database.PromptRiskSubjectSession || strings.TrimSpace(profile.SubjectKey) == "" {
 			continue
 		}
-		item, err := h.db.GetActivePromptConversationLockBySessionHash(ctx, profile.SubjectKey)
+		item, err := h.db.GetActivePromptConversationLockBySessionHashWithTTL(ctx, profile.SubjectKey, lockTTL)
 		if err == nil {
 			profile.ConversationLock = item
 		}

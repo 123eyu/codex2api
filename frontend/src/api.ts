@@ -62,6 +62,7 @@ import type {
   PromptFilterLog,
   PromptFilterLogsResponse,
 	PromptPolicyIncidentDetailResponse,
+	PromptPolicyAuditHealth,
 	PromptPolicyIncidentsResponse,
   PromptFilterNewAPIBinding,
   PromptFilterNewAPIBindingsResponse,
@@ -1051,6 +1052,8 @@ export const api = {
 	},
 	getPromptPolicyIncident: (incidentId: string) =>
 		request<PromptPolicyIncidentDetailResponse>(`/prompt-policy/incidents/${encodeURIComponent(incidentId)}`),
+	getPromptPolicyAuditHealth: () =>
+		request<PromptPolicyAuditHealth>('/prompt-policy/incidents/health'),
 	clearPromptPolicyIncidents: () =>
 		request<MessageResponse>('/prompt-policy/incidents', { method: 'DELETE' }),
 	getPromptRiskProfiles: (params: { page?: number; pageSize?: number; subjectType?: string; platform?: string; riskLevel?: string; apiKeyId?: string; accountId?: string; minScore?: string; q?: string } = {}) => {

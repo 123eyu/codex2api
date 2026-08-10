@@ -1430,6 +1430,36 @@ export interface PromptPolicyIncidentsResponse {
 	page_size: number
 }
 
+export interface PromptPolicyAuditHealth {
+	ok: boolean
+	status: 'healthy' | 'degraded' | string
+	storage_ready: boolean
+	prompt_filter_enabled: boolean
+	review_enabled: boolean
+	review_fail_closed: boolean
+	review_pool: {
+		configured: number
+		available: number
+		cooling_down: number
+		probing: number
+		next_retry_at?: ISODateString
+	}
+	conversation_lock_enabled: boolean
+	incident_count: number
+	latest_incident_id?: string
+	latest_incident_at?: ISODateString
+	queue: {
+		enqueued: number
+		completed: number
+		dropped_high: number
+		dropped_low: number
+		failed: number
+		pending_high: number
+		pending_low: number
+		retained_bytes: number
+	}
+}
+
 export interface PromptPolicyIncidentDetailResponse {
 	incident: PromptPolicyIncident
 	matches: PromptFilterMatch[]
