@@ -322,9 +322,9 @@ function GrokPlanBadge({
     );
   }
   const tone = plan.paid
-    ? "bg-amber-50 text-amber-800 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-400/20"
+    ? "bg-amber-500/10 text-amber-700 ring-amber-600/20 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/20"
     : plan.key === "free"
-      ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-400/20"
+      ? "bg-emerald-500/10 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-400/20"
       : "bg-muted text-muted-foreground ring-border";
   return (
     <span
@@ -2596,7 +2596,7 @@ export default function GrokAccounts({
                         className="flex items-start gap-1.5 text-xs"
                       >
                         {item.ok ? (
-                          <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-emerald-500" />
+                          <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-[hsl(var(--success))]" />
                         ) : (
                           <XCircle className="mt-0.5 size-3.5 shrink-0 text-destructive" />
                         )}
@@ -3120,7 +3120,7 @@ export default function GrokAccounts({
               {importResult.items.map((item, index) => (
                 <div key={index} className="flex items-start gap-1.5 text-xs">
                   {item.ok ? (
-                    <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-emerald-500" />
+                    <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-[hsl(var(--success))]" />
                   ) : (
                     <XCircle className="mt-0.5 size-3.5 shrink-0 text-destructive" />
                   )}
@@ -3505,7 +3505,7 @@ function GrokAccountCard({
 
         {/* Meta badges */}
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="inline-flex items-center gap-0.5 rounded-md bg-zinc-900 px-1.5 py-0.5 text-[10px] font-medium text-white ring-1 ring-inset ring-zinc-700 dark:bg-white dark:text-zinc-900 dark:ring-zinc-300">
+          <span className="inline-flex items-center gap-0.5 rounded-md bg-muted/60 px-1.5 py-0.5 text-[10px] font-medium text-foreground ring-1 ring-inset ring-border">
             <Sparkles className="size-2.5" />
             Grok
           </span>
@@ -3513,8 +3513,8 @@ function GrokAccountCard({
             className={cn(
               "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset",
               isOAuth
-                ? "bg-violet-50 text-violet-700 ring-violet-600/20 dark:bg-violet-950 dark:text-violet-300 dark:ring-violet-400/20"
-                : "bg-sky-50 text-sky-700 ring-sky-600/20 dark:bg-sky-950 dark:text-sky-300 dark:ring-sky-400/20",
+                ? "bg-violet-500/10 text-violet-700 ring-violet-600/20 dark:bg-violet-500/20 dark:text-violet-300 dark:ring-violet-400/20"
+                : "bg-sky-500/10 text-sky-700 ring-sky-600/20 dark:bg-sky-500/20 dark:text-sky-300 dark:ring-sky-400/20",
             )}
           >
             {isOAuth ? (
@@ -3533,7 +3533,7 @@ function GrokAccountCard({
             emptyLabel={t("accounts.groupQuickEdit")}
           />
           {disabled ? (
-            <span className="inline-flex items-center rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-300">
+            <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-border">
               <PowerOff className="mr-0.5 size-2.5" />
               {t("accounts.disabled")}
             </span>
@@ -3800,8 +3800,8 @@ function GrokAccountTableRow({
                 className={cn(
                   "inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset",
                   isOAuth
-                    ? "bg-violet-50 text-violet-700 ring-violet-600/20 dark:bg-violet-950 dark:text-violet-300 dark:ring-violet-400/20"
-                    : "bg-sky-50 text-sky-700 ring-sky-600/20 dark:bg-sky-950 dark:text-sky-300 dark:ring-sky-400/20",
+                    ? "bg-violet-500/10 text-violet-700 ring-violet-600/20 dark:bg-violet-500/20 dark:text-violet-300 dark:ring-violet-400/20"
+                    : "bg-sky-500/10 text-sky-700 ring-sky-600/20 dark:bg-sky-500/20 dark:text-sky-300 dark:ring-sky-400/20",
                 )}
                 title={t("grok.authKind")}
               >
@@ -3848,11 +3848,11 @@ function GrokAccountTableRow({
       <TableCell>
         <div className="space-y-0.5 text-[13px]">
           <div className="flex items-center gap-1.5 whitespace-nowrap">
-            <span className="font-medium tabular-nums text-emerald-600 dark:text-emerald-400">
+            <span className="font-medium tabular-nums text-[hsl(var(--success))]">
               {account.success_requests ?? 0}
             </span>
             <span className="text-muted-foreground">/</span>
-            <span className="font-medium tabular-nums text-red-500 dark:text-red-400">
+            <span className="font-medium tabular-nums text-destructive">
               {account.error_requests ?? 0}
             </span>
           </div>
@@ -4221,21 +4221,21 @@ function GrokUsageCell({
 }
 
 function grokUsageBarColor(pct: number): string {
-  if (pct >= 90) return "bg-red-500";
-  if (pct >= 70) return "bg-amber-500";
-  return "bg-emerald-500";
+  if (pct >= 90) return "bg-destructive";
+  if (pct >= 70) return "bg-[hsl(var(--warning))]";
+  return "bg-[hsl(var(--success))]";
 }
 
 function grokUsageTrackColor(pct: number): string {
-  if (pct >= 90) return "bg-red-500/15";
-  if (pct >= 70) return "bg-amber-500/15";
-  return "bg-emerald-500/15";
+  if (pct >= 90) return "bg-destructive/15";
+  if (pct >= 70) return "bg-[hsl(var(--warning))]/15";
+  return "bg-[hsl(var(--success))]/15";
 }
 
 function grokUsageTextColor(pct: number): string {
-  if (pct >= 90) return "text-red-600 dark:text-red-400";
-  if (pct >= 70) return "text-amber-700 dark:text-amber-400";
-  return "text-emerald-700 dark:text-emerald-400";
+  if (pct >= 90) return "text-destructive";
+  if (pct >= 70) return "text-[hsl(var(--warning))]";
+  return "text-[hsl(var(--success))]";
 }
 
 function grokFormatResetAt(
@@ -4586,9 +4586,9 @@ function GrokTestConnectionModal({
   const statusIconSpin = status === "connecting" || status === "streaming";
   const statusColor = {
     connecting: "text-muted-foreground",
-    streaming: "text-blue-500",
-    success: "text-emerald-500",
-    error: "text-red-500",
+    streaming: "text-[hsl(var(--info))]",
+    success: "text-[hsl(var(--success))]",
+    error: "text-destructive",
   }[status];
 
   return (
@@ -4660,7 +4660,7 @@ function GrokTestConnectionModal({
         )}
 
         {status === "error" && errorMsg ? (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
             {errorMsg}
           </div>
         ) : null}
@@ -4687,19 +4687,19 @@ function CompactStat({
   const toneStyle = {
     neutral: {
       chip: "bg-muted text-muted-foreground",
-      dot: "bg-slate-500",
+      dot: "bg-muted-foreground",
     },
     success: {
-      chip: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-      dot: "bg-emerald-500",
+      chip: "bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]",
+      dot: "bg-[hsl(var(--success))]",
     },
     warning: {
-      chip: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
-      dot: "bg-amber-500",
+      chip: "bg-[hsl(var(--warning-bg))] text-[hsl(var(--warning))]",
+      dot: "bg-[hsl(var(--warning))]",
     },
     danger: {
-      chip: "bg-red-500/10 text-red-700 dark:text-red-300",
-      dot: "bg-red-500",
+      chip: "bg-destructive/10 text-destructive",
+      dot: "bg-destructive",
     },
   }[tone];
 
