@@ -6140,13 +6140,13 @@ export default function Accounts() {
                               <TableCell>
                                 <div className="space-y-0.5 text-[13px]">
                                   <div className="flex items-center gap-2">
-                                    <span className="text-emerald-600 font-medium">
+                                    <span className="font-medium tabular-nums text-emerald-600 dark:text-emerald-400">
                                       {account.success_requests ?? 0}
                                     </span>
                                     <span className="text-muted-foreground">
                                       /
                                     </span>
-                                    <span className="text-red-500 font-medium">
+                                    <span className="font-medium tabular-nums text-red-500 dark:text-red-400">
                                       {account.error_requests ?? 0}
                                     </span>
                                   </div>

@@ -2604,11 +2604,11 @@ export default function Usage() {
                       {visibleColumns.userAgent && <TableHead className={usageTableHeadClass}>{t('usage.tableUserAgent')}</TableHead>}
                       {visibleColumns.endpoint && <TableHead className={usageTableHeadClass}>{t('usage.tableEndpoint')}</TableHead>}
                       {visibleColumns.type && <TableHead className={usageTableHeadClass}>{t('usage.tableType')}</TableHead>}
-                      {visibleColumns.token && <TableHead className={usageTableHeadClass}>{t('usage.tableToken')}</TableHead>}
-                      {visibleColumns.cached && <TableHead className={usageTableHeadClass}>{t('usage.tableCached')}</TableHead>}
-                      {visibleColumns.wsAcquire && <TableHead className={usageTableHeadClass}><span title={t('usage.wsAcquireTooltip')} className="cursor-help underline decoration-dotted underline-offset-2">{t('usage.tableWsAcquire')}</span></TableHead>}
+                      {visibleColumns.token && <TableHead className={`${usageTableHeadClass} text-right`}>{t('usage.tableToken')}</TableHead>}
+                      {visibleColumns.cached && <TableHead className={`${usageTableHeadClass} text-right`}>{t('usage.tableCached')}</TableHead>}
+                      {visibleColumns.wsAcquire && <TableHead className={`${usageTableHeadClass} text-right`}><span title={t('usage.wsAcquireTooltip')} className="cursor-help underline decoration-dotted underline-offset-2">{t('usage.tableWsAcquire')}</span></TableHead>}
                       {visibleColumns.timing && (
-                        <TableHead className={usageTableHeadClass}>
+                        <TableHead className={`${usageTableHeadClass} text-right`}>
                           <span
                             title={t('usage.tableTimingHint')}
                             className="cursor-help underline decoration-dotted underline-offset-2"
@@ -2618,7 +2618,7 @@ export default function Usage() {
                         </TableHead>
                       )}
                       {visibleColumns.tokensPerSec && (
-                        <TableHead className={usageTableHeadClass}>
+                        <TableHead className={`${usageTableHeadClass} text-right`}>
                           <span
                             title={t('usage.tableTokensPerSecHint')}
                             className="cursor-help underline decoration-dotted underline-offset-2"
@@ -2627,8 +2627,8 @@ export default function Usage() {
                           </span>
                         </TableHead>
                       )}
-                      {visibleColumns.cost && <TableHead className={usageTableHeadClass}>{t('usage.tableCost')}</TableHead>}
-                      {visibleColumns.time && <TableHead className={usageTableHeadClass}>{t('usage.tableTime')}</TableHead>}
+                      {visibleColumns.cost && <TableHead className={`${usageTableHeadClass} text-right`}>{t('usage.tableCost')}</TableHead>}
+                      {visibleColumns.time && <TableHead className={`${usageTableHeadClass} text-right`}>{t('usage.tableTime')}</TableHead>}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -2739,7 +2739,7 @@ export default function Usage() {
                             <InternalRequestBadge log={log} />
                           </div>
                         </TableCell>}
-                        {visibleColumns.token && <TableCell>
+                        {visibleColumns.token && <TableCell className="text-right">
                           {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
                             <div className={`${usageTableMonoClass} leading-relaxed`}>
                               <span className="text-blue-500">↓{formatTokens(log.input_tokens, true)}</span>
@@ -2756,7 +2756,7 @@ export default function Usage() {
                             <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
                           )}
                         </TableCell>}
-                        {visibleColumns.cached && <TableCell>
+                        {visibleColumns.cached && <TableCell className="text-right">
                           {log.cached_tokens > 0 ? (
                             <Badge variant="outline" className={`${usageTableBadgeClass} gap-1 border-transparent bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400`}>
                               <DatabaseZap className="size-3.5" />
@@ -2766,7 +2766,7 @@ export default function Usage() {
                             <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
                           )}
                         </TableCell>}
-                        {visibleColumns.wsAcquire && <TableCell>
+                        {visibleColumns.wsAcquire && <TableCell className="text-right">
                           {(log.ws_acquire_ms ?? 0) > 0 ? (
                             <span
                               className={`${usageTableMonoClass} ${(log.ws_acquire_ms as number) > 5000 ? 'text-red-500' : (log.ws_acquire_ms as number) > 1000 ? 'text-amber-500' : 'text-muted-foreground'}`}
@@ -2777,19 +2777,19 @@ export default function Usage() {
                           ) : <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>}
                         </TableCell>}
                         {visibleColumns.timing && (
-                          <TableCell>
+                          <TableCell className="text-right">
                             <TimingCell log={log} />
                           </TableCell>
                         )}
                         {visibleColumns.tokensPerSec && (
-                          <TableCell>
+                          <TableCell className="text-right">
                             <TokensPerSecCell log={log} />
                           </TableCell>
                         )}
-                        {visibleColumns.cost && <TableCell>
+                        {visibleColumns.cost && <TableCell className="text-right">
                           <UsageCostCell log={log} />
                         </TableCell>}
-                        {visibleColumns.time && <TableCell className={`${usageTableMonoClass} text-muted-foreground whitespace-nowrap`}>
+                        {visibleColumns.time && <TableCell className={`${usageTableMonoClass} text-right text-muted-foreground whitespace-nowrap`}>
                           {formatBeijingTime(log.created_at)}
                         </TableCell>}
                       </TableRow>

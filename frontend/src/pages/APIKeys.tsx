@@ -1575,7 +1575,7 @@ export default function APIKeys() {
                                 </TableCell>
                                 <TableCell className="min-w-[160px] text-sm text-muted-foreground">
                                   <div className="space-y-1">
-                                    <div className="font-medium text-foreground">
+                                    <div className="font-medium tabular-nums text-foreground">
                                       {formatQuotaLimit(keyRow, t)}
                                     </div>
                                     {keyRow.quota_limit > 0 ? (
