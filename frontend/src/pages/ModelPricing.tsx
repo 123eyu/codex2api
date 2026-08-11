@@ -19,6 +19,7 @@ import { api } from '@/api'
 import ModelLogo from '../components/ModelLogo'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
+import { StatTile } from '../components/StatTile'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
@@ -33,60 +34,28 @@ type FieldDef = {
   key: keyof ModelPricingOverride
   labelKey: string
   shortKey: string
-  tone: 'sky' | 'cyan' | 'violet' | 'amber' | 'orange' | 'emerald' | 'teal'
+  tone: 'neutral' | 'accent'
 }
 
 const PRIMARY_FIELDS: FieldDef[] = [
-  { key: 'input', labelKey: 'settings.pricing.input', shortKey: 'settings.pricing.shortInput', tone: 'sky' },
-  { key: 'cached_input', labelKey: 'settings.pricing.cached', shortKey: 'settings.pricing.shortCached', tone: 'cyan' },
-  { key: 'output', labelKey: 'settings.pricing.output', shortKey: 'settings.pricing.shortOutput', tone: 'violet' },
+  { key: 'input', labelKey: 'settings.pricing.input', shortKey: 'settings.pricing.shortInput', tone: 'neutral' },
+  { key: 'cached_input', labelKey: 'settings.pricing.cached', shortKey: 'settings.pricing.shortCached', tone: 'neutral' },
+  { key: 'output', labelKey: 'settings.pricing.output', shortKey: 'settings.pricing.shortOutput', tone: 'neutral' },
 ]
 
 const ADVANCED_FIELDS: FieldDef[] = [
-  { key: 'input_priority', labelKey: 'settings.pricing.inputPriority', shortKey: 'settings.pricing.shortInputPriority', tone: 'amber' },
-  { key: 'output_priority', labelKey: 'settings.pricing.outputPriority', shortKey: 'settings.pricing.shortOutputPriority', tone: 'orange' },
-  { key: 'input_long', labelKey: 'settings.pricing.inputLong', shortKey: 'settings.pricing.shortInputLong', tone: 'emerald' },
-  { key: 'output_long', labelKey: 'settings.pricing.outputLong', shortKey: 'settings.pricing.shortOutputLong', tone: 'teal' },
+  { key: 'input_priority', labelKey: 'settings.pricing.inputPriority', shortKey: 'settings.pricing.shortInputPriority', tone: 'accent' },
+  { key: 'output_priority', labelKey: 'settings.pricing.outputPriority', shortKey: 'settings.pricing.shortOutputPriority', tone: 'accent' },
+  { key: 'input_long', labelKey: 'settings.pricing.inputLong', shortKey: 'settings.pricing.shortInputLong', tone: 'accent' },
+  { key: 'output_long', labelKey: 'settings.pricing.outputLong', shortKey: 'settings.pricing.shortOutputLong', tone: 'accent' },
 ]
 
 const ALL_FIELDS = [...PRIMARY_FIELDS, ...ADVANCED_FIELDS]
 
-const TONE_STYLES: Record<FieldDef['tone'], { dot: string; ring: string; soft: string }> = {
-  sky: {
-    dot: 'bg-sky-500',
-    ring: 'focus-within:border-sky-500/40 focus-within:ring-sky-500/15',
-    soft: 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
-  },
-  cyan: {
-    dot: 'bg-cyan-500',
-    ring: 'focus-within:border-cyan-500/40 focus-within:ring-cyan-500/15',
-    soft: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300',
-  },
-  violet: {
-    dot: 'bg-violet-500',
-    ring: 'focus-within:border-violet-500/40 focus-within:ring-violet-500/15',
-    soft: 'bg-violet-500/10 text-violet-700 dark:text-violet-300',
-  },
-  amber: {
-    dot: 'bg-amber-500',
-    ring: 'focus-within:border-amber-500/40 focus-within:ring-amber-500/15',
-    soft: 'bg-amber-500/10 text-amber-700 dark:text-amber-300',
-  },
-  orange: {
-    dot: 'bg-orange-500',
-    ring: 'focus-within:border-orange-500/40 focus-within:ring-orange-500/15',
-    soft: 'bg-orange-500/10 text-orange-700 dark:text-orange-300',
-  },
-  emerald: {
-    dot: 'bg-emerald-500',
-    ring: 'focus-within:border-emerald-500/40 focus-within:ring-emerald-500/15',
-    soft: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
-  },
-  teal: {
-    dot: 'bg-teal-500',
-    ring: 'focus-within:border-teal-500/40 focus-within:ring-teal-500/15',
-    soft: 'bg-teal-500/10 text-teal-700 dark:text-teal-300',
-  },
+/** 主价格字段中性点、priority/长上下文字段统一 primary 强调点，聚焦环全字段一致。 */
+const TONE_DOT: Record<FieldDef['tone'], string> = {
+  neutral: 'bg-muted-foreground/40',
+  accent: 'bg-primary',
 }
 
 function normalizePrice(value: unknown): number {
@@ -200,30 +169,23 @@ function PriceField({
   onChange: (next: string) => void
 }) {
   const { t } = useTranslation()
-  const tone = TONE_STYLES[field.tone]
 
   return (
     <label
       className={cn(
-        'group relative flex min-w-0 flex-col rounded-2xl border bg-background/80 transition-all duration-200',
+        'group relative flex min-w-0 flex-col rounded-xl border bg-background/80 transition-colors',
         dense ? 'gap-1.5 p-2.5 sm:p-3' : 'gap-2 p-3 sm:p-3.5',
         changed
-          ? 'border-amber-500/35 bg-amber-500/[0.04] shadow-[0_0_0_3px_hsl(38_92%_50%/0.08)]'
-          : 'border-border/80 hover:border-border hover:bg-card hover:shadow-sm',
-        'focus-within:ring-[3px]',
-        tone.ring,
+          ? 'border-amber-500/30 ring-1 ring-amber-500/30'
+          : 'border-border/80 hover:border-border hover:bg-card',
+        'focus-within:border-primary/40 focus-within:ring-[3px] focus-within:ring-primary/15',
       )}
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className={cn('size-1.5 shrink-0 rounded-full', tone.dot)} aria-hidden />
-          <span className="truncate text-[11px] font-semibold tracking-wide text-muted-foreground">
-            {t(field.labelKey)}
-          </span>
+      <div className="flex items-center gap-1.5">
+        <span className={cn('size-1.5 shrink-0 rounded-full', TONE_DOT[field.tone])} aria-hidden />
+        <span className="truncate text-[11px] font-semibold tracking-wide text-muted-foreground">
+          {t(field.labelKey)}
         </span>
-        {changed ? (
-          <span className="size-1.5 shrink-0 rounded-full bg-amber-500 shadow-[0_0_0_3px_hsl(38_92%_50%/0.18)]" />
-        ) : null}
       </div>
       <div className="relative">
         <span className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground/70">
@@ -244,47 +206,6 @@ function PriceField({
       </div>
       <span className="text-[10px] font-medium text-muted-foreground/70">/ 1M tok</span>
     </label>
-  )
-}
-
-function MetricChip({
-  label,
-  value,
-  active,
-  onClick,
-  accent,
-}: {
-  label: string
-  value: number
-  active?: boolean
-  onClick?: () => void
-  accent?: string
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        'group relative min-w-0 flex-1 overflow-hidden rounded-2xl border px-3.5 py-3 text-left transition-all duration-200',
-        active
-          ? 'border-primary/35 bg-primary/[0.07] shadow-[0_8px_24px_-12px_color-mix(in_oklab,var(--color-primary)_45%,transparent)]'
-          : 'border-white/10 bg-white/5 hover:border-white/20 hover:bg-white/10 dark:border-white/8',
-      )}
-    >
-      <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/55">
-        {label}
-      </div>
-      <div className="mt-1.5 flex items-baseline gap-1.5">
-        <span className="text-2xl font-semibold tabular-nums tracking-tight text-white sm:text-[1.75rem]">
-          {value}
-        </span>
-      </div>
-      <span
-        aria-hidden
-        className="pointer-events-none absolute -right-3 -top-3 size-14 rounded-full opacity-40 blur-2xl transition-opacity group-hover:opacity-70"
-        style={{ background: accent || 'hsl(var(--color-primary))' }}
-      />
-    </button>
   )
 }
 
@@ -450,86 +371,34 @@ export default function ModelPricing() {
         onRetry={() => void load()}
       >
         <div className="space-y-5 sm:space-y-6">
-          {/* Hero metrics */}
-          <section className="relative overflow-hidden rounded-[28px] border border-border/60 bg-[hsl(222_28%_12%)] text-white shadow-[0_24px_60px_-28px_rgba(15,23,42,0.55)] dark:bg-[hsl(222_20%_10%)]">
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-0 opacity-90"
-              style={{
-                background:
-                  'radial-gradient(ellipse 80% 70% at 0% 0%, hsl(214 84% 54% / 0.45), transparent 55%), radial-gradient(ellipse 60% 50% at 100% 20%, hsl(262 70% 58% / 0.28), transparent 50%), radial-gradient(ellipse 50% 40% at 70% 100%, hsl(190 70% 45% / 0.2), transparent 45%)',
-              }}
+          {/* Source metrics（点击筛选） */}
+          <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4 sm:gap-4">
+            <StatTile
+              label={t('settings.pricing.statTotal')}
+              value={counts.total}
+              sub={t('settings.pricing.unitHint')}
+              active={sourceFilter === 'all'}
+              onClick={() => setSourceFilter('all')}
             />
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-0 opacity-[0.12]"
-              style={{
-                backgroundImage:
-                  'linear-gradient(to right, rgba(255,255,255,0.08) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.08) 1px, transparent 1px)',
-                backgroundSize: '28px 28px',
-                maskImage: 'linear-gradient(to bottom, black, transparent 90%)',
-              }}
+            <StatTile
+              label={t('settings.pricing.statCustom')}
+              value={counts.custom}
+              active={sourceFilter === 'custom'}
+              onClick={() => setSourceFilter('custom')}
             />
-
-            <div className="relative z-10 p-5 sm:p-7">
-              <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-                <div className="max-w-xl">
-                  <div className="inline-flex items-center gap-1.5 rounded-full border border-white/12 bg-white/8 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-white/80 backdrop-blur-sm">
-                    <Sparkles className="size-3" />
-                    {t('settings.pricing.heroBadge')}
-                  </div>
-                  <h3 className="mt-3 text-[1.65rem] font-semibold leading-tight tracking-tight text-white sm:text-[2rem]">
-                    {t('settings.pricing.heroTitle')}
-                  </h3>
-                  <p className="mt-2 max-w-lg text-sm leading-relaxed text-white/65">
-                    {t('settings.pricing.heroDesc')}
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 text-[12px] text-white/60">
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
-                    <span className="size-1.5 rounded-full bg-emerald-400" />
-                    {t('settings.pricing.unitHint')}
-                  </span>
-                  {dirtyCount > 0 ? (
-                    <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-400/25 bg-amber-400/10 px-2.5 py-1 text-amber-100">
-                      {t('settings.pricing.unsavedCount', { count: dirtyCount })}
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="mt-6 grid grid-cols-2 gap-2.5 lg:grid-cols-4">
-                <MetricChip
-                  label={t('settings.pricing.statTotal')}
-                  value={counts.total}
-                  active={sourceFilter === 'all'}
-                  onClick={() => setSourceFilter('all')}
-                  accent="hsl(214 84% 56%)"
-                />
-                <MetricChip
-                  label={t('settings.pricing.statCustom')}
-                  value={counts.custom}
-                  active={sourceFilter === 'custom'}
-                  onClick={() => setSourceFilter('custom')}
-                  accent="hsl(214 90% 60%)"
-                />
-                <MetricChip
-                  label={t('settings.pricing.statSynced')}
-                  value={counts.synced}
-                  active={sourceFilter === 'synced'}
-                  onClick={() => setSourceFilter('synced')}
-                  accent="hsl(190 80% 50%)"
-                />
-                <MetricChip
-                  label={t('settings.pricing.statDefault')}
-                  value={counts.defaults}
-                  active={sourceFilter === 'default'}
-                  onClick={() => setSourceFilter('default')}
-                  accent="hsl(40 90% 55%)"
-                />
-              </div>
-            </div>
-          </section>
+            <StatTile
+              label={t('settings.pricing.statSynced')}
+              value={counts.synced}
+              active={sourceFilter === 'synced'}
+              onClick={() => setSourceFilter('synced')}
+            />
+            <StatTile
+              label={t('settings.pricing.statDefault')}
+              value={counts.defaults}
+              active={sourceFilter === 'default'}
+              onClick={() => setSourceFilter('default')}
+            />
+          </div>
 
           {/* Sync panel (collapsible) */}
           <div
@@ -539,10 +408,10 @@ export default function ModelPricing() {
             )}
           >
             <div className="min-h-0 overflow-hidden">
-              <section className="rounded-3xl border border-border/80 bg-card p-4 shadow-sm sm:p-5">
+              <section className="rounded-xl border border-border/80 bg-card p-4 shadow-sm sm:p-5">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
                   <div className="flex min-w-0 flex-1 gap-3">
-                    <div className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-primary/15 to-primary/5 text-primary ring-1 ring-primary/15">
+                    <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
                       <CloudDownload className="size-5" />
                     </div>
                     <div className="min-w-0">
@@ -631,7 +500,7 @@ export default function ModelPricing() {
                     </button>
                   </div>
 
-                  <p className="rounded-2xl border border-dashed border-border/80 bg-muted/25 px-3.5 py-3 text-[12px] leading-relaxed text-muted-foreground">
+                  <p className="rounded-xl border border-dashed border-border/80 bg-muted/25 px-3.5 py-3 text-[12px] leading-relaxed text-muted-foreground">
                     {t('settings.pricing.hint')}
                   </p>
                 </div>
@@ -641,7 +510,7 @@ export default function ModelPricing() {
 
           {/* Sticky toolbar */}
           <div className="sticky top-2 z-20 -mx-1 px-1">
-            <div className="flex flex-col gap-3 rounded-2xl border border-border/80 bg-card/90 p-2.5 shadow-[0_8px_30px_-18px_rgba(15,23,42,0.35)] backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-2 sm:pl-3">
+            <div className="flex flex-col gap-3 rounded-xl border border-border/80 bg-card/95 p-2.5 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-2 sm:pl-3">
               <div className="relative min-w-0 flex-1 sm:max-w-xs">
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
                 <Input
@@ -666,7 +535,7 @@ export default function ModelPricing() {
                       aria-selected={active}
                       onClick={() => setSourceFilter(item.id)}
                       className={cn(
-                        'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[10px] px-2.5 text-xs font-semibold transition-all',
+                        'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-all',
                         active
                           ? 'bg-background text-foreground shadow-sm'
                           : 'text-muted-foreground hover:text-foreground',
@@ -703,13 +572,18 @@ export default function ModelPricing() {
             </StateShell>
           ) : (
             <div className="space-y-3.5">
-              <div className="flex items-center justify-between px-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 px-1">
                 <p className="text-xs font-medium text-muted-foreground">
                   {t('settings.pricing.listCount', {
                     shown: filteredRows.length,
                     total: counts.total,
                   })}
                 </p>
+                {dirtyCount > 0 ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-300">
+                    {t('settings.pricing.unsavedCount', { count: dirtyCount })}
+                  </span>
+                ) : null}
               </div>
 
               {filteredRows.map((r) => {
@@ -718,27 +592,19 @@ export default function ModelPricing() {
                 const busy = savingModel === r.model
                 const source = sourceMeta(r.source)
                 const advancedOpen = expandedAdvanced[r.model] ?? false
-                const advancedDirty = ADVANCED_FIELDS.some(
-                  (f) => normalizePrice(draft[f.key]) !== normalizePrice(r.pricing[f.key]),
-                )
                 const inputVal = normalizePrice(draft.input)
                 const outputVal = normalizePrice(draft.output)
 
                 return (
                   <article
                     key={r.model}
-                    className={cn(
-                      'group/card relative overflow-hidden rounded-[24px] border bg-card transition-all duration-300',
-                      dirty
-                        ? 'border-primary/30 shadow-[0_18px_50px_-28px_color-mix(in_oklab,var(--color-primary)_55%,transparent)] ring-1 ring-primary/10'
-                        : 'border-border/80 shadow-[0_1px_0_rgba(15,23,42,0.03)] hover:border-border hover:shadow-[0_16px_40px_-28px_rgba(15,23,42,0.28)]',
-                    )}
+                    className="group/card relative overflow-hidden rounded-xl border border-border/80 bg-card shadow-sm transition-colors hover:border-border"
                   >
                     <div className="p-4 sm:p-5">
                       {/* Header */}
                       <div className="flex flex-col gap-3.5 sm:flex-row sm:items-start sm:justify-between">
                         <div className="flex min-w-0 items-start gap-3.5">
-                          <ModelLogo model={r.model} size={44} variant="ring" className="rounded-2xl" />
+                          <ModelLogo model={r.model} size={44} variant="ring" className="rounded-xl" />
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
                               <h4 className="truncate font-mono text-[15px] font-semibold tracking-tight text-foreground sm:text-base">
@@ -754,8 +620,8 @@ export default function ModelPricing() {
                                 {t(source.labelKey)}
                               </span>
                               {dirty ? (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/12 px-2 py-0.5 text-[10px] font-bold text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-300">
-                                  <span className="size-1.5 animate-pulse rounded-full bg-amber-500" />
+                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-300">
+                                  <span className="size-1.5 rounded-full bg-amber-500" />
                                   {t('settings.pricing.unsaved')}
                                 </span>
                               ) : (
@@ -795,12 +661,7 @@ export default function ModelPricing() {
                           ) : null}
                           <Button
                             size="sm"
-                            className={cn(
-                              'h-9 min-w-[96px] rounded-xl transition-all',
-                              dirty
-                                ? 'shadow-[0_8px_20px_-10px_color-mix(in_oklab,var(--color-primary)_70%,transparent)]'
-                                : '',
-                            )}
+                            className="h-9 min-w-[96px] rounded-xl"
                             disabled={busy || !dirty}
                             onClick={() => void save(r.model)}
                           >
@@ -849,11 +710,6 @@ export default function ModelPricing() {
                               )}
                             />
                             {t('settings.pricing.advancedRates')}
-                            {advancedDirty ? (
-                              <span className="rounded-full bg-amber-500/12 px-1.5 py-0.5 text-[10px] font-bold text-amber-700 dark:text-amber-300">
-                                {t('settings.pricing.unsaved')}
-                              </span>
-                            ) : null}
                           </span>
                           <span className="text-[11px] text-muted-foreground/70">
                             {t('settings.pricing.advancedRatesHint')}
