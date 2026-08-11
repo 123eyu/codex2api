@@ -370,6 +370,96 @@ func TestTranslateRequest_DropsInvalidRequiredInToolSchema(t *testing.T) {
 	}
 }
 
+// 显式为 null 的 parameters.type 上游必拒。function 工具补成 object，
+// 非 function 工具至少要把 null 摘掉（坏 schema 沉进多轮历史会每轮必 400）。
+func TestPrepareResponsesBodyFixesNullParametersType(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[
+			{"type":"function","name":"automation_update","parameters":{"type":null,"properties":{}}},
+			{"type":"tool_search","parameters":{"type":null}}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	if strings.Contains(string(got), `"type":null`) {
+		t.Fatalf("null schema type survived: %s", got)
+	}
+	if typ := gjson.GetBytes(got, `tools.#(name=="automation_update").parameters.type`).String(); typ != "object" {
+		t.Fatalf("function tool parameters.type = %q, want object; body=%s", typ, got)
+	}
+	if gjson.GetBytes(got, `tools.#(type=="tool_search").parameters.type`).Exists() {
+		t.Fatalf("non-function tool should have the null type dropped; body=%s", got)
+	}
+}
+
+// 嵌套在 properties/items 里的 null type 同样要清掉。
+func TestPrepareResponsesBodyFixesNestedNullSchemaType(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{
+			"a":{"type":null},
+			"b":{"type":"array","items":{"type":null}}
+		}}}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	if strings.Contains(string(got), `"type":null`) {
+		t.Fatalf("nested null schema type survived: %s", got)
+	}
+}
+
+// Responses Lite 把工具搬进 input[].additional_tools.tools[]，那里的坏 schema
+// 过去完全绕过顶层 tools[] 的全部修正直达上游。
+func TestPrepareResponsesBodyNormalizesAdditionalToolsSchemas(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"additional_tools","tools":[
+				{"type":"function","name":"automation_update","parameters":{"type":null,"properties":{}}}
+			]}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	if strings.Contains(string(got), `"type":null`) {
+		t.Fatalf("null type inside additional_tools survived: %s", got)
+	}
+	var fixed bool
+	for _, item := range gjson.GetBytes(got, "input").Array() {
+		if item.Get("type").String() != "additional_tools" {
+			continue
+		}
+		if typ := item.Get(`tools.#(name=="automation_update").parameters.type`).String(); typ == "object" {
+			fixed = true
+		}
+	}
+	if !fixed {
+		t.Fatalf("additional_tools function schema was not normalized to object; body=%s", got)
+	}
+}
+
+// 保留工具（collaboration.*）必须逐字透传，清洗不得碰它（issue #342）。
+func TestPrepareResponsesBodyLeavesReservedToolsUntouched(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"additional_tools","tools":[
+				{"type":"function","name":"collaboration.create_task","parameters":{"type":null}}
+			]}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	if !strings.Contains(string(got), `"type":null`) {
+		t.Fatalf("reserved tool schema must pass through verbatim, even a null type; body=%s", got)
+	}
+}
+
 func TestPrepareResponsesBody_FillsMissingArrayItemsInToolSchema(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",

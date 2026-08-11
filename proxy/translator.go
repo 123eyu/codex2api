@@ -1977,32 +1977,12 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 			"tool_search": "Search through available tools to find the most relevant one for the task.",
 		}
 		for _, t := range tools {
-			toolMap, ok := t.(map[string]any)
-			if !ok {
-				continue
-			}
-			// 保留工具（collaboration.* 等）原样透传：上游要求其 schema 逐字
-			// 匹配官方配置，任何补描述/清洗都会破坏匹配并被拒（issue #342）。
-			if isReservedCodexTool(toolMap) {
-				continue
-			}
-			// 补充默认描述
-			if toolType, _ := toolMap["type"].(string); toolType != "" {
-				if defaultDesc, ok := toolDescDefaults[toolType]; ok {
-					desc, _ := toolMap["description"].(string)
-					if desc == "" {
-						toolMap["description"] = defaultDesc
-					}
-				}
-			}
-			// 递归清理不支持的 JSON Schema 关键字，并修正上游要求的结构
-			if isFunctionTool(toolMap) {
-				normalizeFunctionToolParameters(toolMap)
-			} else if params, ok := toolMap["parameters"].(map[string]any); ok {
-				sanitizeSchemaForUpstream(params)
-			}
+			normalizeResponsesToolSchema(t, toolDescDefaults)
 		}
 	}
+	// Responses Lite 把工具声明搬进 input[] 的 additional_tools 载体项；顶层
+	// tools[] 的清洗必须同样覆盖那里，否则坏 schema 绕过全部修正直达上游。
+	normalizeResponsesAdditionalToolSchemas(body)
 	if shouldAutoInjectResponsesImageGenerationTool(body) {
 		ensureResponsesImageGenerationTool(body)
 	}
@@ -2623,6 +2603,13 @@ func stripUnsupportedSchemaKeys(schema map[string]interface{}) {
 	for key := range unsupportedSchemaKeys {
 		delete(schema, key)
 	}
+	// 显式写成 null 的 type 上游一律拒收（Codex Desktop 的 automation_update
+	// 会这么发）。删掉即退回「未声明类型」的合法 schema；function 工具的根节点
+	// 随后还会被 ensureFunctionParametersRootObject 补成 object。坏 schema 一旦
+	// 沉进多轮历史，不修就每轮必 400。
+	if rawType, exists := schema["type"]; exists && rawType == nil {
+		delete(schema, "type")
+	}
 	if props, ok := schema["properties"].(map[string]interface{}); ok {
 		for _, v := range props {
 			if sub, ok := v.(map[string]interface{}); ok {
@@ -2867,6 +2854,54 @@ func isReservedCodexTool(tool map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// normalizeResponsesToolSchema 清洗单个工具声明：补默认描述，递归清理 JSON Schema
+// 里上游不支持的关键字，并修正 function 工具要求的根结构。保留工具
+// （collaboration.* 等）原样透传——上游要求其 schema 逐字匹配官方配置，
+// 任何补描述/清洗都会破坏匹配并被拒（issue #342）。
+func normalizeResponsesToolSchema(rawTool any, descDefaults map[string]string) {
+	toolMap, ok := rawTool.(map[string]any)
+	if !ok || isReservedCodexTool(toolMap) {
+		return
+	}
+	if toolType, _ := toolMap["type"].(string); toolType != "" {
+		if defaultDesc, ok := descDefaults[toolType]; ok {
+			if desc, _ := toolMap["description"].(string); desc == "" {
+				toolMap["description"] = defaultDesc
+			}
+		}
+	}
+	if isFunctionTool(toolMap) {
+		normalizeFunctionToolParameters(toolMap)
+	} else if params, ok := toolMap["parameters"].(map[string]any); ok {
+		sanitizeSchemaForUpstream(params)
+	}
+}
+
+// normalizeResponsesAdditionalToolSchemas 对 input[] 里 type=additional_tools
+// 载体项内嵌的工具列表套用与顶层 tools[] 相同的清洗（Responses Lite 格式）。
+func normalizeResponsesAdditionalToolSchemas(body map[string]any) {
+	input, ok := body["input"].([]any)
+	if !ok {
+		return
+	}
+	for _, rawItem := range input {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(firstNonEmptyAnyString(item["type"])) != "additional_tools" {
+			continue
+		}
+		tools, ok := item["tools"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawTool := range tools {
+			normalizeResponsesToolSchema(rawTool, nil)
+		}
+	}
 }
 
 func normalizeFunctionToolParameters(tool map[string]any) {
