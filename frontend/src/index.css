@@ -1089,6 +1089,14 @@
   animation: none;
   mix-blend-mode: normal;
 }
+
+/* 切换期间冻结元素级过渡：新画面成为静态图层，扫过动画只做纹理合成。
+   （不影响 ::view-transition-new 上的 clip-path 动画——那是 WAAPI 驱动的。） */
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition: none !important;
+}
 ::view-transition-old(root) {
   z-index: 1;
 }
