@@ -2285,8 +2285,61 @@ export default function Settings() {
           </SettingsCard>
 
           <SettingsCard title={t('settings.schedulingStrategy')} icon={<Layers className="size-4" />}>
+            <div className="grid gap-4 lg:grid-cols-2">
+              <div className="space-y-3 rounded-xl border border-border/60 bg-muted/10 p-3.5">
+                <div>
+                  <h3 className="text-sm font-semibold">{t('settings.schedulingAccountGroup')}</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    {t('settings.schedulingAccountGroupDesc')}
+                  </p>
+                </div>
+                <SettingField label={t('settings.fastSchedulerEnabled')} description={t('settings.fastSchedulerEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.fast_scheduler_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('fast_scheduler_enabled', checked)}
+                  />
+                </SettingField>
+                <SettingField
+                  label={t('settings.schedulerMode')}
+                  description={t('settings.schedulerModeDesc')}
+                  warning={settingsForm.fast_scheduler_enabled ? undefined : t('settings.schedulerModeRequiresFast')}
+                  className={cn(!settingsForm.fast_scheduler_enabled && 'opacity-60')}
+                >
+                  <Select
+                    value={settingsForm.scheduler_mode}
+                    onValueChange={(value) => autoSaveStringField('scheduler_mode', value)}
+                    options={schedulerModeOptions}
+                  />
+                </SettingField>
+              </div>
+
+              <div className="space-y-3 rounded-xl border border-border/60 bg-muted/10 p-3.5">
+                <div>
+                  <h3 className="text-sm font-semibold">{t('settings.schedulingAffinityGroup')}</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    {t('settings.schedulingAffinityGroupDesc')}
+                  </p>
+                </div>
+                <SettingField label={t('settings.affinityMode')} description={t('settings.affinityModeDesc')}>
+                  <Select
+                    value={settingsForm.affinity_mode || 'bounded'}
+                    onValueChange={(value) => autoSaveStringField('affinity_mode', value)}
+                    options={affinityModeOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.sessionAffinitySpread')} description={t('settings.sessionAffinitySpreadDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.session_affinity_spread}
+                    onCheckedChange={(checked) => autoSaveBooleanField('session_affinity_spread', checked)}
+                  />
+                </SettingField>
+              </div>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.connectivityTest')} description={t('settings.connectivityTestDesc')} icon={<Wifi className="size-4" />}>
             <div className="space-y-4">
-              <div className={SETTINGS_FIELD_GRID_3}>
+              <div className={SETTINGS_FIELD_GRID}>
                 <SettingField label={t('settings.testModelLabel')} description={t('settings.testModelHint')}>
                   <Select
                     value={settingsForm.test_model}
@@ -2302,47 +2355,19 @@ export default function Settings() {
                     onValueChange={(value) => setSettingsForm(f => ({ ...f, test_concurrency: value }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.schedulerMode')} description={t('settings.schedulerModeDesc')}>
-                  <Select
-                    value={settingsForm.scheduler_mode}
-                    onValueChange={(value) => autoSaveStringField('scheduler_mode', value)}
-                    options={schedulerModeOptions}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.affinityMode')} description={t('settings.affinityModeDesc')}>
-                  <Select
-                    value={settingsForm.affinity_mode || 'bounded'}
-                    onValueChange={(value) => autoSaveStringField('affinity_mode', value)}
-                    options={affinityModeOptions}
-                  />
-                </SettingField>
-                <SettingField className="sm:col-span-2 xl:col-span-3" label={t('settings.testContent')} description={t('settings.testContentDesc')}>
-                  <textarea
-                    rows={3}
-                    value={settingsForm.test_content}
-                    placeholder={t('settings.testContentPlaceholder')}
-                    onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setSettingsForm(f => ({ ...f, test_content: e.target.value }))}
-                    onBlur={(e) => autoSaveStringField('test_content', e.currentTarget.value)}
-                    className={cn(
-                      'flex min-h-[88px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
-                    )}
-                  />
-                </SettingField>
               </div>
-              <div className={SETTINGS_SWITCH_GRID}>
-                <SettingField label={t('settings.fastSchedulerEnabled')} description={t('settings.fastSchedulerEnabledDesc')} layout="switch">
-                  <Switch
-                    checked={settingsForm.fast_scheduler_enabled}
-                    onCheckedChange={(checked) => autoSaveBooleanField('fast_scheduler_enabled', checked)}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.sessionAffinitySpread')} description={t('settings.sessionAffinitySpreadDesc')} layout="switch">
-                  <Switch
-                    checked={settingsForm.session_affinity_spread}
-                    onCheckedChange={(checked) => autoSaveBooleanField('session_affinity_spread', checked)}
-                  />
-                </SettingField>
-              </div>
+              <SettingField label={t('settings.testContent')} description={t('settings.testContentDesc')}>
+                <textarea
+                  rows={3}
+                  value={settingsForm.test_content}
+                  placeholder={t('settings.testContentPlaceholder')}
+                  onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setSettingsForm(f => ({ ...f, test_content: e.target.value }))}
+                  onBlur={(e) => autoSaveStringField('test_content', e.currentTarget.value)}
+                  className={cn(
+                    'flex min-h-[88px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
+                  )}
+                />
+              </SettingField>
             </div>
           </SettingsCard>
 
