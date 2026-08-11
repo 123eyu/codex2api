@@ -1188,6 +1188,23 @@ const usageTableHeadClass = 'text-[12px] font-semibold'
 const usageTableTextClass = 'text-[14px]'
 const usageTableMonoClass = 'font-mono text-[13px] tabular-nums'
 const usageTableBadgeClass = 'text-[13px]'
+
+function StreamBadge({ stream }: { stream: boolean }) {
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        usageTableBadgeClass,
+        'border-transparent',
+        stream
+          ? 'bg-indigo-500/12 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400'
+          : 'bg-muted/60 text-muted-foreground',
+      )}
+    >
+      {stream ? 'stream' : 'sync'}
+    </Badge>
+  )
+}
 // Premium Minimal: a single-accent (primary) ramp. Instead of 20 competing hues,
 // the donut + legend read as one calm material with descending opacity, so it is
 // automatically correct under every theme-* palette (it only ever uses --color-primary).
@@ -2073,7 +2090,7 @@ export default function Usage() {
             <CardContent className={usageStatCardContentClass}>
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[11px] font-bold uppercase text-muted-foreground">{t('usage.errorRateCard')}</span>
-                <div className="flex size-9 items-center justify-center rounded-lg bg-[hsl(36_72%_40%/0.12)] text-[hsl(36,72%,40%)]">
+                <div className="flex size-9 items-center justify-center rounded-lg bg-[hsl(var(--warning-bg))] text-[hsl(var(--warning))]">
                   <AlertTriangle className="size-4" />
                 </div>
               </div>
@@ -2494,17 +2511,7 @@ export default function Usage() {
                               Fast
                             </Badge>
                           ) : null}
-                          <Badge
-                            variant="outline"
-                            className={usageTableBadgeClass}
-                            style={{
-                              background: log.stream ? 'rgba(99, 102, 241, 0.12)' : 'rgba(107, 114, 128, 0.12)',
-                              color: log.stream ? '#6366f1' : '#6b7280',
-                              borderColor: 'transparent',
-                            }}
-                          >
-                            {log.stream ? 'stream' : 'sync'}
-                          </Badge>
+                          <StreamBadge stream={log.stream} />
                           <CompactionBadges
                             compact={log.compact}
                             hasCompactionHistory={log.has_compaction_history}
@@ -2724,17 +2731,7 @@ export default function Usage() {
                         </TableCell>}
                         {visibleColumns.type && <TableCell>
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <Badge
-                              variant="outline"
-                              className={usageTableBadgeClass}
-                              style={{
-                                background: log.stream ? 'rgba(99, 102, 241, 0.12)' : 'rgba(107, 114, 128, 0.12)',
-                                color: log.stream ? '#6366f1' : '#6b7280',
-                                borderColor: 'transparent',
-                              }}
-                            >
-                              {log.stream ? 'stream' : 'sync'}
-                            </Badge>
+                            <StreamBadge stream={log.stream} />
                             <CompactionBadges
                               compact={log.compact}
                               hasCompactionHistory={log.has_compaction_history}

@@ -4213,11 +4213,11 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
 
 function promptRiskBadgeClass(level: PromptRiskProfile['risk_level']) {
   switch (level) {
-    case 'critical': return 'border-red-600 bg-red-600 text-white'
-    case 'high': return 'border-orange-500 bg-orange-500 text-white'
-    case 'elevated': return 'border-amber-500 bg-amber-500 text-black'
-    case 'observed': return 'border-blue-500 bg-blue-500 text-white'
-    default: return 'border-emerald-600 bg-emerald-600 text-white'
+    case 'critical': return 'border-red-500/30 bg-red-500/12 text-red-600 dark:bg-red-500/20 dark:text-red-400'
+    case 'high': return 'border-orange-500/30 bg-orange-500/12 text-orange-600 dark:bg-orange-500/20 dark:text-orange-400'
+    case 'elevated': return 'border-amber-500/30 bg-amber-500/12 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400'
+    case 'observed': return 'border-blue-500/30 bg-blue-500/12 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400'
+    default: return 'border-emerald-500/30 bg-emerald-500/12 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400'
   }
 }
 

@@ -3848,11 +3848,11 @@ function GrokAccountTableRow({
       <TableCell>
         <div className="space-y-0.5 text-[13px]">
           <div className="flex items-center gap-1.5 whitespace-nowrap">
-            <span className="font-medium text-emerald-600">
+            <span className="font-medium tabular-nums text-emerald-600 dark:text-emerald-400">
               {account.success_requests ?? 0}
             </span>
             <span className="text-muted-foreground">/</span>
-            <span className="font-medium text-red-500">
+            <span className="font-medium tabular-nums text-red-500 dark:text-red-400">
               {account.error_requests ?? 0}
             </span>
           </div>

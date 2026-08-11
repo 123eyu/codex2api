@@ -401,12 +401,12 @@ export default function Layout({ children }: PropsWithChildren) {
                             </div>
                           )}
                           {hasUpdate && updateUnavailableReason && (
-                            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] font-medium leading-relaxed text-amber-700">
+                            <div className="mt-3 rounded-md border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[11px] font-medium leading-relaxed text-amber-700 dark:text-amber-300">
                               {updateUnavailableReason}
                             </div>
                           )}
                           {hasUpdate && updateInfo?.warning && (
-                            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] font-medium leading-relaxed text-amber-700">
+                            <div className="mt-3 rounded-md border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[11px] font-medium leading-relaxed text-amber-700 dark:text-amber-300">
                               {updateInfo.warning}
                             </div>
                           )}
