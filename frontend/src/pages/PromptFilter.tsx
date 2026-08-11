@@ -8,6 +8,7 @@ import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import PromptFilterNewAPIBindings from '../components/PromptFilterNewAPIBindings'
 import StateShell from '../components/StateShell'
+import { StatTile } from '../components/StatTile'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
@@ -983,8 +984,8 @@ function AdvancedProtectionEditor({
                 onCheckedChange={(next) => updateGuard({ allow_trusted_overrides: next })}
               />
             </div>
-            <div className="flex items-start gap-3 rounded-lg border border-sky-500/20 bg-sky-500/[0.06] p-3 text-sm dark:border-sky-400/20 dark:bg-sky-400/[0.07]">
-              <Shield className="mt-0.5 size-4 shrink-0 text-sky-600 dark:text-sky-300" />
+            <div className="flex items-start gap-3 rounded-lg border border-[hsl(var(--info))]/25 bg-[hsl(var(--info-bg))] p-3 text-sm">
+              <Shield className="mt-0.5 size-4 shrink-0 text-[hsl(var(--info))]" />
               <div className="min-w-0">
                 <div className="font-medium text-foreground">{t('promptFilter.guard.compatibilityTitle')}</div>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.guard.compatibilityHint')}</p>
@@ -1127,7 +1128,7 @@ function AdvancedProtectionEditor({
               </div>
               <Badge variant="secondary">{t('promptFilter.normalizationDecoderCount', { count: [config.normalization.decode_url, config.normalization.decode_html, config.normalization.decode_base64, config.normalization.decode_hex, config.normalization.decode_rot13, config.normalization.decode_escapes, config.normalization.decode_compression].filter(Boolean).length })}</Badge>
             </div>
-            <details className="group mt-3 rounded-md border border-foreground/10 bg-muted/10">
+            <details className={cn('group mt-3 rounded-md border border-foreground/10 bg-muted/10', !config.normalization.enabled && 'pointer-events-none opacity-60')}>
               <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2 text-xs font-medium marker:content-none [&::-webkit-details-marker]:hidden">
                 <span>{t('promptFilter.normalizationTune')}</span>
                 <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" />
@@ -1157,7 +1158,7 @@ function AdvancedProtectionEditor({
             <Switch checked={config.context_discount.enabled} onCheckedChange={(next) => setBool('context_discount', 'enabled', next)} />
             <span className="text-sm text-muted-foreground">{t('promptFilter.contextDiscount.simplifiedDesc')}</span>
           </div>
-          <details className="group mt-3 rounded-md border border-foreground/10 bg-muted/10">
+          <details className={cn('group mt-3 rounded-md border border-foreground/10 bg-muted/10', !config.context_discount.enabled && 'pointer-events-none opacity-60')}>
             <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2 text-xs font-medium marker:content-none [&::-webkit-details-marker]:hidden"><span>{t('promptFilter.tuneParameters')}</span><ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" /></summary>
             <div className="grid grid-cols-2 gap-x-3 gap-y-3 border-t p-3 sm:grid-cols-3">
               <SwitchField label={t('promptFilter.contextDiscount.intentAware')} hint={t('promptFilter.contextDiscount.intentAwareHint')} checked={config.context_discount.intent_aware} onCheckedChange={(next) => setBool('context_discount', 'intent_aware', next)} />
@@ -1249,7 +1250,7 @@ function AdvancedProtectionEditor({
           title={t('promptFilter.extensions.session.title')}
           hint={t('promptFilter.extensions.session.description')}
           footer={(
-            <div className="rounded-lg border border-sky-500/20 bg-sky-500/[0.06] p-3 text-xs leading-5 text-muted-foreground dark:border-sky-400/20 dark:bg-sky-400/[0.07]">
+            <div className="rounded-lg border border-[hsl(var(--info))]/25 bg-[hsl(var(--info-bg))] p-3 text-xs leading-5 text-muted-foreground">
               {t('promptFilter.extensions.session.recommendedHint')}
             </div>
           )}
@@ -1418,7 +1419,7 @@ function AdvancedPanel({
   footer?: ReactNode
 }) {
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 rounded-lg border border-foreground/15 bg-background p-3.5 shadow-sm dark:border-foreground/20">
+    <div className="flex h-full min-h-0 flex-col gap-3 rounded-lg border border-border/60 bg-background p-3.5 shadow-sm">
       <div className="flex h-5 items-center gap-1.5">
         <h3 className="text-sm font-semibold leading-none text-foreground">{title}</h3>
         <FieldHint label={title} hint={hint} />
@@ -1458,7 +1459,7 @@ function CompactField({
         <span className="truncate">{label}</span>
         <FieldHint label={label} hint={hint} />
       </span>
-      <div className="min-w-0 [&_input]:h-9 [&_input]:border-foreground/15 [&_input]:shadow-none dark:[&_input]:border-foreground/20">
+      <div className="min-w-0 [&_input]:h-9 [&_input]:border-border/60 [&_input]:shadow-none">
         {children}
       </div>
     </label>
@@ -1731,7 +1732,7 @@ function IntelligenceView() {
               {running ? t('promptFilter.intelligence.running') : t('promptFilter.intelligence.run')}
             </Button>
           </div>
-          <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-muted-foreground">
+          <div className="mt-4 rounded-lg border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-sm text-muted-foreground">
             {t('promptFilter.intelligence.auditHint')}
           </div>
         </CardContent>
@@ -1807,7 +1808,7 @@ function IntelligenceView() {
                       {candidateTitle(candidate)}
                       <Badge variant="outline">{candidate.kind === 'evidence' ? t('promptFilter.intelligence.evidenceOnly') : candidate.change_type === 'update' ? t('promptFilter.intelligence.update') : t('promptFilter.intelligence.new')}</Badge>
                       {candidate.ai_analyzed ? (
-                        <Badge className="bg-sky-600">
+                        <Badge className="bg-sky-500/12 text-sky-600 dark:bg-sky-500/20 dark:text-sky-400">
                           {t('promptFilter.intelligence.aiLearned')}
                           {candidate.ai_analysis_count && candidate.ai_analysis_count > 1 ? ` ×${candidate.ai_analysis_count}` : ''}
                         </Badge>
@@ -1943,7 +1944,7 @@ function IntelligenceView() {
             <DialogDescription>{t('promptFilter.intelligence.aiAnalysisDesc')}</DialogDescription>
           </DialogHeader>
           {aiTarget?.sample_preview ? (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm whitespace-pre-wrap break-words">
+            <div className="rounded-lg border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-sm whitespace-pre-wrap break-words">
               {aiTarget.sample_preview}
             </div>
           ) : null}
@@ -1992,7 +1993,7 @@ function IntelligenceView() {
             <div className="space-y-4 rounded-xl border p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge>{t(`promptFilter.intelligence.aiDecision.${aiResult.decision.decision}`, { defaultValue: aiResult.decision.decision })}</Badge>
-                <Badge className="bg-sky-600">{t('promptFilter.intelligence.aiLearned')}</Badge>
+                <Badge className="bg-sky-500/12 text-sky-600 dark:bg-sky-500/20 dark:text-sky-400">{t('promptFilter.intelligence.aiLearned')}</Badge>
                 <Badge variant="outline">{t('promptFilter.intelligence.aiConfidence')}: {(aiResult.decision.confidence * 100).toFixed(0)}%</Badge>
                 <Badge variant="outline">{aiResult.provider} · {aiResult.model}</Badge>
               </div>
@@ -2006,7 +2007,7 @@ function IntelligenceView() {
                     <Badge variant="outline">{t('promptFilter.intelligence.weight')}: {aiResult.decision.rule.weight}</Badge>
                   </div>
                   <code className="mt-2 block break-all rounded bg-muted/40 p-2 text-xs">{aiResult.decision.rule.pattern}</code>
-                  {aiResult.rule_candidate ? <p className="mt-2 text-xs text-emerald-600">{t('promptFilter.intelligence.aiRuleStaged')}</p> : null}
+                  {aiResult.rule_candidate ? <p className="mt-2 text-xs text-[hsl(var(--success))]">{t('promptFilter.intelligence.aiRuleStaged')}</p> : null}
                   {aiResult.rule_error ? <p className="mt-2 text-xs text-destructive">{aiResult.rule_error}</p> : null}
                 </div>
               ) : null}
@@ -2015,7 +2016,7 @@ function IntelligenceView() {
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="font-medium">{t('promptFilter.intelligence.aiIdentitySuggestion')}</div>
                     {aiResult.identity_update.applied ? (
-                      <Badge className="bg-emerald-600">{t('promptFilter.intelligence.identityAppliedBadge')}</Badge>
+                      <Badge className="bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]">{t('promptFilter.intelligence.identityAppliedBadge')}</Badge>
                     ) : aiResult.identity_update.rolled_back ? (
                       <Badge variant="outline">{t('promptFilter.intelligence.identityRolledBackBadge')}</Badge>
                     ) : aiResult.identity_update.block_reason ? (
@@ -2027,7 +2028,7 @@ function IntelligenceView() {
                   <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
                     {aiResult.decision.identity_patch.clauses.map((clause, index) => <li key={`${clause}-${index}`}>{clause}</li>)}
                   </ul>
-                  {aiResult.identity_update.block_reason ? <p className="mt-2 text-xs text-amber-600">{aiResult.identity_update.block_reason}</p> : null}
+                  {aiResult.identity_update.block_reason ? <p className="mt-2 text-xs text-[hsl(var(--warning))]">{aiResult.identity_update.block_reason}</p> : null}
                   <div className="mt-3 flex flex-wrap gap-2">
                     {!aiResult.identity_update.applied && aiTarget?.lifecycle_status === 'pending' ? (
                       <Button size="sm" disabled={aiLoading || Boolean(aiResult.identity_update.block_reason)} onClick={() => void applyAIIdentity()}>
@@ -2108,7 +2109,7 @@ function IntelligenceView() {
             <DialogDescription>{t('promptFilter.intelligence.createDraftDesc')}</DialogDescription>
           </DialogHeader>
           {draftTarget?.sample_preview ? (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm whitespace-pre-wrap break-words">{draftTarget.sample_preview}</div>
+            <div className="rounded-lg border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-sm whitespace-pre-wrap break-words">{draftTarget.sample_preview}</div>
           ) : null}
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label={t('promptFilter.intelligence.draftName')}><Input value={draftForm.name} onChange={(event) => setDraftForm((current) => ({ ...current, name: event.target.value }))} /></Field>
@@ -2513,7 +2514,7 @@ function DocsView() {
       <article className="overflow-hidden rounded-xl border border-foreground/12 bg-card shadow-sm">
         <header className="relative overflow-hidden border-b border-foreground/10 bg-gradient-to-br from-primary/[0.07] via-card to-card px-6 py-7 sm:px-8 sm:py-8">
           <div className="pointer-events-none absolute -right-16 -top-20 size-56 rounded-full bg-primary/10 blur-3xl" />
-          <div className="pointer-events-none absolute -bottom-20 right-20 size-40 rounded-full bg-sky-400/10 blur-3xl" />
+          <div className="pointer-events-none absolute -bottom-20 right-20 size-40 rounded-full bg-[hsl(var(--info))]/10 blur-3xl" />
           <div className="relative flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div className="max-w-3xl">
               <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/8 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-primary">
@@ -2650,9 +2651,9 @@ function DocsView() {
                         key={card.title}
                         className={cn(
                           'rounded-xl border p-4 shadow-sm',
-                          card.tone === 'warn' && 'border-amber-500/25 bg-amber-500/[0.06]',
-                          card.tone === 'danger' && 'border-rose-500/25 bg-rose-500/[0.06]',
-                          card.tone === 'success' && 'border-emerald-500/25 bg-emerald-500/[0.06]',
+                          card.tone === 'warn' && 'border-[hsl(var(--warning))]/25 bg-[hsl(var(--warning-bg))]',
+                          card.tone === 'danger' && 'border-destructive/30 bg-destructive/10',
+                          card.tone === 'success' && 'border-[hsl(var(--success))]/25 bg-[hsl(var(--success-bg))]',
                           (!card.tone || card.tone === 'neutral') && 'border-foreground/10 bg-muted/20',
                         )}
                       >
@@ -2697,8 +2698,8 @@ function DocsView() {
                 ) : null}
 
                 {section.callout ? (
-                  <div className="flex gap-3 rounded-xl border border-amber-500/25 bg-amber-500/[0.07] px-4 py-3.5">
-                    <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <div className="flex gap-3 rounded-xl border border-[hsl(var(--warning))]/25 bg-[hsl(var(--warning-bg))] px-4 py-3.5">
+                    <AlertTriangle className="mt-0.5 size-4 shrink-0 text-[hsl(var(--warning))]" />
                     <p className="text-sm leading-6 text-foreground/85">{section.callout}</p>
                   </div>
                 ) : null}
@@ -2992,19 +2993,24 @@ function OverviewView({
   return (
     <>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
-        <MetricTile label={t('promptFilter.status')}>
-          <Badge variant={form.prompt_filter_enabled ? 'default' : 'outline'}>
-            {form.prompt_filter_enabled ? t('common.enabled') : t('common.disabled')}
-          </Badge>
-        </MetricTile>
-        <MetricTile label={t('promptFilter.currentMode')}>
-          {modeOptions.find((item) => item.value === form.prompt_filter_mode)?.label ?? t('promptFilter.unknownMode')}
-        </MetricTile>
-        <MetricTile label={t('promptFilter.recentBlockedLogs')}>{stats.blocks}</MetricTile>
-        <MetricTile label={t('promptFilter.totalLogs')}>{totalLogs}</MetricTile>
-        <MetricTile label={t('promptFilter.latestLog')}>
-          {stats.latest ? formatRelativeTime(stats.latest, { variant: 'compact' }) : '-'}
-        </MetricTile>
+        <StatTile
+          label={t('promptFilter.status')}
+          value={(
+            <Badge variant={form.prompt_filter_enabled ? 'default' : 'outline'}>
+              {form.prompt_filter_enabled ? t('common.enabled') : t('common.disabled')}
+            </Badge>
+          )}
+        />
+        <StatTile
+          label={t('promptFilter.currentMode')}
+          value={modeOptions.find((item) => item.value === form.prompt_filter_mode)?.label ?? t('promptFilter.unknownMode')}
+        />
+        <StatTile label={t('promptFilter.recentBlockedLogs')} value={stats.blocks} />
+        <StatTile label={t('promptFilter.totalLogs')} value={totalLogs} />
+        <StatTile
+          label={t('promptFilter.latestLog')}
+          value={stats.latest ? formatRelativeTime(stats.latest, { variant: 'compact' }) : '-'}
+        />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(420px,1.1fr)]">
@@ -3370,7 +3376,7 @@ function OverviewView({
 
               {expertSettingsOpen ? (
                 <div className="mt-4 space-y-5 border-t pt-4">
-                  <p className="rounded-md border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-xs leading-5 text-muted-foreground">{t('promptFilter.expertSettingsWarning')}</p>
+                  <p className="rounded-md border border-[hsl(var(--warning))]/20 bg-[hsl(var(--warning-bg))] px-3 py-2 text-xs leading-5 text-muted-foreground">{t('promptFilter.expertSettingsWarning')}</p>
                   <div className="grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-4 rounded-lg border p-4">
                     <Field label={t('promptFilter.threshold')}><DraftNumberInput min={1} max={100} value={form.prompt_filter_threshold} onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_threshold: value }))} /></Field>
                     <Field label={t('promptFilter.strictThreshold')}><DraftNumberInput min={1} max={100} value={form.prompt_filter_strict_threshold} onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_strict_threshold: value }))} /></Field>
@@ -3833,7 +3839,7 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
                 <AuditHealthMetric label={t('promptFilter.auditHealth.queuePending')} value={auditHealth.queue.pending_high + auditHealth.queue.pending_low} />
                 <AuditHealthMetric label={t('promptFilter.auditHealth.queueFailures')} value={auditHealth.queue.failed + auditHealth.queue.dropped_high} danger={auditHealth.queue.failed + auditHealth.queue.dropped_high > 0} />
               </div>
-              <div className={cn('rounded-lg border p-3 text-sm', auditHealth.review_pool.available === 0 && 'border-amber-500/40 bg-amber-500/5')}>
+              <div className={cn('rounded-lg border p-3 text-sm', auditHealth.review_pool.available === 0 && 'border-[hsl(var(--warning))]/40 bg-[hsl(var(--warning-bg))]')}>
                 <div className="font-medium">{auditHealth.review_fail_closed ? t('promptFilter.auditHealth.fallbackBlock') : t('promptFilter.auditHealth.fallbackLocal')}</div>
                 <div className="mt-1 text-xs text-muted-foreground">
                   {t('promptFilter.auditHealth.reviewPoolDetail', { cooling: auditHealth.review_pool.cooling_down, probing: auditHealth.review_pool.probing })}
@@ -3869,7 +3875,7 @@ function AuditHealthFlag({ label, enabled }: { label: string; enabled: boolean }
   return (
     <div className="rounded-lg border p-3">
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className={cn('mt-1 text-sm font-medium', enabled ? 'text-emerald-600' : 'text-destructive')}>
+      <div className={cn('mt-1 text-sm font-medium', enabled ? 'text-[hsl(var(--success))]' : 'text-destructive')}>
         {enabled ? t('common.enabled') : t('common.disabled')}
       </div>
     </div>
@@ -3963,7 +3969,7 @@ function RiskProfilesView() {
           </Button>
         </div>
 
-        <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
+        <div className="mb-4 rounded-lg border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-sm text-[hsl(var(--warning))]">
           <div className="flex items-start gap-2"><ShieldAlert className="mt-0.5 size-4 shrink-0" /><span>{guardrail || t('promptFilter.risk.guardrail')}</span></div>
           {scoringVersion ? <div className="mt-1 pl-6 font-mono text-xs opacity-75">{scoringVersion}</div> : null}
         </div>
@@ -4133,7 +4139,7 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
       <DialogContent className="max-h-[90vh] sm:max-w-6xl overflow-y-auto">
         <DialogHeader><DialogTitle>{t('promptFilter.risk.detailTitle')}</DialogTitle><DialogDescription>{promptRiskIdentityPrimary(item)} · {t(`promptFilter.risk.subjects.${item.subject_type}`)}</DialogDescription></DialogHeader>
         {loading && !detail ? <div className="py-8 text-center text-sm text-muted-foreground">{t('common.loading')}</div> : error ? <div className="text-sm text-destructive">{error}</div> : <div className="space-y-4">
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">{detail?.guardrail || t('promptFilter.risk.guardrail')}</div>
+          <div className="rounded-lg border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-sm text-[hsl(var(--warning))]">{detail?.guardrail || t('promptFilter.risk.guardrail')}</div>
           {item.conversation_lock?.status === 'active' ? <div className="rounded-lg border border-destructive/35 bg-destructive/5 p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div><div className="flex items-center gap-2 font-semibold text-destructive"><ShieldAlert className="size-4" />{t('promptFilter.risk.conversationLock.title')}<Badge variant="destructive">{t('promptFilter.risk.conversationLock.active')}</Badge></div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.risk.conversationLock.description')}</p></div>
@@ -4151,7 +4157,7 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
             </div>
             {item.trust_policy ? <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><PromptPolicyDetailField label={t('promptFilter.risk.trust.source')} value={t(`promptFilter.risk.trust.sources.${item.trust_policy.source || 'manual'}`)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.validUntil')} value={formatBeijingTime(item.trust_policy.valid_until)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.threshold')} value={String(item.trust_policy.risk_threshold)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.bypassCount')} value={String(item.trust_policy.bypass_count)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.modelReviewCount')} value={String(item.trust_policy.model_review_count ?? 0)} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.lastModelReview')} value={item.trust_policy.last_model_review_at ? formatBeijingTime(item.trust_policy.last_model_review_at) : '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.trust.lastEvaluation')} value={item.trust_policy.last_evaluated_at ? `${item.trust_policy.last_risk_score} · ${formatBeijingTime(item.trust_policy.last_evaluated_at)}` : '-'} /></div> : <p className="mt-3 text-xs text-muted-foreground">{item.is_person ? t('promptFilter.risk.trust.notEnabled') : t('promptFilter.risk.trust.personOnly')}</p>}
           </div>
-          {detail?.adaptive_review_basis ? <div className="rounded-lg border border-sky-500/25 bg-sky-500/[0.04] p-4">
+          {detail?.adaptive_review_basis ? <div className="rounded-lg border border-[hsl(var(--info))]/25 bg-[hsl(var(--info-bg))] p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div><div className="font-semibold">{t('promptFilter.risk.trust.basisTitle')}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.risk.trust.basisDescription')}</p></div>
               <Badge variant={detail.adaptive_review_basis.decision === 'adaptive_active' ? 'default' : 'outline'}>{t(`promptFilter.risk.trust.decisions.${detail.adaptive_review_basis.decision}`, { defaultValue: detail.adaptive_review_basis.decision })}</Badge>
@@ -4169,10 +4175,10 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
             <div className="mt-3 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">{item.trust_policy?.reason || t('promptFilter.risk.trust.basisFallbackReason')}</div>
           </div> : null}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <MetricTile label={t('promptFilter.risk.totalScore')}><span className="font-mono text-xl">{item.risk_score}</span> <Badge className={promptRiskBadgeClass(item.risk_level)}>{t(`promptFilter.risk.levels.${item.risk_level}`)}</Badge></MetricTile>
-            <MetricTile label={t('promptFilter.risk.localSignal')}><span className="font-mono text-xl">{item.score_breakdown.local_signal}</span></MetricTile>
-            <MetricTile label={t('promptFilter.risk.upstreamSignal')}><span className="font-mono text-xl">{item.score_breakdown.upstream_signal}</span></MetricTile>
-            <MetricTile label={t('promptFilter.risk.recurrence')}><span className="font-mono text-xl">{item.score_breakdown.recurrence}</span></MetricTile>
+            <StatTile label={t('promptFilter.risk.totalScore')} value={item.risk_score} sub={<Badge className={promptRiskBadgeClass(item.risk_level)}>{t(`promptFilter.risk.levels.${item.risk_level}`)}</Badge>} />
+            <StatTile label={t('promptFilter.risk.localSignal')} value={item.score_breakdown.local_signal} />
+            <StatTile label={t('promptFilter.risk.upstreamSignal')} value={item.score_breakdown.upstream_signal} />
+            <StatTile label={t('promptFilter.risk.recurrence')} value={item.score_breakdown.recurrence} />
           </div>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             <PromptPolicyDetailField label={t('promptFilter.risk.identity')} value={`${promptRiskIdentityPrimary(item)} · ${item.is_person ? t('promptFilter.risk.person') : t('promptFilter.risk.nonPerson')}`} />
@@ -4204,7 +4210,7 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
           <Field label={t('promptFilter.risk.trust.threshold')}><DraftNumberInput min={15} max={79} value={trustDraft.riskThreshold} onValueChange={(value) => setTrustDraft((current) => ({ ...current, riskThreshold: value }))} /></Field>
         </div>
         <Field label={t('promptFilter.risk.trust.reason')} hint={t('promptFilter.risk.trust.reasonHint')}><Textarea rows={4} value={trustDraft.reason} onChange={(event) => setTrustDraft((current) => ({ ...current, reason: event.target.value }))} /></Field>
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-5 text-muted-foreground">{t('promptFilter.risk.trust.safetyHint')}</div>
+        <div className="rounded-lg border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-xs leading-5 text-muted-foreground">{t('promptFilter.risk.trust.safetyHint')}</div>
         <DialogFooter><Button variant="outline" disabled={trustSaving} onClick={() => setTrustOpen(false)}>{t('common.cancel')}</Button><Button disabled={trustSaving || !trustDraft.reason.trim()} onClick={() => void saveTrust()}>{trustSaving ? t('common.saving') : t('common.save')}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
@@ -4750,9 +4756,9 @@ function RulePatternTester({ pattern, className }: { pattern: string; className?
   }
 
   const resultClass = state.result === 'matched'
-    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+    ? 'border-[hsl(var(--success))]/30 bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]'
     : state.result === 'not_matched'
-      ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+      ? 'border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] text-[hsl(var(--warning))]'
       : 'border-destructive/30 bg-destructive/10 text-destructive'
 
   return (
@@ -4920,7 +4926,7 @@ function PromptPolicyIncidentsTable({ incidents }: { incidents: PromptPolicyInci
               <TableCell>
                 <div className="max-w-[180px] truncate text-sm" title={incident.account_name}>{incident.account_name || `#${incident.account_id || '-'}`}</div>
                 <div className="max-w-[200px] truncate text-xs text-muted-foreground" title={incident.account_group_names?.join(', ')}>{incident.account_group_names?.join(', ') || '-'}</div>
-				{incident.routing_snapshot_state === 'current_inferred' ? <div className="text-[11px] text-amber-600 dark:text-amber-300">{t('promptFilter.cyberRoutingState.current_inferred')}</div> : null}
+				{incident.routing_snapshot_state === 'current_inferred' ? <div className="text-[11px] text-[hsl(var(--warning))]">{t('promptFilter.cyberRoutingState.current_inferred')}</div> : null}
               </TableCell>
               <TableCell className="font-mono text-xs">{formatPromptPolicyScore(incident.local_score, t('promptFilter.cyberUnscored'))} / {formatPromptPolicyScore(incident.local_audit_score, t('promptFilter.cyberUnscored'))}</TableCell>
               <TableCell><div className="font-mono text-xs">{incident.endpoint || '-'}</div><div className="text-xs text-muted-foreground">{incident.model || '-'}</div></TableCell>
@@ -4966,7 +4972,7 @@ function PromptPolicyIncidentDetailButton({ incident }: { incident: PromptPolicy
           </DialogHeader>
           {loading ? <div className="py-8 text-center text-sm text-muted-foreground">{t('common.loading')}</div> : error ? <div className="text-sm text-destructive">{error}</div> : (
             <div className="space-y-4 text-sm">
-              {item.local_evaluation_state === 'legacy_unknown' ? <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-amber-700 dark:text-amber-300">{t('promptFilter.cyberLegacyUnknown')}</div> : null}
+              {item.local_evaluation_state === 'legacy_unknown' ? <div className="rounded-md border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-[hsl(var(--warning))]">{t('promptFilter.cyberLegacyUnknown')}</div> : null}
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 <PromptPolicyDetailField label={t('promptFilter.cyberUpstream')} value={`${item.status_code || '-'} · ${item.upstream_error_code || 'cyber_policy'}`} />
                 <PromptPolicyDetailField label={t('promptFilter.cyberLocalResult')} value={`${t(`promptFilter.cyberState.${item.local_evaluation_state}`)} · ${t(`promptFilter.cyberOutcome.${item.local_outcome}`)}`} />
@@ -5114,15 +5120,6 @@ function PromptFilterLogsTable({ logs, compact = false }: { logs: PromptFilterLo
   )
 }
 
-function MetricTile({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="flex min-h-[76px] flex-col justify-between gap-2 rounded-lg border border-border bg-card p-3 shadow-sm">
-      <span className="text-[11px] font-bold uppercase text-muted-foreground">{label}</span>
-      <div className="text-sm font-semibold text-foreground">{children}</div>
-    </div>
-  )
-}
-
 function SectionTitle({ title }: { title: string }) {
   return <h3 className="text-base font-semibold leading-tight text-foreground">{title}</h3>
 }
@@ -5164,14 +5161,14 @@ function TestDecisionBadge({ result }: { result: PromptFilterTestResponse }) {
   }
   if (action === 'warn') {
     return (
-      <Badge variant="outline" className="gap-1.5 border-amber-500/30 text-amber-700 dark:text-amber-300">
+      <Badge variant="outline" className="gap-1.5 border-[hsl(var(--warning))]/30 text-[hsl(var(--warning))]">
         <AlertTriangle className="size-3" />
         {t('promptFilter.modeWarn')}
       </Badge>
     )
   }
   return (
-    <Badge variant="outline" className="gap-1.5 border-emerald-500/30 text-emerald-700 dark:text-emerald-300">
+    <Badge variant="outline" className="gap-1.5 border-[hsl(var(--success))]/30 text-[hsl(var(--success))]">
       <CheckCircle2 className="size-3" />
       {t('promptFilter.actionAllow')}
     </Badge>
@@ -5283,7 +5280,7 @@ function HighlightedParts({ parts, className }: { parts: Array<{ text: string; h
   return (
     <span className={className}>
       {parts.map((part, index) => part.hit ? (
-        <mark key={index} className="rounded bg-amber-200 px-1 py-0.5 font-medium text-amber-950 dark:bg-amber-400/25 dark:text-amber-100">
+        <mark key={index} className="rounded bg-[hsl(var(--warning))]/25 px-1 py-0.5 font-medium text-foreground dark:bg-[hsl(var(--warning))]/30">
           {part.text}
         </mark>
       ) : <span key={index}>{part.text}</span>)}
@@ -5419,13 +5416,13 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
           <div className="mt-2 space-y-1 text-[11px] leading-4 text-muted-foreground">
             {log.primary_origin ? (
               <div className="flex min-w-0 items-center gap-1.5" title={`${t('promptFilter.triggerOrigin')}: ${primaryOriginLabel}`}>
-                <FileText className="size-3 shrink-0 text-sky-600 dark:text-sky-400" />
+                <FileText className="size-3 shrink-0 text-[hsl(var(--info))]" />
                 <span className="min-w-0 truncate">{primaryOriginLabel}</span>
               </div>
             ) : null}
             {log.review_model ? (
               <div className="flex min-w-0 items-center gap-1.5">
-                <Sparkles className={cn('size-3 shrink-0', log.review_flagged ? 'text-destructive' : 'text-emerald-600 dark:text-emerald-400')} />
+                <Sparkles className={cn('size-3 shrink-0', log.review_flagged ? 'text-destructive' : 'text-[hsl(var(--success))]')} />
                 <span className="min-w-0 truncate">{log.review_flagged ? t('promptFilter.labels.reviewFlagged') : t('promptFilter.labels.reviewCleared')}</span>
               </div>
             ) : null}
@@ -5483,7 +5480,7 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
                 title={`${match.name} · ${match.weight}`}
               >
                 <div className="flex min-w-0 items-start gap-1.5">
-                  <span className={cn('mt-1 size-1.5 shrink-0 rounded-full', match.strict ? 'bg-destructive' : 'bg-amber-500')} />
+                  <span className={cn('mt-1 size-1.5 shrink-0 rounded-full', match.strict ? 'bg-destructive' : 'bg-[hsl(var(--warning))]')} />
                   <span className="min-w-0 break-words font-mono text-[11px] leading-4 text-foreground">{match.name.split('_').join('_\u200b')}</span>
                 </div>
                 <div className="mt-1 pl-3 font-mono text-[10px] text-muted-foreground">{t('promptFilter.ruleWeight')} {match.weight}</div>
@@ -5503,10 +5500,10 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
       <TableCell className="min-w-0">
         <div className="space-y-1.5">
           {matchContext ? (
-            <div className="min-w-0 rounded-md border border-amber-500/20 bg-amber-500/[0.06] px-2 py-1.5">
-              <div className="mb-0.5 flex min-w-0 items-center gap-1 text-[10px] font-semibold text-amber-700 dark:text-amber-300">
+            <div className="min-w-0 rounded-md border border-[hsl(var(--warning))]/20 bg-[hsl(var(--warning-bg))] px-2 py-1.5">
+              <div className="mb-0.5 flex min-w-0 items-center gap-1 text-[10px] font-semibold text-[hsl(var(--warning))]">
                 <span className="shrink-0">{t('promptFilter.matchContextLabel')}</span>
-                <span aria-hidden="true" className="text-amber-600/60 dark:text-amber-300/60">·</span>
+                <span aria-hidden="true" className="text-[hsl(var(--warning))]/60">·</span>
                 <span className="truncate" title={`${t('promptFilter.triggerOrigin')}: ${primaryOriginLabel}`}>{primaryOriginLabel}</span>
               </div>
               <div
@@ -5591,10 +5588,10 @@ function LogScoreMeter({
         ? 'bg-indigo-500'
         : 'bg-sky-500'
     : scoreBand === 'high'
-      ? 'bg-red-500'
+      ? 'bg-destructive'
       : scoreBand === 'medium'
-        ? 'bg-amber-500'
-        : 'bg-emerald-500'
+        ? 'bg-[hsl(var(--warning))]'
+        : 'bg-[hsl(var(--success))]'
 
   return (
     <div className="min-w-0" title={description}>
@@ -5626,7 +5623,7 @@ function LogScoreMeter({
 function ActionBadge({ action }: { action: string }) {
   const { t } = useTranslation()
   if (action === 'block') return <Badge variant="destructive">{t('promptFilter.modeBlock')}</Badge>
-  if (action === 'warn') return <Badge variant="outline" className="border-amber-500/30 text-amber-700 dark:text-amber-300">{t('promptFilter.modeWarn')}</Badge>
+  if (action === 'warn') return <Badge variant="outline" className="border-[hsl(var(--warning))]/30 text-[hsl(var(--warning))]">{t('promptFilter.modeWarn')}</Badge>
   return <Badge variant="outline">{t('promptFilter.actionAllow')}</Badge>
 }
 
