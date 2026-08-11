@@ -1,6 +1,6 @@
 import type { ChangeEvent, ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { NavLink, useParams } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import {
   AlertTriangle,
@@ -32,6 +32,7 @@ import { api } from '@/api'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import { StatTile } from '../components/StatTile'
+import { SegmentedTabs } from '../components/SegmentedTabs'
 import ChipInput from '../components/ChipInput'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -1341,33 +1342,16 @@ export default function PayloadRules() {
 
 function PayloadRulesTabs({ activeView }: { activeView: PayloadRulesView }) {
   const { t } = useTranslation()
-  const tabs = [
-    { view: 'editor' as const, label: t('payloadRules.views.editor'), to: '/payload-rules/editor' },
-    { view: 'docs' as const, label: t('payloadRules.views.docs'), to: '/payload-rules/docs' },
-  ]
-  const activeIndex = Math.max(0, tabs.findIndex((tab) => tab.view === activeView))
   return (
     <div className="mb-5 flex justify-center">
-      <div className="relative grid w-full max-w-[420px] grid-cols-2 rounded-2xl border border-border bg-background/80 p-1 shadow-sm backdrop-blur-lg" role="tablist">
-        <div
-          className="pointer-events-none absolute left-1 top-1 h-[calc(100%-0.5rem)] rounded-xl border border-primary/15 bg-primary/8 transition-transform duration-300 ease-out"
-          style={{ width: 'calc((100% - 0.5rem) / 2)', transform: `translateX(${activeIndex * 100}%)` }}
-        />
-        {tabs.map((tab) => (
-          <NavLink
-            key={tab.view}
-            to={tab.to}
-            role="tab"
-            aria-selected={activeView === tab.view}
-            className={cn(
-              'relative z-10 flex h-9 items-center justify-center rounded-xl px-3 text-sm font-semibold transition-colors',
-              activeView === tab.view ? 'text-primary' : 'text-muted-foreground hover:text-foreground',
-            )}
-          >
-            {tab.label}
-          </NavLink>
-        ))}
-      </div>
+      <SegmentedTabs
+        className="w-full max-w-[420px] backdrop-blur-lg"
+        tabs={[
+          { value: 'editor', label: t('payloadRules.views.editor'), to: '/payload-rules/editor' },
+          { value: 'docs', label: t('payloadRules.views.docs'), to: '/payload-rules/docs' },
+        ]}
+        value={activeView}
+      />
     </div>
   )
 }

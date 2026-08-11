@@ -17,6 +17,7 @@ import { api } from '../api'
 import OpsTabs from '../components/OpsTabs'
 import PageHeader from '../components/PageHeader'
 import { StatTile } from '../components/StatTile'
+import { SegmentedTabs } from '../components/SegmentedTabs'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
@@ -291,22 +292,15 @@ export default function OperationsErrors() {
                 <h3 className="text-base font-semibold text-foreground">{t('opsErrors.tableTitle')}</h3>
                 <p className="mt-1 text-sm text-muted-foreground">{t('opsErrors.tableDesc')}</p>
               </div>
-              <div className="inline-flex rounded-lg border border-border bg-muted/50 p-0.5">
-                {ERROR_TIME_RANGES.map((key) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => { setTimeRange(key); setPage(1) }}
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-all duration-200 ${
-                      timeRange === key
-                        ? 'bg-background text-foreground shadow-sm border border-border'
-                        : 'text-muted-foreground hover:text-foreground'
-                    }`}
-                  >
-                    {t(`dashboard.timeRange${key.toUpperCase()}`)}
-                  </button>
-                ))}
-              </div>
+              <SegmentedTabs
+                size="sm"
+                tabs={ERROR_TIME_RANGES.map((key) => ({
+                  value: key,
+                  label: t(`dashboard.timeRange${key.toUpperCase()}`),
+                }))}
+                value={timeRange}
+                onValueChange={(value) => { setTimeRange(value as TimeRangeKey); setPage(1) }}
+              />
             </div>
 
             <div className="toolbar-surface mb-4 flex flex-wrap items-center gap-2">

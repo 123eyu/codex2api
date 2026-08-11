@@ -13,6 +13,7 @@ import ChipInput from "../components/ChipInput";
 import Modal from "../components/Modal";
 import ChannelLogo from "../components/ChannelLogo";
 import PageHeader from "../components/PageHeader";
+import { SegmentedTabs } from "../components/SegmentedTabs";
 import StateShell from "../components/StateShell";
 import StatCard from "../components/StatCard";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
@@ -1150,28 +1151,16 @@ export default function APIKeys() {
         </div>
 
         <div className="space-y-4">
-          <div className="inline-flex items-center gap-0.5 rounded-xl border border-border bg-muted/30 p-0.5">
-            {(
-              [
-                ["keys", t("apiKeys.tabKeys")],
-                ["token-usage", t("apiKeys.tabTokenUsage")],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setActiveTab(key)}
-                className={cn(
-                  "rounded-lg px-3.5 py-1.5 text-[13px] font-semibold transition-colors",
-                  activeTab === key
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <SegmentedTabs
+            size="sm"
+            className="w-full max-w-[320px]"
+            tabs={[
+              { value: "keys", label: t("apiKeys.tabKeys") },
+              { value: "token-usage", label: t("apiKeys.tabTokenUsage") },
+            ]}
+            value={activeTab}
+            onValueChange={(value) => setActiveTab(value as "keys" | "token-usage")}
+          />
 
           {activeTab === "keys" && (
             <>
@@ -2123,30 +2112,14 @@ export default function APIKeys() {
                 </div>
               </div>
 
-              <div className="flex gap-1 rounded-xl border border-border bg-muted/50 p-1">
-                <button
-                  type="button"
-                  onClick={() => setEditTab("basic")}
-                  className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition-all ${
-                    editTab === "basic"
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {t("apiKeys.editTabBasic")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditTab("limits")}
-                  className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition-all ${
-                    editTab === "limits"
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {t("apiKeys.editTabLimits")}
-                </button>
-              </div>
+              <SegmentedTabs
+                tabs={[
+                  { value: "basic", label: t("apiKeys.editTabBasic") },
+                  { value: "limits", label: t("apiKeys.editTabLimits") },
+                ]}
+                value={editTab}
+                onValueChange={(value) => setEditTab(value as "basic" | "limits")}
+              />
 
               {editTab === "basic" ? (
                 <>
