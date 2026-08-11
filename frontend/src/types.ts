@@ -182,6 +182,9 @@ export interface AccountRow {
   usage_window_7d_seconds?: number
   billed_5h?: number
   billed_7d?: number
+  // 官方结算口径的近 7 天成本(美元)。来自 account_daily_usage 快照,与
+  // billed_7d(本地日志算的网关成本)是两套账,列表里并排展示。
+  official_usd_7d?: number
   cooldown_until?: ISODateString
   cooldown_reason?: string
   model_cooldowns?: Array<{
@@ -260,6 +263,7 @@ export interface AccountPageStatsItem {
   usage_7d_detail?: AccountUsageWindow
   billed_5h?: number
   billed_7d?: number
+  official_usd_7d?: number
 }
 
 export interface AccountPageStatsResponse {

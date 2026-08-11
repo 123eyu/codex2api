@@ -131,6 +131,8 @@ import {
   ToggleRight,
   MoreHorizontal,
   Sparkles,
+  Receipt,
+  Router,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import AccountUsageModal from "../components/AccountUsageModal";
@@ -2369,6 +2371,7 @@ export default function Accounts() {
         const merged = { ...account };
         if (merged.billed_5h == null && stats.billed_5h != null) merged.billed_5h = stats.billed_5h;
         if (merged.billed_7d == null && stats.billed_7d != null) merged.billed_7d = stats.billed_7d;
+        if (merged.official_usd_7d == null && stats.official_usd_7d != null) merged.official_usd_7d = stats.official_usd_7d;
         if (!merged.usage_5h_detail && stats.usage_5h_detail) merged.usage_5h_detail = stats.usage_5h_detail;
         if (!merged.usage_7d_detail && stats.usage_7d_detail) merged.usage_7d_detail = stats.usage_7d_detail;
         return merged;
@@ -13743,22 +13746,58 @@ function UsageCell({
   return <span className="text-[13px] text-muted-foreground">-</span>;
 }
 
+// 成本列并排两套账,颜色区分口径:
+// 上行(石板色)是网关自己的日志算出来的,只含经由本网关转发的请求;
+// 下行(琥珀色)是 OpenAI 官方结算数,还包含用户直接用官方客户端的消耗。
+// 两者不该相等,差额就是账号在网关之外的用量。
 function BilledCell({ account }: { account: AccountRow }) {
+  const { t } = useTranslation();
   const h5 = typeof account.billed_5h === "number" ? account.billed_5h.toFixed(2) : null;
   const d7 = typeof account.billed_7d === "number" ? account.billed_7d.toFixed(2) : null;
   const has5hWindow =
     (account.usage_percent_5h !== null && account.usage_percent_5h !== undefined) ||
     !!account.reset_5h_at;
   const visibleH5 = has5hWindow ? h5 : null;
-  if (visibleH5 === null && d7 === null) return <span className="text-[12px] text-muted-foreground">-</span>;
+  const official =
+    typeof account.official_usd_7d === "number" ? account.official_usd_7d : null;
+  if (visibleH5 === null && d7 === null && official === null) {
+    return <span className="text-[12px] text-muted-foreground">-</span>;
+  }
   const longLabel = formatLongUsageWindowLabel(account);
   return (
-    <span className="text-[12px] text-muted-foreground">
-      {visibleH5 !== null && `5h: $${visibleH5}`}
-      {visibleH5 !== null && " / "}
-      {d7 !== null ? `${longLabel}: $${d7}` : `${longLabel}: -`}
-    </span>
+    <div className="flex flex-col items-start gap-1">
+      {(visibleH5 !== null || d7 !== null) && (
+        <span
+          className="inline-flex items-center gap-1 rounded-md bg-slate-500/10 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-slate-700 ring-1 ring-inset ring-slate-500/20 dark:text-slate-300"
+          title={t("accounts.billedGatewayHint")}
+        >
+          <Router className="size-3 shrink-0" aria-hidden />
+          {visibleH5 !== null && `5h: $${visibleH5}`}
+          {visibleH5 !== null && d7 !== null && " / "}
+          {d7 !== null ? `${longLabel}: $${d7}` : null}
+        </span>
+      )}
+      {official !== null && (
+        <span
+          className="inline-flex items-center gap-1 rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-400"
+          title={t("accounts.billedOfficialHint")}
+        >
+          <Receipt className="size-3 shrink-0" aria-hidden />
+          {t("accounts.billedOfficialLabel")}: {formatOfficialUSD(official)}
+        </span>
+      )}
+    </div>
   );
+}
+
+// 官方成本可能很小(几分钱)也可能上千,统一两位小数,极小值不显示成 $0.00。
+function formatOfficialUSD(value: number): string {
+  if (!Number.isFinite(value) || value === 0) return "$0";
+  if (Math.abs(value) < 0.01) return "<$0.01";
+  return `$${value.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 function getAccountStatusCountdownUntil(
