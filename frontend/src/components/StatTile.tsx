@@ -5,8 +5,8 @@ export type StatTileTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'
 
 const SURFACE_TONE: Record<StatTileTone, string> = {
   neutral: 'border-border bg-card/85',
-  info: 'border-border bg-card/85',
-  success: 'border-border bg-card/85',
+  info: 'border-primary/25 bg-primary/[0.06]',
+  success: 'border-emerald-500/25 bg-emerald-500/[0.07]',
   warning: 'border-amber-500/25 bg-amber-500/10',
   danger: 'border-destructive/20 bg-destructive/10',
 }

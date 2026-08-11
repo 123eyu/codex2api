@@ -31,6 +31,7 @@ import {
 import { api } from '@/api'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
+import { StatTile } from '../components/StatTile'
 import ChipInput from '../components/ChipInput'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -425,16 +426,6 @@ function formStateToEntry(form: RuleFormState): RuleEntry | null {
 
 // ==================== 子组件 ====================
 
-function StatTile({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: boolean }) {
-  return (
-    <div className="rounded-xl border border-border/80 bg-card/85 px-4 py-3 shadow-sm">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className={cn('mt-1 text-xl font-bold tabular-nums', accent ? 'text-primary' : 'text-foreground')}>{value}</div>
-      {hint ? <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{hint}</div> : null}
-    </div>
-  )
-}
-
 function GateChips({ entry }: { entry: RuleEntry }) {
   const { t } = useTranslation()
   const chips: Array<{ key: string; label: string; mono?: boolean }> = []
@@ -824,12 +815,13 @@ export default function PayloadRules() {
             <StatTile
               label={t('payloadRules.statStatus')}
               value={entries.length > 0 ? t('payloadRules.statusActive') : t('payloadRules.statusEmpty')}
-              hint={dirty ? t('payloadRules.unsaved') : undefined}
-              accent={entries.length > 0}
+              sub={dirty ? t('payloadRules.unsaved') : undefined}
+              tone={entries.length > 0 ? 'success' : 'neutral'}
+              toneSurface={entries.length > 0}
             />
             <StatTile label={t('payloadRules.statTotal')} value={String(entries.length)} />
-            <StatTile label={t('payloadRules.statInstructions')} value={String(instructionsRuleCount)} hint={t('payloadRules.statInstructionsHint')} />
-            <StatTile label={t('payloadRules.statConditional')} value={String(conditionalRuleCount)} hint={t('payloadRules.statConditionalHint')} />
+            <StatTile label={t('payloadRules.statInstructions')} value={String(instructionsRuleCount)} sub={t('payloadRules.statInstructionsHint')} />
+            <StatTile label={t('payloadRules.statConditional')} value={String(conditionalRuleCount)} sub={t('payloadRules.statConditionalHint')} />
           </div>
 
           {/* 风险提示 */}

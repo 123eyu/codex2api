@@ -307,14 +307,14 @@ export default function Dashboard() {
         {/* 渠道切换时整块内容淡入过渡（key 变化触发重播） */}
         <div key={channel || 'all'} className="animate-channel-switch-in">
         {/* Hero summary */}
-        <div className="relative mb-5 overflow-hidden rounded-2xl border border-border/80 bg-card p-4 shadow-sm sm:mb-6 sm:p-5">
+        <div className="relative mb-5 overflow-hidden rounded-xl border border-border/80 bg-card p-4 shadow-sm sm:mb-6 sm:p-5">
           <div
             aria-hidden
-            className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,color-mix(in_oklab,var(--color-primary)_12%,transparent),transparent_55%)]"
+            className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,color-mix(in_oklab,var(--color-primary)_7%,transparent),transparent_55%)]"
           />
           <div className="relative z-10 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="min-w-0">
-              <div className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                 {t('dashboard.heroLabel')}
               </div>
               <div className="mt-1 flex flex-wrap items-end gap-x-3 gap-y-1">
@@ -379,7 +379,7 @@ export default function Dashboard() {
         </div>
 
         {/* Account status */}
-        <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-5 sm:gap-4">
+        <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-5 sm:gap-4">
           <StatCard icon={icons.total} iconClass="blue" label={t('dashboard.totalAccounts')} value={total} />
           <StatCard
             icon={icons.available}

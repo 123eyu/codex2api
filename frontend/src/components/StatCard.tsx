@@ -30,7 +30,7 @@ export default function StatCard({ icon, iconClass, label, value, sub, className
       <CardContent className="relative flex flex-col justify-between gap-2 p-4 sm:p-5">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <label className="block text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+            <label className="block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
               {label}
             </label>
             <div className="mt-2 text-[26px] font-bold leading-none tabular-nums tracking-tight text-foreground sm:text-[28px]">
