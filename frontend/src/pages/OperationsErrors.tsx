@@ -16,6 +16,7 @@ import {
 import { api } from '../api'
 import OpsTabs from '../components/OpsTabs'
 import PageHeader from '../components/PageHeader'
+import { StatTile } from '../components/StatTile'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
@@ -244,38 +245,38 @@ export default function OperationsErrors() {
         />
         <OpsTabs />
 
-        <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4 sm:gap-4">
-          <SummaryPill
+        <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
+          <StatTile
             label={t('opsErrors.totalErrors')}
             value={formatNumber(data.summary?.total_errors ?? 0)}
             icon={<AlertCircle className="size-4" />}
             tone="danger"
           />
-          <SummaryPill
+          <StatTile
             label="5xx"
             value={formatNumber(data.summary?.status_5xx ?? 0)}
             icon={<ServerCrash className="size-4" />}
             tone="danger"
           />
-          <SummaryPill
+          <StatTile
             label="401"
             value={formatNumber(data.summary?.unauthorized ?? 0)}
             icon={<ShieldAlert className="size-4" />}
             tone="danger"
           />
-          <SummaryPill
+          <StatTile
             label="429"
             value={formatNumber(data.summary?.rate_limited ?? 0)}
             icon={<TimerReset className="size-4" />}
             tone="warning"
           />
-          <SummaryPill
+          <StatTile
             label={t('opsErrors.timeouts')}
             value={formatNumber(data.summary?.timeouts ?? 0)}
             icon={<Clock3 className="size-4" />}
             tone="warning"
           />
-          <SummaryPill
+          <StatTile
             label={t('opsErrors.retryAttempts')}
             value={formatNumber(data.summary?.retry_attempts ?? 0)}
             icon={<RotateCcw className="size-4" />}
@@ -572,36 +573,6 @@ export default function OperationsErrors() {
         </Dialog>
       </>
     </StateShell>
-  )
-}
-
-function SummaryPill({
-  label,
-  value,
-  icon,
-  tone,
-}: {
-  label: string
-  value: string
-  icon: ReactNode
-  tone: 'danger' | 'warning' | 'info'
-}) {
-  const toneStyle = {
-    danger: 'bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-300',
-    warning: 'bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300',
-    info: 'bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300',
-  }[tone]
-
-  return (
-    <div className="rounded-lg border border-border bg-card/85 px-3 py-3 shadow-sm">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-[12px] font-bold uppercase text-muted-foreground">{label}</div>
-        <div className={`flex size-8 items-center justify-center rounded-lg ${toneStyle}`}>
-          {icon}
-        </div>
-      </div>
-      <div className="mt-3 text-[24px] font-bold leading-none text-foreground">{value}</div>
-    </div>
   )
 }
 

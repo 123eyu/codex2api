@@ -15,6 +15,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { api } from '../api'
 import PageHeader from '../components/PageHeader'
+import { StatTile } from '../components/StatTile'
 import OpsTabs from '../components/OpsTabs'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
@@ -74,10 +75,10 @@ export default function Operations() {
         {overview ? (
           <>
             <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4 sm:gap-4">
-              <SummaryPill label={t('ops.uptime')} value={formatUptime(overview.uptime_seconds, t)} />
-              <SummaryPill label={t('ops.accountPool')} value={`${overview.runtime.available_accounts} / ${overview.runtime.total_accounts}`} />
-              <SummaryPill label={t('ops.todayRequests')} value={formatNumber(overview.traffic.today_requests)} />
-              <SummaryPill label={t('ops.todayErrorRate')} value={`${overview.traffic.error_rate.toFixed(1)}%`} />
+              <StatTile label={t('ops.uptime')} value={formatUptime(overview.uptime_seconds, t)} />
+              <StatTile label={t('ops.accountPool')} value={`${overview.runtime.available_accounts} / ${overview.runtime.total_accounts}`} />
+              <StatTile label={t('ops.todayRequests')} value={formatNumber(overview.traffic.today_requests)} />
+              <StatTile label={t('ops.todayErrorRate')} value={`${overview.traffic.error_rate.toFixed(1)}%`} />
             </div>
 
             <Card>
@@ -438,14 +439,17 @@ function OpsMetricCard({
   }[tone]
 
   return (
-    <Card className="py-0 transition-all duration-150 hover:-translate-y-0.5 hover:shadow-md">
+    <Card className="py-0">
       <CardContent className="p-4">
         <div className="flex items-center justify-between gap-3">
           <span className="text-[13px] font-semibold text-muted-foreground">{label}</span>
-          <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-semibold ${toneStyle.badge}`}>
-            <span className={`size-2 rounded-full ${toneStyle.dot}`} />
-            {toneStyle.label}
-          </span>
+          {/* 状态徽章只标异常：一排"正常"是纯噪音，例外才值得着色 */}
+          {tone !== 'normal' ? (
+            <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-semibold ${toneStyle.badge}`}>
+              <span className={`size-2 rounded-full ${toneStyle.dot}`} />
+              {toneStyle.label}
+            </span>
+          ) : null}
         </div>
 
         <div className="mt-5">
@@ -462,15 +466,6 @@ function OpsMetricCard({
         </div>
       </CardContent>
     </Card>
-  )
-}
-
-function SummaryPill({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg border border-border bg-card/85 px-3 py-2.5 shadow-sm">
-      <div className="text-[12px] font-bold uppercase text-muted-foreground">{label}</div>
-      <div className="mt-2 text-[20px] font-bold text-foreground">{value}</div>
-    </div>
   )
 }
 

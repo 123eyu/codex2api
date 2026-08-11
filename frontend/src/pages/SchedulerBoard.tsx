@@ -4,6 +4,7 @@ import { Loader2, RefreshCw } from 'lucide-react'
 import { api } from '../api'
 import OpsTabs from '../components/OpsTabs'
 import PageHeader from '../components/PageHeader'
+import { StatTile } from '../components/StatTile'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
@@ -164,10 +165,10 @@ export default function SchedulerBoard() {
         {overview ? (
           <>
             <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4 sm:gap-4">
-              <SummaryPill label={t('scheduler.totalAccounts')} value={formatNumber(data.summary?.total ?? 0)} />
-              <SummaryPill label={t('scheduler.availableAccounts')} value={`${overview.runtime.available_accounts} / ${overview.runtime.total_accounts}`} />
-              <SummaryPill label="Healthy + Warm" value={formatNumber(schedulerCounts.healthy + schedulerCounts.warm)} />
-              <SummaryPill label={t('scheduler.highRiskAccounts')} value={formatNumber(schedulerCounts.risky + schedulerCounts.banned)} />
+              <StatTile label={t('scheduler.totalAccounts')} value={formatNumber(data.summary?.total ?? 0)} />
+              <StatTile label={t('scheduler.availableAccounts')} value={`${overview.runtime.available_accounts} / ${overview.runtime.total_accounts}`} />
+              <StatTile label="Healthy + Warm" value={formatNumber(schedulerCounts.healthy + schedulerCounts.warm)} />
+              <StatTile label={t('scheduler.highRiskAccounts')} value={formatNumber(schedulerCounts.risky + schedulerCounts.banned)} />
             </div>
 
             <Card className="mb-6">
@@ -297,15 +298,6 @@ export default function SchedulerBoard() {
         ) : null}
       </>
     </StateShell>
-  )
-}
-
-function SummaryPill({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg border border-border bg-card/85 px-3 py-2.5 shadow-sm">
-      <div className="text-[12px] font-bold uppercase text-muted-foreground">{label}</div>
-      <div className="mt-2 text-[20px] font-bold text-foreground">{value}</div>
-    </div>
   )
 }
 
