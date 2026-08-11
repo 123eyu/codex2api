@@ -59,6 +59,7 @@ import Modal from "../components/Modal";
 import ModelLogo from "../components/ModelLogo";
 import OperationResultsModal from "../components/OperationResultsModal";
 import PageHeader from "../components/PageHeader";
+import { CompactStat } from "../components/CompactStat";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
@@ -4666,76 +4667,6 @@ function GrokTestConnectionModal({
         ) : null}
       </div>
     </Modal>
-  );
-}
-
-function CompactStat({
-  label,
-  chipLabel,
-  value,
-  tone,
-  active = false,
-  onClick,
-}: {
-  label: string;
-  chipLabel?: string;
-  value: number;
-  tone: "neutral" | "success" | "warning" | "danger";
-  active?: boolean;
-  onClick?: () => void;
-}) {
-  const toneStyle = {
-    neutral: {
-      chip: "bg-muted text-muted-foreground",
-      dot: "bg-muted-foreground",
-    },
-    success: {
-      chip: "bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]",
-      dot: "bg-[hsl(var(--success))]",
-    },
-    warning: {
-      chip: "bg-[hsl(var(--warning-bg))] text-[hsl(var(--warning))]",
-      dot: "bg-[hsl(var(--warning))]",
-    },
-    danger: {
-      chip: "bg-destructive/10 text-destructive",
-      dot: "bg-destructive",
-    },
-  }[tone];
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "flex min-h-[72px] w-full items-center justify-between gap-2 rounded-xl border px-2.5 py-2 text-left shadow-sm transition-[border-color,box-shadow,background-color,transform] duration-200 sm:min-h-[84px] sm:gap-3 sm:px-3 sm:py-2.5",
-        active
-          ? "border-primary/40 bg-primary/5 shadow-sm ring-1 ring-primary/25"
-          : "border-border bg-card/85 hover:border-border hover:bg-card hover:shadow-sm",
-        onClick &&
-          "cursor-pointer active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-      )}
-    >
-      <div className="min-w-0">
-        <div className="truncate text-[11px] font-medium text-muted-foreground sm:text-[12px]">
-          {label}
-        </div>
-        <div className="mt-1.5 text-[22px] font-semibold leading-none tracking-tight text-foreground tabular-nums sm:text-[26px]">
-          {value}
-        </div>
-      </div>
-      <div
-        className={cn(
-          "inline-flex items-center gap-1.5 rounded-full px-1.5 py-0.5 text-[11px] font-medium sm:px-2 sm:py-1 sm:text-[12px]",
-          toneStyle.chip,
-        )}
-      >
-        <span className={cn("size-1.5 rounded-full", toneStyle.dot)} />
-        <span className="max-w-[4.5rem] truncate sm:max-w-none">
-          {chipLabel ?? label}
-        </span>
-      </div>
-    </button>
   );
 }
 

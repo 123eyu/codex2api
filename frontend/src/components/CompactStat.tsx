@@ -3,10 +3,10 @@ import { cn } from '../lib/utils'
 export type CompactStatTone = 'neutral' | 'success' | 'warning' | 'danger'
 
 const TONE_STYLE: Record<CompactStatTone, { chip: string; dot: string }> = {
-  neutral: { chip: 'bg-muted text-muted-foreground', dot: 'bg-slate-500' },
-  success: { chip: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300', dot: 'bg-emerald-500' },
-  warning: { chip: 'bg-amber-500/10 text-amber-700 dark:text-amber-300', dot: 'bg-amber-500' },
-  danger: { chip: 'bg-red-500/10 text-red-700 dark:text-red-300', dot: 'bg-red-500' },
+  neutral: { chip: 'bg-muted text-muted-foreground', dot: 'bg-muted-foreground' },
+  success: { chip: 'bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]', dot: 'bg-[hsl(var(--success))]' },
+  warning: { chip: 'bg-[hsl(var(--warning-bg))] text-[hsl(var(--warning))]', dot: 'bg-[hsl(var(--warning))]' },
+  danger: { chip: 'bg-destructive/10 text-destructive', dot: 'bg-destructive' },
 }
 
 /**
