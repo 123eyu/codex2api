@@ -11,6 +11,7 @@ import {
   Coins,
   Gauge,
   KeyRound,
+  Link2,
   Package,
   Receipt,
   RefreshCw,
@@ -335,11 +336,14 @@ function UsageStatsContent({
               把来源端点标出来,免得两套口径对不上时无从查起。 */}
           {page === 'official' && (
             <span
-              className="ml-auto min-w-0 truncate text-[11px] text-muted-foreground"
+              className="ml-auto inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-lg border border-primary/20 bg-primary/5 px-2.5 py-1 text-[11px] text-muted-foreground"
               title={WHAM_DAILY_USAGE_ENDPOINT}
             >
-              {t('accounts.usageOfficialSource')}
-              <span className="ml-1 font-mono">{WHAM_DAILY_USAGE_ENDPOINT}</span>
+              <Link2 className="size-3.5 shrink-0 text-primary" aria-hidden />
+              <span className="shrink-0">{t('accounts.usageOfficialSource')}</span>
+              <span className="min-w-0 truncate font-mono text-foreground">
+                {WHAM_DAILY_USAGE_ENDPOINT}
+              </span>
             </span>
           )}
         </div>
