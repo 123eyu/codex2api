@@ -23,7 +23,7 @@ export default function StatCard({ icon, iconClass, label, value, sub, className
   return (
     <Card
       className={cn(
-        'group relative overflow-hidden py-0 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md',
+        'group relative overflow-hidden py-0',
         className,
       )}
     >
