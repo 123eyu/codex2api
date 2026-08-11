@@ -545,6 +545,7 @@
     "usageQualityTab": "Quality",
     "usageOfficialTab": "Official",
     "usageOfficialTitle": "Official billed usage",
+    "usageOfficialSource": "Source:",
     "usageOfficialRetentionHint": "Upstream keeps {{days}} days; older history comes from local snapshots",
     "usageOfficialLastSynced": "Synced {{time}}",
     "usageOfficialRefresh": "Refresh",

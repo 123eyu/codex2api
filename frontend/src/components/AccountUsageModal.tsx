@@ -21,6 +21,8 @@ import {
 import Modal from './Modal'
 import { api } from '../api'
 import type { AccountKeyStat, AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail, ResetCreditItem, WhamDailyUsageItem, WhamDailyUsageResponse, WhamDailyUsageSplit } from '../types'
+import { formatUsageNumber } from '../lib/usageFormat'
+import { useShowFullUsageNumbers } from '../hooks/useShowFullUsageNumbers'
 import { getErrorMessage } from '../utils/error'
 import { formatBeijingTime } from '../utils/time'
 
@@ -36,6 +38,10 @@ const COLORS = [
   '#4f46e5',
   '#db2777',
 ]
+
+// 官方统计的数据来源，展示在范围选择器旁边（与后端 proxy.WhamDailyUsageURL 一致）。
+const WHAM_DAILY_USAGE_ENDPOINT =
+  'https://chatgpt.com/backend-api/wham/analytics/daily-workspace-usage-counts'
 
 type UsagePage = 'overview' | 'detail' | 'quality' | 'official'
 type UsageRangeKey = '7' | '30' | '90' | 'all'
@@ -325,6 +331,17 @@ function UsageStatsContent({
               />
             ))}
           </div>
+          {/* 官方统计与其他 tab 的数据源不同(上游账单 vs 本地 usage_logs),
+              把来源端点标出来,免得两套口径对不上时无从查起。 */}
+          {page === 'official' && (
+            <span
+              className="ml-auto min-w-0 truncate text-[11px] text-muted-foreground"
+              title={WHAM_DAILY_USAGE_ENDPOINT}
+            >
+              {t('accounts.usageOfficialSource')}
+              <span className="ml-1 font-mono">{WHAM_DAILY_USAGE_ENDPOINT}</span>
+            </span>
+          )}
         </div>
 
         {page === 'overview' ? (
@@ -373,6 +390,7 @@ function OverviewPage({
   totalCostLabel: string
   topModel?: { model: string; requests: number; tokens: number }
 }) {
+  const fullNumbers = useShowFullUsageNumbers()
   const { t } = useTranslation()
   const activeDaysText = formatActiveDaysText(activeDays, periodDays, t('accounts.usageDaysUnit'))
   return (
@@ -395,8 +413,8 @@ function OverviewPage({
           </div>
 
           <div className="mt-6 grid gap-3 sm:grid-cols-3">
-            <CompactMetric icon={<Zap className="size-4" />} label={t('accounts.totalRequests')} value={formatCompactNumber(data.total_requests)} />
-            <CompactMetric icon={<Package className="size-4" />} label={t('accounts.totalTokens')} value={formatTokens(data.total_tokens)} />
+            <CompactMetric icon={<Zap className="size-4" />} label={t('accounts.totalRequests')} value={formatCompactNumber(data.total_requests, fullNumbers)} />
+            <CompactMetric icon={<Package className="size-4" />} label={t('accounts.totalTokens')} value={formatTokens(data.total_tokens, fullNumbers)} />
             <CompactMetric icon={<Clock3 className="size-4" />} label={t('accounts.usageAvgResponse')} value={formatDuration(data.avg_duration_ms)} />
           </div>
 
@@ -409,7 +427,7 @@ function OverviewPage({
             title={t('accounts.usageTodayOverview')}
             rows={[
               [t('accounts.usageRequests'), formatNumber(today.requests)],
-              [t('accounts.usageTokens'), formatTokens(today.tokens)],
+              [t('accounts.usageTokens'), formatTokens(today.tokens, fullNumbers)],
               [t('accounts.usageTodayCost'), `$${formatCost(today.account_billed)}`],
             ]}
           />
@@ -418,7 +436,7 @@ function OverviewPage({
             title={t('accounts.usageDailyBaseline')}
             rows={[
               [t('accounts.usageAvgDailyCost'), `$${formatCost(data.avg_daily_account_billed)}`],
-              [t('accounts.usageAvgDailyRequests'), formatCompactNumber(Math.round(data.avg_daily_requests))],
+              [t('accounts.usageAvgDailyRequests'), formatCompactNumber(Math.round(data.avg_daily_requests), fullNumbers)],
               [t('accounts.usageActiveDays'), activeDaysText],
             ]}
           />
@@ -433,12 +451,12 @@ function OverviewPage({
         <HighlightStrip
           label={t('accounts.usageHighestRequestDay')}
           value={highestRequestDay.label || '-'}
-          detail={`${formatCompactNumber(highestRequestDay.requests)} ${t('accounts.usageReqUnit')} · $${formatCost(highestRequestDay.account_billed)}`}
+          detail={`${formatCompactNumber(highestRequestDay.requests, fullNumbers)} ${t('accounts.usageReqUnit')} · $${formatCost(highestRequestDay.account_billed)}`}
         />
         <HighlightStrip
           label={t('accounts.usageTopModel')}
           value={topModel?.model || '-'}
-          detail={topModel ? `${formatNumber(topModel.requests)} ${t('accounts.usageReqUnit')} · ${formatTokens(topModel.tokens)} ${t('accounts.usageTokUnit')}` : '-'}
+          detail={topModel ? `${formatNumber(topModel.requests)} ${t('accounts.usageReqUnit')} · ${formatTokens(topModel.tokens, fullNumbers)} ${t('accounts.usageTokUnit')}` : '-'}
         />
       </div>
     </div>
@@ -457,6 +475,7 @@ function QualityPage({ data }: { data: AccountUsageDetail }) {
 // 聚合是两套数据：这里的 credits 与 token 是官方账单数，且能按客户端入口拆分，
 // 能看出某个号有多少消耗来自本网关、多少来自官方客户端。
 function OfficialUsagePage({ accountId, range }: { accountId: number; range: UsageRangeKey }) {
+  const fullNumbers = useShowFullUsageNumbers()
   const { t } = useTranslation()
   const [data, setData] = useState<WhamDailyUsageResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -564,7 +583,7 @@ function OfficialUsagePage({ accountId, range }: { accountId: number; range: Usa
             <CompactMetric
               icon={<Package className="size-4" />}
               label={t('accounts.usageOfficialTokens')}
-              value={formatTokens(data?.totals.total_tokens ?? 0)}
+              value={formatTokens(data?.totals.total_tokens ?? 0, fullNumbers)}
             />
             <CompactMetric
               icon={<Zap className="size-4" />}
@@ -605,6 +624,7 @@ function OfficialUsagePage({ accountId, range }: { accountId: number; range: Usa
 }
 
 function OfficialUsageDayRow({ item, maxCredits }: { item: WhamDailyUsageItem; maxCredits: number }) {
+  const fullNumbers = useShowFullUsageNumbers()
   const { t } = useTranslation()
   const width = maxCredits > 0 ? Math.max(2, (item.credits / maxCredits) * 100) : 0
   return (
@@ -620,7 +640,7 @@ function OfficialUsageDayRow({ item, maxCredits }: { item: WhamDailyUsageItem; m
         {formatUSD(item.usd)}
       </span>
       <span className="w-20 shrink-0 text-right tabular-nums text-muted-foreground">
-        {item.settled ? formatTokens(item.total_tokens) : t('accounts.usageOfficialUnsettled')}
+        {item.settled ? formatTokens(item.total_tokens, fullNumbers) : t('accounts.usageOfficialUnsettled')}
       </span>
     </div>
   )
@@ -781,6 +801,7 @@ function DetailPage({
   activeDays: number
   periodDays: number
 }) {
+  const fullNumbers = useShowFullUsageNumbers()
   const { t } = useTranslation()
   const [modelMetric, setModelMetric] = useState<ModelMetricKey>('requests')
   const activeDaysText = formatActiveDaysText(activeDays, periodDays, t('accounts.usageDaysUnit'))
@@ -817,7 +838,7 @@ function DetailPage({
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
               <span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold text-muted-foreground">
-                {formatModelMetricValue(modelMetricTotal, modelMetric)} {t(modelMetricLabelKey(modelMetric))}
+                {formatModelMetricValue(modelMetricTotal, modelMetric, fullNumbers)} {t(modelMetricLabelKey(modelMetric))}
               </span>
               <div className="flex rounded-lg border bg-muted/40 p-1">
                 {MODEL_METRIC_OPTIONS.map((option) => (
@@ -852,7 +873,7 @@ function DetailPage({
                     ))}
                   </Pie>
                   <Tooltip
-                    formatter={(value, name) => [formatModelMetricValue(Number(value || 0), modelMetric), String(name ?? '')]}
+                    formatter={(value, name) => [formatModelMetricValue(Number(value || 0), modelMetric, fullNumbers), String(name ?? '')]}
                     contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid hsl(var(--border))' }}
                   />
                 </PieChart>
@@ -892,7 +913,7 @@ function DetailPage({
 
       <div className="mt-4 grid gap-3 md:grid-cols-4">
         <DetailKpi label={t('accounts.usageActiveDays')} value={activeDaysText} />
-        <DetailKpi label={t('accounts.usageDailyAvgTokens')} value={formatTokens(Math.round(data.avg_daily_tokens))} />
+        <DetailKpi label={t('accounts.usageDailyAvgTokens')} value={formatTokens(Math.round(data.avg_daily_tokens), fullNumbers)} />
         <DetailKpi label={t('accounts.usageCacheHitRate')} value={formatPercent(data.cache_hit_rate)} />
         <DetailKpi label={t('accounts.usageAvgResponse')} value={formatDuration(data.avg_duration_ms)} />
       </div>
@@ -901,6 +922,7 @@ function DetailPage({
 }
 
 function KeyDistribution({ data }: { data: AccountUsageDetail }) {
+  const fullNumbers = useShowFullUsageNumbers()
   const { t } = useTranslation()
   const [metric, setMetric] = useState<ModelMetricKey>('requests')
   const sortedKeys = useMemo(() => {
@@ -934,7 +956,7 @@ function KeyDistribution({ data }: { data: AccountUsageDetail }) {
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold tabular-nums text-muted-foreground">
-            {formatModelMetricValue(metricTotal, metric)} {t(modelMetricLabelKey(metric))}
+            {formatModelMetricValue(metricTotal, metric, fullNumbers)} {t(modelMetricLabelKey(metric))}
           </span>
           {sortedKeys.length > 0 && (
             <span className="rounded-full bg-muted/70 px-3 py-1 text-xs font-medium text-muted-foreground">
@@ -986,10 +1008,11 @@ function KeyRow({
   metric: ModelMetricKey
   total: number
 }) {
+  const fullNumbers = useShowFullUsageNumbers()
   const { t } = useTranslation()
   const value = keyMetricValue(stat, metric)
   const percent = total > 0 ? Math.min(100, Math.max(0, (value / total) * 100)) : 0
-  const detail = keyMetricDetail(stat, metric, t)
+  const detail = keyMetricDetail(stat, metric, t, fullNumbers)
   return (
     <div className="rounded-xl border border-border/80 bg-muted/15 px-3 py-2.5 transition-colors hover:border-border hover:bg-muted/25">
       <div className="mb-2 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 text-sm">
@@ -1017,7 +1040,7 @@ function KeyRow({
       </div>
       <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
         <span className="font-semibold tabular-nums text-foreground">
-          {formatModelMetricValue(value, metric)}
+          {formatModelMetricValue(value, metric, fullNumbers)}
         </span>
         <span className="truncate text-right">{detail}</span>
       </div>
@@ -1537,6 +1560,7 @@ function qualityToneClass(tone: QualityTone): { box: string; icon: string; value
 }
 
 function UsageTrend({ history }: { history: AccountUsageDayStat[] }) {
+  const fullNumbers = useShowFullUsageNumbers()
   const { t } = useTranslation()
   const display = history.slice(-60)
   const maxCost = Math.max(...display.map((day) => day.account_billed), 0)
@@ -1556,7 +1580,7 @@ function UsageTrend({ history }: { history: AccountUsageDayStat[] }) {
         {display.length > 0 && (
           <div className="text-right text-xs text-muted-foreground">
             <div>{t('accounts.usageHighestCostDay')}: ${formatCost(maxCost)}</div>
-            <div>{t('accounts.usageHighestRequestDay')}: {formatCompactNumber(maxRequests)}</div>
+            <div>{t('accounts.usageHighestRequestDay')}: {formatCompactNumber(maxRequests, fullNumbers)}</div>
           </div>
         )}
       </div>
@@ -1594,10 +1618,11 @@ function ModelRow({
   metric: ModelMetricKey
   total: number
 }) {
+  const fullNumbers = useShowFullUsageNumbers()
   const { t } = useTranslation()
   const value = modelMetricValue(model, metric)
   const percent = total > 0 ? Math.min(100, Math.max(0, (value / total) * 100)) : 0
-  const detail = modelMetricDetail(model, metric, t)
+  const detail = modelMetricDetail(model, metric, t, fullNumbers)
   return (
     <div className="rounded-xl border bg-background px-3 py-2.5">
       <div className="mb-2 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 text-sm">
@@ -1609,7 +1634,7 @@ function ModelRow({
         <div className="h-full rounded-full" style={{ width: `${percent}%`, background: color }} />
       </div>
       <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
-        <span className="font-semibold text-foreground">{formatModelMetricValue(value, metric)}</span>
+        <span className="font-semibold text-foreground">{formatModelMetricValue(value, metric, fullNumbers)}</span>
         <span className="truncate text-right">{detail}</span>
       </div>
     </div>
@@ -1617,12 +1642,13 @@ function ModelRow({
 }
 
 function TokenBar({ label, value, total }: { label: string; value: number; total: number }) {
+  const fullNumbers = useShowFullUsageNumbers()
   const percent = total > 0 ? Math.min(100, Math.max(0, (value / total) * 100)) : 0
   return (
     <div>
       <div className="mb-1 flex items-center justify-between gap-3 text-sm">
         <span className="text-muted-foreground">{label}</span>
-        <span className="font-semibold tabular-nums text-foreground">{formatTokens(value)}</span>
+        <span className="font-semibold tabular-nums text-foreground">{formatTokens(value, fullNumbers)}</span>
       </div>
       <div className="h-2 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-foreground" style={{ width: `${percent}%` }} />
@@ -1716,10 +1742,10 @@ function modelMetricLabelKey(metric: ModelMetricKey): string {
   }
 }
 
-function formatModelMetricValue(value: number, metric: ModelMetricKey): string {
+function formatModelMetricValue(value: number, metric: ModelMetricKey, full: boolean): string {
   switch (metric) {
     case 'tokens':
-      return formatTokens(value)
+      return formatTokens(value, full)
     case 'cost':
       return `$${formatCost(value)}`
     default:
@@ -1727,9 +1753,9 @@ function formatModelMetricValue(value: number, metric: ModelMetricKey): string {
   }
 }
 
-function modelMetricDetail(model: AccountModelStat, metric: ModelMetricKey, t: (key: string) => string): string {
+function modelMetricDetail(model: AccountModelStat, metric: ModelMetricKey, t: (key: string) => string, full: boolean): string {
   const requests = `${formatNumber(model.requests)} ${t('accounts.usageReqUnit')}`
-  const tokens = `${formatTokens(model.tokens)} ${t('accounts.usageTokUnit')}`
+  const tokens = `${formatTokens(model.tokens, full)} ${t('accounts.usageTokUnit')}`
   const cost = `$${formatCost(model.account_billed)}`
   switch (metric) {
     case 'tokens':
@@ -1756,9 +1782,9 @@ function keyMetricValue(stat: AccountKeyStat, metric: ModelMetricKey): number {
   }
 }
 
-function keyMetricDetail(stat: AccountKeyStat, metric: ModelMetricKey, t: (key: string) => string): string {
+function keyMetricDetail(stat: AccountKeyStat, metric: ModelMetricKey, t: (key: string) => string, full: boolean): string {
   const requests = `${formatNumber(stat.requests)} ${t('accounts.usageReqUnit')}`
-  const tokens = `${formatTokens(stat.tokens)} ${t('accounts.usageTokUnit')}`
+  const tokens = `${formatTokens(stat.tokens, full)} ${t('accounts.usageTokUnit')}`
   const cost = `$${formatCost(stat.account_billed)}`
   switch (metric) {
     case 'tokens':
@@ -1774,15 +1800,14 @@ function formatNumber(value: number): string {
   return Math.round(Number(value || 0)).toLocaleString()
 }
 
-function formatCompactNumber(value: number): string {
-  const n = Number(value || 0)
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`
-  return Math.round(n).toLocaleString()
+// 数字格式统一走 lib/usageFormat：它认「显示完整用量数字」设置，且紧凑单位
+// 覆盖到 B/T（本地实现原来顶到 M 就不再进位，几十亿 token 会显示成 6609M）。
+function formatCompactNumber(value: number, full: boolean): string {
+  return formatUsageNumber(Number(value || 0), full)
 }
 
-function formatTokens(value: number): string {
-  return formatCompactNumber(value)
+function formatTokens(value: number, full: boolean): string {
+  return formatCompactNumber(value, full)
 }
 
 function formatCost(value: number): string {
