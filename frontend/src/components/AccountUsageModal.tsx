@@ -6,6 +6,7 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts'
 import {
   Activity,
   AlertTriangle,
+  Banknote,
   BarChart3,
   Clock3,
   Coins,
@@ -575,7 +576,7 @@ function OfficialUsagePage({ accountId, range }: { accountId: number; range: Usa
         <>
           <div className="grid gap-3 sm:grid-cols-3">
             <CompactMetric
-              icon={<Coins className="size-4" />}
+              icon={<Banknote className="size-4" />}
               label={t('accounts.usageOfficialCost')}
               value={formatUSD(data?.totals.usd ?? 0)}
               // 美元是按 credits 折算出来的,原始 credits 一并给出,方便与官方后台对账。

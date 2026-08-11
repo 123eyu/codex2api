@@ -131,8 +131,8 @@ import {
   ToggleRight,
   MoreHorizontal,
   Sparkles,
-  Receipt,
-  Router,
+  Wallet,
+  Banknote,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import AccountUsageModal from "../components/AccountUsageModal";
@@ -13768,10 +13768,10 @@ function BilledCell({ account }: { account: AccountRow }) {
     <div className="flex flex-col items-start gap-1">
       {(visibleH5 !== null || d7 !== null) && (
         <span
-          className="inline-flex items-center gap-1 rounded-md bg-slate-500/10 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-slate-700 ring-1 ring-inset ring-slate-500/20 dark:text-slate-300"
+          className="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-slate-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-slate-700 ring-1 ring-inset ring-slate-500/20 dark:text-slate-300"
           title={t("accounts.billedGatewayHint")}
         >
-          <Router className="size-3 shrink-0" aria-hidden />
+          <Wallet className="size-3 shrink-0" aria-hidden />
           {visibleH5 !== null && `5h: $${visibleH5}`}
           {visibleH5 !== null && d7 !== null && " / "}
           {d7 !== null ? `${longLabel}: $${d7}` : null}
@@ -13779,10 +13779,10 @@ function BilledCell({ account }: { account: AccountRow }) {
       )}
       {official !== null && (
         <span
-          className="inline-flex items-center gap-1 rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-400"
+          className="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-amber-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-400"
           title={t("accounts.billedOfficialHint")}
         >
-          <Receipt className="size-3 shrink-0" aria-hidden />
+          <Banknote className="size-3 shrink-0" aria-hidden />
           {t("accounts.billedOfficialLabel")}: {formatOfficialUSD(official)}
         </span>
       )}
