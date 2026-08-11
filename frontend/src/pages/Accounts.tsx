@@ -796,6 +796,8 @@ interface AccountRowActions {
   openSchedulerEditor: (account: AccountRow) => void;
   openQuickGroupEditor: (account: AccountRow) => void;
   openUsage: (account: AccountRow) => void;
+  // 直接打开用量弹窗的官方统计 tab（成本列的官方胶囊）。
+  openOfficialUsage: (account: AccountRow) => void;
   openTesting: (account: AccountRow) => void;
   refresh: (account: AccountRow) => void;
   generateAuthJson: (account: AccountRow) => void;
@@ -1167,7 +1169,7 @@ const AccountTableRow = memo(function AccountTableRow({
                             )}
                             {visibleColumns.billed && (
                               <TableCell className="text-[13px] text-muted-foreground whitespace-nowrap">
-                                <BilledCell account={account} />
+                                <BilledCell account={account} onOpenOfficial={actions.openOfficialUsage} />
                               </TableCell>
                             )}
                             {visibleColumns.importTime && (
@@ -1324,6 +1326,7 @@ const AccountCardItem = memo(function AccountCardItem({
       onEdit={() => actions.openSchedulerEditor(account)}
       onEditGroups={() => actions.openQuickGroupEditor(account)}
       onUsage={() => actions.openUsage(account)}
+      onOpenOfficialUsage={() => actions.openOfficialUsage(account)}
       onTest={() => actions.openTesting(account)}
       onRefresh={() => actions.refresh(account)}
       onGenerateAuthJson={() => actions.generateAuthJson(account)}
@@ -1459,6 +1462,11 @@ export default function Accounts() {
   const [cleaningError, setCleaningError] = useState(false);
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null);
+  // 用量弹窗打开时停在哪个 tab。列表里点「官方 7d」成本直接落到官方统计,
+  // 其余入口保持默认的概览。
+  const [usageInitialPage, setUsageInitialPage] = useState<
+    "overview" | "official"
+  >("overview");
   const [detailAccountId, setDetailAccountId] = useState<number | null>(null);
   const [detailAccountData, setDetailAccountData] = useState<AccountRow | null>(null);
   const detailNavigationTargetRef = useRef<"first" | "last" | null>(null);
@@ -5129,7 +5137,14 @@ export default function Accounts() {
     openDetail: openAccountDetail,
     openSchedulerEditor,
     openQuickGroupEditor,
-    openUsage: (account) => setUsageAccount(account),
+    openUsage: (account) => {
+      setUsageInitialPage("overview");
+      setUsageAccount(account);
+    },
+    openOfficialUsage: (account) => {
+      setUsageInitialPage("official");
+      setUsageAccount(account);
+    },
     openTesting: openTestingAccount,
     refresh: (account) => void handleRefresh(account),
     generateAuthJson: (account) => void handleGenerateAuthJSON(account),
@@ -5148,6 +5163,7 @@ export default function Accounts() {
       openSchedulerEditor: (a) => rowActionsImplRef.current?.openSchedulerEditor(a),
       openQuickGroupEditor: (a) => rowActionsImplRef.current?.openQuickGroupEditor(a),
       openUsage: (a) => rowActionsImplRef.current?.openUsage(a),
+      openOfficialUsage: (a) => rowActionsImplRef.current?.openOfficialUsage(a),
       openTesting: (a) => rowActionsImplRef.current?.openTesting(a),
       refresh: (a) => rowActionsImplRef.current?.refresh(a),
       generateAuthJson: (a) => rowActionsImplRef.current?.generateAuthJson(a),
@@ -7721,7 +7737,14 @@ export default function Accounts() {
           {usageAccount && (
             <AccountUsageModal
               account={usageAccount}
-              onClose={() => setUsageAccount(null)}
+              // key 让不同入口切换时重建弹窗,否则 initialPage 只在首次挂载生效,
+              // 先开概览再点官方成本会停在旧 tab。
+              key={`${usageAccount.id}-${usageInitialPage}`}
+              initialPage={usageInitialPage}
+              onClose={() => {
+                setUsageAccount(null);
+                setUsageInitialPage("overview");
+              }}
               // 必须静默重拉：reload() 会把 StateShell 切成整页 loading，
               // 而这个弹窗就渲染在 StateShell 里 —— 一开积分开关整个界面连同弹窗
               // 就被卸载重建（用量数据重新拉、滚动位置丢失），观感就是"闪一下全刷新"。
@@ -12264,6 +12287,7 @@ function AccountMobileCard({
   onEditModels,
   onDelete,
   onUsageRefreshed,
+  onOpenOfficialUsage,
 }: {
   account: AccountRow;
   sequence: number;
@@ -12292,6 +12316,8 @@ function AccountMobileCard({
   onEditModels?: () => void;
   onDelete: () => void;
   onUsageRefreshed?: () => void;
+  // 成本列的官方胶囊点击后跳到用量弹窗的官方统计 tab。
+  onOpenOfficialUsage?: () => void;
 }) {
   const displayName = account.openai_responses_api
     ? formatAccountName(account)
@@ -12534,7 +12560,10 @@ function AccountMobileCard({
                 icon={<Coins className="size-3.5" />}
                 tone="amber"
               >
-                <BilledCell account={account} />
+                <BilledCell
+                  account={account}
+                  onOpenOfficial={onOpenOfficialUsage ? () => onOpenOfficialUsage() : undefined}
+                />
               </AccountPersonalMetric>
             </div>
           </div>
@@ -12787,7 +12816,10 @@ function AccountMobileCard({
           )}
         </AccountMobileMetric>
         <AccountMobileMetric label={t("accounts.billed")} className="min-h-[84px]">
-          <BilledCell account={account} />
+          <BilledCell
+                  account={account}
+                  onOpenOfficial={onOpenOfficialUsage ? () => onOpenOfficialUsage() : undefined}
+                />
         </AccountMobileMetric>
         <AccountMobileMetric label={t("accounts.updatedAt")} className="min-h-[84px]">
           {lazyMode ? (
@@ -13750,7 +13782,14 @@ function UsageCell({
 // 上行(石板色)是网关自己的日志算出来的,只含经由本网关转发的请求;
 // 下行(琥珀色)是 OpenAI 官方结算数,还包含用户直接用官方客户端的消耗。
 // 两者不该相等,差额就是账号在网关之外的用量。
-function BilledCell({ account }: { account: AccountRow }) {
+function BilledCell({
+  account,
+  onOpenOfficial,
+}: {
+  account: AccountRow;
+  // 传了才把官方胶囊变成可点按钮（跳到用量弹窗的官方统计 tab）。
+  onOpenOfficial?: (account: AccountRow) => void;
+}) {
   const { t } = useTranslation();
   const h5 = typeof account.billed_5h === "number" ? account.billed_5h.toFixed(2) : null;
   const d7 = typeof account.billed_7d === "number" ? account.billed_7d.toFixed(2) : null;
@@ -13777,15 +13816,30 @@ function BilledCell({ account }: { account: AccountRow }) {
           {d7 !== null ? `${longLabel}: $${d7}` : null}
         </span>
       )}
-      {official !== null && (
-        <span
-          className="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-amber-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-400"
-          title={t("accounts.billedOfficialHint")}
-        >
-          <Banknote className="size-3 shrink-0" aria-hidden />
-          {t("accounts.billedOfficialLabel")}: {formatOfficialUSD(official)}
-        </span>
-      )}
+      {official !== null &&
+        (onOpenOfficial ? (
+          <button
+            type="button"
+            // 行本身点击会打开账号详情，成本胶囊要抢在它前面并阻断冒泡。
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenOfficial(account);
+            }}
+            className="inline-flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-md bg-amber-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-amber-700 ring-1 ring-inset ring-amber-500/20 transition-colors hover:bg-amber-500/20 hover:ring-amber-500/40 dark:text-amber-400"
+            title={`${t("accounts.billedOfficialHint")}\n${t("accounts.billedOfficialOpen")}`}
+          >
+            <Banknote className="size-3 shrink-0" aria-hidden />
+            {t("accounts.billedOfficialLabel")}: {formatOfficialUSD(official)}
+          </button>
+        ) : (
+          <span
+            className="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-amber-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-400"
+            title={t("accounts.billedOfficialHint")}
+          >
+            <Banknote className="size-3 shrink-0" aria-hidden />
+            {t("accounts.billedOfficialLabel")}: {formatOfficialUSD(official)}
+          </span>
+        ))}
     </div>
   );
 }

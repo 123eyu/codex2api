@@ -545,6 +545,7 @@
     "usageQualityTab": "质量",
     "usageOfficialTab": "官方统计",
     "billedOfficialLabel": "官方 7d",
+    "billedOfficialOpen": "点击查看官方用量明细",
     "billedOfficialHint": "OpenAI 官方近 7 天结算成本，含用户直接使用官方客户端、未经本网关的消耗",
     "billedGatewayHint": "按本网关自身的请求日志统计的成本",
     "usageOfficialTitle": "官方结算用量",

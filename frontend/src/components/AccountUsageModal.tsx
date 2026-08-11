@@ -69,16 +69,19 @@ interface Props {
   onCreditsReset?: () => void
   // Codex 专属的额度券/credit 设置区块;Grok 等非 Codex 账号传 false 隐藏。
   showCreditSettings?: boolean
+  // 打开时直接停在指定 tab（列表里点「官方 7d」成本就该落在官方统计上，
+  // 而不是让用户开完概览再自己切一次）。
+  initialPage?: UsagePage
 }
 
-export default function AccountUsageModal({ account, onClose, onCreditsReset, showCreditSettings = true }: Props) {
+export default function AccountUsageModal({ account, onClose, onCreditsReset, showCreditSettings = true, initialPage }: Props) {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [data, setData] = useState<AccountUsageDetail | null>(null)
   const [dataRange, setDataRange] = useState<UsageRangeKey | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [page, setPage] = useState<UsagePage>('overview')
+  const [page, setPage] = useState<UsagePage>(initialPage ?? 'overview')
   const [range, setRange] = useState<UsageRangeKey>('30')
   const requestSeq = useRef(0)
 
@@ -180,7 +183,8 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset, sh
           account={account}
           accountLabel={accountLabel}
           data={data}
-          page={page}
+          // 中转账号没有官方统计 tab，深链进来时退回概览而不是停在空白页。
+          page={page === 'official' && !supportsOfficialUsage ? 'overview' : page}
           range={range}
           dataRange={dataRange || range}
           refreshing={loading}

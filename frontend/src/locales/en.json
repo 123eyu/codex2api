@@ -545,6 +545,7 @@
     "usageQualityTab": "Quality",
     "usageOfficialTab": "Official",
     "billedOfficialLabel": "Official 7d",
+    "billedOfficialOpen": "Click to open the official usage breakdown",
     "billedOfficialHint": "Billed by OpenAI over the last 7 days, including usage from official clients outside this gateway",
     "billedGatewayHint": "Cost derived from this gateway's own request logs",
     "usageOfficialTitle": "Official billed usage",
