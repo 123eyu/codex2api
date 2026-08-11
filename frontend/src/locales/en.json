@@ -389,6 +389,8 @@
     "errorTitle": "Failed to load accounts",
     "sequence": "No.",
     "totalAccounts": "Total Accounts",
+    "statsWarming": "Warming up stats…",
+    "statsStale": "Refreshing stats…",
     "normalAccounts": "Normal Accounts",
     "rateLimited": "Rate-Limited Accounts",
     "abnormalAccounts": "Abnormal Accounts",

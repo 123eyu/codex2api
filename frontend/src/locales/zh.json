@@ -389,6 +389,8 @@
     "errorTitle": "账号页加载失败",
     "sequence": "序号",
     "totalAccounts": "总账号数量",
+    "statsWarming": "统计预热中…",
+    "statsStale": "统计刷新中…",
     "normalAccounts": "正常账号",
     "rateLimited": "限流账号",
     "abnormalAccounts": "异常账号",

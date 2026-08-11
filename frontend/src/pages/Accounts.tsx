@@ -4911,7 +4911,11 @@ export default function Accounts() {
           {loading || data.statsState !== "ready" ? (
             <div className="mb-2 flex items-center justify-end gap-1.5 text-xs text-muted-foreground" role="status">
               {loading ? <Loader2 className="size-3 animate-spin" /> : null}
-              {loading ? t("common.loading") : data.statsState}
+              {loading
+                ? t("common.loading")
+                : data.statsState === "warming"
+                  ? t("accounts.statsWarming")
+                  : t("accounts.statsStale")}
             </div>
           ) : null}
           <div className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-4">
