@@ -2904,7 +2904,7 @@ type Store struct {
 	codexModelMapping     atomic.Value // Codex 模型映射 JSON 字符串
 	payloadRules          atomic.Value // Payload 请求体重写规则 JSON 字符串
 	reasoningEffortModels atomic.Value // 带思考强度的模型别名 JSON 数组
-	schedulerMode         atomic.Value // string: "round_robin" or "remaining_quota"
+	schedulerMode         atomic.Value // string: "round_robin" / "remaining_quota" / "fill_first"
 	affinityMode          atomic.Value // string: "bounded" / "off" / "strict"
 	affinitySpreadEnabled atomic.Bool  // 新亲和键按 HRW 哈希散列选号(issue #484)
 	grokAffinityMode      atomic.Value // string: "follow" / "bounded" / "off" / "strict"（"follow"=跟随全局）
@@ -5932,7 +5932,7 @@ func (s *Store) GetReasoningEffortModels() string {
 
 // GetSchedulerMode 获取当前调度模式
 func (s *Store) GetSchedulerMode() string {
-	if v, ok := s.schedulerMode.Load().(string); ok {
+	if v, ok := s.schedulerMode.Load().(string); ok && v != "" {
 		return v
 	}
 	return "round_robin"
@@ -5941,7 +5941,7 @@ func (s *Store) GetSchedulerMode() string {
 // SetSchedulerMode 设置调度模式并传播到 FastScheduler
 func (s *Store) SetSchedulerMode(mode string) {
 	switch mode {
-	case "round_robin", "remaining_quota":
+	case "round_robin", "remaining_quota", "fill_first":
 		// ok
 	default:
 		mode = "round_robin"

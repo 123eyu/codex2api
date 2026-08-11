@@ -1117,6 +1117,7 @@ export default function Settings() {
   const schedulerModeOptions = [
     { label: t('settings.schedulerModeRoundRobin'), value: 'round_robin' },
     { label: t('settings.schedulerModeRemainingQuota'), value: 'remaining_quota' },
+    { label: t('settings.schedulerModeFillFirst'), value: 'fill_first' },
   ]
   const transportRetryPolicyOptions = [
     { label: t('settings.transportRetryPolicyRotate'), value: 'rotate' },
