@@ -56,6 +56,7 @@ type Handler struct {
 	syncAccountPlanOnReset func(context.Context, *auth.Account) error
 	queryResetCredits      func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error)
 	consumeResetCredit     func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error)
+	queryWhamDailyUsage    func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyUsageResponse, *http.Response, error)
 	recordAccountEvent     func(int64, string, string)
 	proxyProbe             func(context.Context, string, string) proxyProbeResult
 	reloadProxyPoolFn      func() error
@@ -550,6 +551,7 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 	handler.syncAccountPlanOnReset = handler.syncSingleAccountPlanOnReset
 	handler.queryResetCredits = proxy.QueryWhamResetCredits
 	handler.consumeResetCredit = proxy.ConsumeResetCreditParsed
+	handler.queryWhamDailyUsage = proxy.QueryWhamDailyUsage
 	handler.autoResetCreditsWake = make(chan struct{}, 1)
 	if db != nil {
 		handler.recordAccountEvent = db.InsertAccountEventAsync
@@ -655,6 +657,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.DELETE("/accounts/:id/model-cooldowns/:model", h.ClearAccountModelCooldown)
 	api.POST("/accounts/:id/reset-credits", h.ResetCredits)
 	api.GET("/accounts/:id/reset-credits", h.GetResetCredits)
+	api.GET("/accounts/:id/wham-daily-usage", h.GetAccountWhamDailyUsage)
 	api.POST("/accounts/:id/invite", h.SendInvite)
 	api.GET("/accounts/:id/invite/eligibility", h.GetInviteEligibility)
 	api.GET("/accounts/:id/invite/tracking", h.GetInviteTracking)

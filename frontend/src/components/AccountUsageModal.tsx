@@ -12,13 +12,15 @@ import {
   Gauge,
   KeyRound,
   Package,
+  Receipt,
+  RefreshCw,
   RotateCcw,
   Search,
   Zap,
 } from 'lucide-react'
 import Modal from './Modal'
 import { api } from '../api'
-import type { AccountKeyStat, AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail, ResetCreditItem } from '../types'
+import type { AccountKeyStat, AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail, ResetCreditItem, WhamDailyUsageItem, WhamDailyUsageResponse, WhamDailyUsageSplit } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { formatBeijingTime } from '../utils/time'
 
@@ -35,7 +37,7 @@ const COLORS = [
   '#db2777',
 ]
 
-type UsagePage = 'overview' | 'detail' | 'quality'
+type UsagePage = 'overview' | 'detail' | 'quality' | 'official'
 type UsageRangeKey = '7' | '30' | '90' | 'all'
 type ModelMetricKey = 'requests' | 'tokens' | 'cost'
 type QualityTone = 'neutral' | 'success' | 'warning' | 'danger'
@@ -71,6 +73,10 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset, sh
   const [page, setPage] = useState<UsagePage>('overview')
   const [range, setRange] = useState<UsageRangeKey>('30')
   const requestSeq = useRef(0)
+
+  // 官方结算统计只有 ChatGPT OAuth 账号能查（wham 端点属于 ChatGPT 后端）。
+  // 中转账号（Responses API / Grok）没有这条链路，不显示这个 tab。
+  const supportsOfficialUsage = !account.openai_responses_api && !account.grok_api
 
   const [creditEnabled, setCreditEnabled] = useState(account.credit_enabled ?? false)
   const [creditSkipWindow, setCreditSkipWindow] = useState(account.credit_skip_usage_window ?? false)
@@ -174,6 +180,7 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset, sh
           onPageChange={setPage}
           onRangeChange={setRange}
           onViewLogs={handleViewLogs}
+          showOfficialUsage={supportsOfficialUsage}
         />
       )}
 
@@ -207,6 +214,7 @@ function UsageStatsContent({
   onPageChange,
   onRangeChange,
   onViewLogs,
+  showOfficialUsage,
 }: {
   account: AccountRow
   accountLabel: string
@@ -219,6 +227,7 @@ function UsageStatsContent({
   onPageChange: (page: UsagePage) => void
   onRangeChange: (range: UsageRangeKey) => void
   onViewLogs: () => void
+  showOfficialUsage: boolean
 }) {
   const { t } = useTranslation()
   const activeDays = Math.max(0, data.active_days || 0)
@@ -271,7 +280,7 @@ function UsageStatsContent({
               <Search className="size-3.5" />
               {t('accounts.usageViewLogs')}
             </button>
-            <div className="grid h-9 grid-cols-3 rounded-lg border bg-muted/40 p-1">
+            <div className={`grid h-9 ${showOfficialUsage ? 'grid-cols-4' : 'grid-cols-3'} rounded-lg border bg-muted/40 p-1`}>
               <PageButton
                 active={page === 'overview'}
                 icon={<Gauge className="size-3.5" />}
@@ -290,6 +299,14 @@ function UsageStatsContent({
                 label={t('accounts.usageQualityTab')}
                 onClick={() => onPageChange('quality')}
               />
+              {showOfficialUsage && (
+                <PageButton
+                  active={page === 'official'}
+                  icon={<Receipt className="size-3.5" />}
+                  label={t('accounts.usageOfficialTab')}
+                  onClick={() => onPageChange('official')}
+                />
+              )}
             </div>
           </div>
         </div>
@@ -327,6 +344,8 @@ function UsageStatsContent({
             activeDays={activeDays}
             periodDays={periodDays}
           />
+        ) : page === 'official' ? (
+          <OfficialUsagePage accountId={account.id} range={range} />
         ) : (
           <QualityPage data={data} />
         )}
@@ -432,6 +451,234 @@ function QualityPage({ data }: { data: AccountUsageDetail }) {
       <QualitySignals data={data} />
     </div>
   )
+}
+
+// OfficialUsagePage 展示 OpenAI 侧的结算口径用量，与其他 tab 的本地 usage_logs
+// 聚合是两套数据：这里的 credits 与 token 是官方账单数，且能按客户端入口拆分，
+// 能看出某个号有多少消耗来自本网关、多少来自官方客户端。
+function OfficialUsagePage({ accountId, range }: { accountId: number; range: UsageRangeKey }) {
+  const { t } = useTranslation()
+  const [data, setData] = useState<WhamDailyUsageResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const requestSeq = useRef(0)
+  // 'all' 在这里没有意义（本地快照最多留一年），按上限天数取。
+  const days = range === 'all' ? 365 : usageRangeToDays(range)
+
+  const load = useCallback(async (refresh: boolean) => {
+    const seq = requestSeq.current + 1
+    requestSeq.current = seq
+    if (refresh) setRefreshing(true)
+    else setLoading(true)
+    setError(null)
+    try {
+      const result = await api.getWhamDailyUsage(accountId, days, refresh)
+      if (requestSeq.current !== seq) return
+      setData(result)
+    } catch (err) {
+      if (requestSeq.current !== seq) return
+      setError(getErrorMessage(err))
+    } finally {
+      if (requestSeq.current === seq) {
+        setLoading(false)
+        setRefreshing(false)
+      }
+    }
+  }, [accountId, days])
+
+  useEffect(() => { void load(false) }, [load])
+
+  const items = data?.items ?? []
+  const maxCredits = useMemo(
+    () => items.reduce((max, item) => Math.max(max, item.credits), 0),
+    [items],
+  )
+  // 客户端拆分按整个窗口累加：单看某一天噪声太大，看不出入口占比。
+  const clientTotals = useMemo(() => aggregateSplits(items, 'clients'), [items])
+  const modelTotals = useMemo(() => aggregateSplits(items, 'models'), [items])
+
+  if (loading) {
+    return <div className="py-12 text-center text-sm text-muted-foreground">{t('common.loading')}</div>
+  }
+
+  return (
+    <div className="space-y-4 p-4 sm:p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-foreground">{t('accounts.usageOfficialTitle')}</span>
+          <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+            {t('accounts.usageOfficialRetentionHint', { days: data?.retention_days ?? 7 })}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          {data?.last_synced_at && (
+            <span className="text-[11px] text-muted-foreground">
+              {t('accounts.usageOfficialLastSynced', { time: formatBeijingTime(data.last_synced_at) })}
+            </span>
+          )}
+          <button
+            type="button"
+            disabled={refreshing}
+            onClick={() => void load(true)}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border bg-background px-3 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
+          >
+            <RefreshCw className={`size-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            {t('accounts.usageOfficialRefresh')}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-500">{error}</div>}
+      {data?.refresh_error && (
+        <div className="rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+          {t('accounts.usageOfficialRefreshFailed', { reason: data.refresh_error })}
+        </div>
+      )}
+
+      {items.length === 0 ? (
+        <div className="py-10 text-center text-sm text-muted-foreground">
+          {t('accounts.usageOfficialEmpty')}
+        </div>
+      ) : (
+        <>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <CompactMetric
+              icon={<Coins className="size-4" />}
+              label={t('accounts.usageOfficialCost')}
+              value={formatUSD(data?.totals.usd ?? 0)}
+            />
+            <CompactMetric
+              icon={<Package className="size-4" />}
+              label={t('accounts.usageOfficialTokens')}
+              value={formatTokens(data?.totals.total_tokens ?? 0)}
+            />
+            <CompactMetric
+              icon={<Zap className="size-4" />}
+              label={t('accounts.usageOfficialTurns')}
+              value={formatNumber(data?.totals.turns ?? 0)}
+            />
+          </div>
+
+          <section className="rounded-2xl border bg-background p-4">
+            <div className="mb-3 text-xs font-semibold uppercase text-muted-foreground">
+              {t('accounts.usageOfficialDailyTrend')}
+            </div>
+            <div className="space-y-1.5">
+              {items.map((item) => (
+                <OfficialUsageDayRow key={item.day} item={item} maxCredits={maxCredits} />
+              ))}
+            </div>
+          </section>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <OfficialSplitTable
+              title={t('accounts.usageOfficialByClient')}
+              rows={clientTotals}
+              emptyLabel={t('accounts.usageOfficialEmpty')}
+            />
+            <OfficialSplitTable
+              title={t('accounts.usageOfficialByModel')}
+              rows={modelTotals}
+              emptyLabel={t('accounts.usageOfficialEmpty')}
+              // 上游在模型维度不返回 credits/token（恒为 0），只展示会话与轮次。
+              hideCost
+            />
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function OfficialUsageDayRow({ item, maxCredits }: { item: WhamDailyUsageItem; maxCredits: number }) {
+  const { t } = useTranslation()
+  const width = maxCredits > 0 ? Math.max(2, (item.credits / maxCredits) * 100) : 0
+  return (
+    <div className="flex items-center gap-3 text-xs">
+      <span className="w-20 shrink-0 font-mono text-muted-foreground">{item.day.slice(5)}</span>
+      <div className="h-4 flex-1 overflow-hidden rounded bg-muted/50">
+        <div className="h-full rounded bg-primary/70" style={{ width: `${width}%` }} />
+      </div>
+      <span className="w-20 shrink-0 text-right font-semibold tabular-nums text-foreground">
+        {formatUSD(item.usd)}
+      </span>
+      <span className="w-20 shrink-0 text-right tabular-nums text-muted-foreground">
+        {item.settled ? formatTokens(item.total_tokens) : t('accounts.usageOfficialUnsettled')}
+      </span>
+    </div>
+  )
+}
+
+function OfficialSplitTable({
+  title,
+  rows,
+  emptyLabel,
+  hideCost = false,
+}: {
+  title: string
+  rows: AggregatedSplit[]
+  emptyLabel: string
+  hideCost?: boolean
+}) {
+  const { t } = useTranslation()
+  return (
+    <section className="rounded-2xl border bg-background p-4">
+      <div className="mb-3 text-xs font-semibold uppercase text-muted-foreground">{title}</div>
+      {rows.length === 0 ? (
+        <div className="py-4 text-center text-xs text-muted-foreground">{emptyLabel}</div>
+      ) : (
+        <div className="space-y-1.5">
+          {rows.map((row) => (
+            <div key={row.label} className="flex items-center justify-between gap-3 text-xs">
+              <span className="min-w-0 flex-1 truncate text-foreground" title={row.label}>
+                {row.label}
+              </span>
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {formatNumber(row.turns)} {t('accounts.usageOfficialTurnUnit')}
+              </span>
+              {!hideCost && (
+                <span className="w-20 shrink-0 text-right font-semibold tabular-nums text-foreground">
+                  {formatUSD(row.usd)}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+interface AggregatedSplit {
+  label: string
+  usd: number
+  turns: number
+  tokens: number
+}
+
+// aggregateSplits 把每天的拆分数组按 client_id / model 累加到整个窗口，按成本降序。
+// 模型维度上游不给 credits，退化成按轮次排序。
+function aggregateSplits(items: WhamDailyUsageItem[], field: 'clients' | 'models'): AggregatedSplit[] {
+  const totals = new Map<string, AggregatedSplit>()
+  for (const item of items) {
+    const splits: WhamDailyUsageSplit[] = item[field] ?? []
+    for (const split of splits) {
+      const label = (field === 'clients' ? split.client_id : split.model)?.trim() || '-'
+      const current = totals.get(label) ?? { label, usd: 0, turns: 0, tokens: 0 }
+      current.usd += (split.credits ?? 0) / 25
+      current.turns += split.turns ?? 0
+      current.tokens += split.text_total_tokens ?? 0
+      totals.set(label, current)
+    }
+  }
+  return [...totals.values()].sort((a, b) => (b.usd - a.usd) || (b.turns - a.turns))
+}
+
+function formatUSD(value: number): string {
+  if (!Number.isFinite(value) || value === 0) return '$0'
+  if (Math.abs(value) < 0.01) return '<$0.01'
+  return `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 function QualitySignals({ data }: { data: AccountUsageDetail }) {

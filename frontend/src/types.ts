@@ -790,6 +790,53 @@ export interface AccountModelStat {
   user_billed: number
 }
 
+// 官方结算用量（wham daily-workspace-usage-counts 落库后的快照）。
+// 与本地 usage_logs 聚合是两套口径：这份是 OpenAI 侧的权威账单数据。
+export interface WhamDailyUsageSplit {
+  client_id?: string
+  model?: string
+  users: number
+  threads: number
+  turns: number
+  credits: number
+  uncached_text_input_tokens?: number
+  cached_text_input_tokens?: number
+  text_output_tokens?: number
+  text_total_tokens?: number
+}
+
+export interface WhamDailyUsageItem {
+  day: string
+  credits: number
+  usd: number
+  users: number
+  threads: number
+  turns: number
+  uncached_input_tokens: number
+  cached_input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  // 当天的记录在上游结算前不含 token 明细，settled=false 时 token 数还不可信。
+  settled: boolean
+  clients: WhamDailyUsageSplit[]
+  models: WhamDailyUsageSplit[]
+}
+
+export interface WhamDailyUsageResponse {
+  days: number
+  items: WhamDailyUsageItem[]
+  totals: {
+    credits: number
+    usd: number
+    total_tokens: number
+    turns: number
+  }
+  credits_per_usd: number
+  retention_days: number
+  last_synced_at?: string
+  refresh_error?: string
+}
+
 export interface AccountUsageDayStat {
   date: string
   label: string
