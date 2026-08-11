@@ -4554,6 +4554,16 @@ func (s *Store) LoadAccountByID(ctx context.Context, dbID int64) error {
 	if account == nil {
 		return fmt.Errorf("账号 %d 缺少可用凭据", dbID)
 	}
+	// Full startup applies group memberships after loading all accounts.
+	// Single-account reloads need the same state before entering the runtime pool.
+	groupIDs, err := s.db.GetAccountGroupIDs(ctx, dbID)
+	if err != nil {
+		return fmt.Errorf("加载账号 %d 分组失败: %w", dbID, err)
+	}
+	account.mu.Lock()
+	account.GroupIDs = cloneInt64Slice(groupIDs)
+	account.recomputeEffectiveAutoPause(s)
+	account.mu.Unlock()
 	s.AddAccount(account)
 	return nil
 }
