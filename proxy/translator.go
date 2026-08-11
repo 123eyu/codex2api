@@ -1297,6 +1297,17 @@ func stripInvalidEncryptedContentFromResponsesBody(body []byte) ([]byte, bool) {
 	return stripped, true
 }
 
+// isEncryptedCompactionItemType 报告该 input 项类型是否属于「密文即必填」的压缩项。
+// 与 gjsonResultIsCompactionHistory 同口径，另含响应侧回灌的 compaction_summary。
+func isEncryptedCompactionItemType(itemType string) bool {
+	switch strings.ToLower(strings.TrimSpace(itemType)) {
+	case "compaction", "context_compaction", "compaction_summary":
+		return true
+	default:
+		return false
+	}
+}
+
 func stripInvalidEncryptedContentValue(value any, arrayItem bool) (any, bool, bool) {
 	switch v := value.(type) {
 	case []any:
@@ -1316,18 +1327,28 @@ func stripInvalidEncryptedContentValue(value any, arrayItem bool) (any, bool, bo
 		return out, changed, true
 	case map[string]any:
 		changed := false
-		if strings.TrimSpace(firstNonEmptyAnyString(v["type"])) == "reasoning" {
+		itemType := strings.TrimSpace(firstNonEmptyAnyString(v["type"]))
+		_, hasEncrypted := v["encrypted_content"]
+		switch {
+		case itemType == "reasoning":
 			if arrayItem {
 				return nil, true, false
 			}
-			if _, hasEncrypted := v["encrypted_content"]; hasEncrypted {
+			if hasEncrypted {
 				delete(v, "encrypted_content")
 			}
 			if len(v) == 1 {
 				return nil, true, false
 			}
 			changed = true
-		} else if _, hasEncrypted := v["encrypted_content"]; hasEncrypted {
+		case hasEncrypted && isEncryptedCompactionItemType(itemType):
+			// 压缩项的 encrypted_content 是必填字段：只摘掉字段会留下
+			// {"type":"compaction"} 空壳继续上行，上游转而以
+			// missing_required_parameter 再拒一次，而单次重试闸此时已经用掉。
+			// 带密文时整项丢弃，与上面的 reasoning 分支对称；不带密文的压缩项
+			// 本就没有账号绑定，原样保留。
+			return nil, true, false
+		case hasEncrypted:
 			delete(v, "encrypted_content")
 			changed = true
 		}

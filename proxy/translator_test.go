@@ -2261,6 +2261,69 @@ func TestStripInvalidEncryptedContentFromResponsesBody(t *testing.T) {
 	}
 }
 
+// 压缩项的 encrypted_content 是必填字段：只摘字段会留下 {"type":"compaction"}
+// 空壳，上游转而以 missing_required_parameter 再拒一次，而重试闸已经用掉。
+// 带密文的压缩项必须整项丢弃，与 reasoning 分支对称。
+func TestStripInvalidEncryptedContentDropsEncryptedCompactionItems(t *testing.T) {
+	for _, itemType := range []string{"compaction", "context_compaction", "compaction_summary"} {
+		t.Run(itemType, func(t *testing.T) {
+			raw := []byte(`{
+				"model":"gpt-5.4",
+				"input":[
+					{"type":"message","role":"user","content":"hello"},
+					{"type":"` + itemType + `","encrypted_content":"gAAA","summary":"stale"},
+					{"type":"function_call","call_id":"call_123","name":"lookup","arguments":"{}"}
+				]
+			}`)
+
+			got, changed := stripInvalidEncryptedContentFromResponsesBody(raw)
+			if !changed {
+				t.Fatalf("expected body to be changed")
+			}
+			items := gjson.GetBytes(got, "input").Array()
+			if len(items) != 2 {
+				t.Fatalf("expected encrypted %s item to be dropped whole, got %d items: %s", itemType, len(items), got)
+			}
+			// 不能留下空壳：改写后不应再出现该 type。
+			if strings.Contains(string(got), itemType) {
+				t.Fatalf("%s shell survived the strip: %s", itemType, got)
+			}
+			if strings.Contains(string(got), "encrypted_content") {
+				t.Fatalf("encrypted_content should be gone: %s", got)
+			}
+			if typ := gjson.GetBytes(got, "input.1.type").String(); typ != "function_call" {
+				t.Fatalf("function call should remain, got %q; body=%s", typ, got)
+			}
+		})
+	}
+}
+
+// 不带密文的压缩项没有账号绑定，原样保留（避免误伤正常压缩历史）。
+func TestStripInvalidEncryptedContentKeepsPlainCompactionItems(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"compaction","summary":"plain compaction, no ciphertext"},
+			{"type":"reasoning","id":"rs_bad","encrypted_content":"gAAA"}
+		]
+	}`)
+
+	got, changed := stripInvalidEncryptedContentFromResponsesBody(raw)
+	if !changed {
+		t.Fatalf("expected body to be changed by the reasoning item")
+	}
+	items := gjson.GetBytes(got, "input").Array()
+	if len(items) != 1 {
+		t.Fatalf("plain compaction should survive, got %d items: %s", len(items), got)
+	}
+	if typ := gjson.GetBytes(got, "input.0.type").String(); typ != "compaction" {
+		t.Fatalf("input.0.type = %q, want compaction preserved; body=%s", typ, got)
+	}
+	if summary := gjson.GetBytes(got, "input.0.summary").String(); summary == "" {
+		t.Fatalf("plain compaction summary should be untouched; body=%s", got)
+	}
+}
+
 // ==================== Function Calling 测试 ====================
 
 func TestStripInvalidEncryptedContentFromResponsesBodyDropsBareReasoning(t *testing.T) {
