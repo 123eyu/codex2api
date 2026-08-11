@@ -637,8 +637,11 @@ export default function Layout({ children }: PropsWithChildren) {
             </div>
           </header>
 
-          <SecurityBanner />
-          <div className="min-h-full">{children}</div>
+          {/* 统一测宽：超宽屏上卡片/表格不再无界拉伸，与 Settings 固定导航的 72rem 上限同族 */}
+          <div className="mx-auto w-full max-w-[96rem]">
+            <SecurityBanner />
+            <div className="min-h-full">{children}</div>
+          </div>
         </main>
 
         {/* Mobile bottom nav — primary destinations only */}
