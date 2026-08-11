@@ -22,11 +22,22 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { api, type ProxyRow } from "../api";
 import type { AccountRow } from "../types";
 import ChannelLogo from "../components/ChannelLogo";
 import Modal from "../components/Modal";
+import PageHeader from "../components/PageHeader";
 import Pagination from "../components/Pagination";
+import { StatTile } from "../components/StatTile";
 import StatusBadge from "../components/StatusBadge";
 import {
   DEFAULT_PAGE_SIZE_OPTIONS,
@@ -804,63 +815,47 @@ export default function Proxies() {
     <div className="space-y-6">
       {confirmDialog}
       {/* Header */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h2 className="text-2xl font-bold text-foreground flex items-center gap-2.5">
-            <Globe className="size-6 text-primary" />
-            {t("nav.proxies")}
-          </h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {t("proxies.description")}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {/* Pool Toggle Switch */}
-          <div
-            className="flex items-center gap-3"
-            title={
-              !canEnable && !poolEnabled
-                ? t("proxies.addFirstProxy")
-                : undefined
-            }
-          >
-            <span
-              className={`text-sm font-medium ${poolEnabled ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}
-            >
-              {poolEnabled
-                ? t("proxies.poolEnabled")
-                : t("proxies.poolDisabled")}
-            </span>
-            <button
-              role="switch"
-              aria-checked={poolEnabled}
-              disabled={!canEnable && !poolEnabled}
-              onClick={handleTogglePool}
-              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-40 ${
-                poolEnabled ? "bg-emerald-500" : "bg-muted-foreground/30"
-              }`}
+      <PageHeader
+        title={t("nav.proxies")}
+        description={t("proxies.description")}
+        className="mb-0 sm:mb-0"
+        actions={
+          <>
+            {/* Pool Toggle Switch */}
+            <div
+              className="flex h-9 shrink-0 items-center gap-2.5 rounded-lg border border-border/60 bg-muted/20 px-3"
+              title={
+                !canEnable && !poolEnabled
+                  ? t("proxies.addFirstProxy")
+                  : undefined
+              }
             >
               <span
-                className={`pointer-events-none inline-block size-5 transform rounded-full bg-white shadow-lg ring-0 transition-transform duration-200 ${poolEnabled ? "translate-x-5" : "translate-x-0"}`}
+                className={`text-[13px] font-medium ${poolEnabled ? "text-foreground" : "text-muted-foreground"}`}
+              >
+                {poolEnabled
+                  ? t("proxies.poolEnabled")
+                  : t("proxies.poolDisabled")}
+              </span>
+              <Switch
+                checked={poolEnabled}
+                onCheckedChange={handleTogglePool}
+                disabled={!canEnable && !poolEnabled}
               />
-            </button>
-          </div>
+            </div>
 
-          {selected.size > 0 && (
-            <button
-              onClick={handleBatchDelete}
-              className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/20"
-            >
-              <Trash2 className="size-4" />
-              {t("proxies.deleteSelected", { count: selected.size })}
-            </button>
-          )}
+            {selected.size > 0 && (
+              <Button variant="destructive" onClick={handleBatchDelete}>
+                <Trash2 className="size-4" />
+                {t("proxies.deleteSelected", { count: selected.size })}
+              </Button>
+            )}
 
-          {errorCount > 0 && (
-            <button
+            <Button
+              variant="outline"
               onClick={handleCleanErrors}
-              disabled={cleaningErrors || testsRunning}
-              className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={errorCount === 0 || cleaningErrors || testsRunning}
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive dark:hover:bg-destructive/10"
             >
               {cleaningErrors ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -870,25 +865,24 @@ export default function Proxies() {
               {cleaningErrors
                 ? t("proxies.cleaningErrors")
                 : t("proxies.cleanErrors", { count: errorCount })}
-            </button>
-          )}
+            </Button>
 
-          {proxies.some((p) => p.enabled && p.test_status !== "error") && (
-            <button
+            <Button
+              variant="outline"
               onClick={() => setShowBalance(true)}
-              disabled={balanceSubmitting}
-              className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-muted/50 disabled:opacity-50"
+              disabled={
+                balanceSubmitting ||
+                !proxies.some((p) => p.enabled && p.test_status !== "error")
+              }
             >
               <Scale className="size-4" />
               {t("proxies.autoBalance")}
-            </button>
-          )}
+            </Button>
 
-          {proxies.length > 0 && (
-            <button
+            <Button
+              variant="outline"
               onClick={handleTestAll}
-              disabled={testsRunning || cleaningErrors}
-              className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-muted/50 disabled:opacity-50"
+              disabled={proxies.length === 0 || testsRunning || cleaningErrors}
             >
               {testAllLoading ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -902,18 +896,15 @@ export default function Proxies() {
                     failed: testAllFailed,
                   })
                 : t("proxies.testAll")}
-            </button>
-          )}
+            </Button>
 
-          <button
-            onClick={() => setShowAdd(!showAdd)}
-            className="flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
-          >
-            <Plus className="size-4" />
-            {t("proxies.addProxy")}
-          </button>
-        </div>
-      </div>
+            <Button onClick={() => setShowAdd(!showAdd)}>
+              <Plus className="size-4" />
+              {t("proxies.addProxy")}
+            </Button>
+          </>
+        }
+      />
 
       {/* Add Panel */}
       {showAdd && (
@@ -932,75 +923,77 @@ export default function Proxies() {
               className="w-full h-32 px-3 py-2 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground resize-none outline-none focus:ring-2 focus:ring-primary/30 font-mono"
             />
             <div className="flex items-center gap-3">
-              <input
+              <Input
                 type="text"
                 value={addLabel}
                 onChange={(e) => setAddLabel(e.target.value)}
                 placeholder={t("proxies.labelPlaceholder")}
-                className="flex-1 px-3 py-2 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-primary/30"
+                className="flex-1"
               />
-              <button
+              <Button
                 onClick={handleAdd}
                 disabled={addLoading || !addInput.trim()}
-                className="px-5 py-2 rounded-md text-sm font-semibold bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 shadow-sm"
               >
                 {addLoading ? t("proxies.adding") : t("proxies.confirmAdd")}
-              </button>
+              </Button>
             </div>
           </CardContent>
         </Card>
       )}
 
       {/* Stats */}
-      <div className="grid grid-cols-2 gap-3 min-[520px]:grid-cols-4 sm:gap-4">
-        <Card className="py-0">
-          <CardContent className="p-4 text-center">
-            <div className="text-2xl font-bold tabular-nums text-foreground">
-              {proxies.length}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">
-              {t("proxies.totalProxies")}
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="py-0">
-          <CardContent className="p-4 text-center">
-            <div className="text-2xl font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
-              {enabledCount}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">
-              {t("proxies.enabledCount")}
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="py-0">
-          <CardContent className="p-4 text-center">
-            <div className="text-2xl font-bold tabular-nums text-primary">
-              {totalBoundAccounts}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">
-              {t("proxies.boundAccounts")}
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="py-0">
-          <CardContent className="p-4 text-center">
-            <div className="text-2xl font-bold tabular-nums text-amber-600 dark:text-amber-400">
-              {untestedCount}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">
-              {t("proxies.untestedCount")}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      {loading ? (
+        <div
+          className="grid grid-cols-2 gap-3 min-[520px]:grid-cols-4 sm:gap-4"
+          aria-busy="true"
+        >
+          {[0, 1, 2, 3].map((i) => (
+            <div
+              key={i}
+              className="h-[76px] animate-pulse rounded-lg border border-border bg-muted/40"
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3 min-[520px]:grid-cols-4 sm:gap-4">
+          <StatTile
+            label={t("proxies.totalProxies")}
+            value={proxies.length}
+            icon={<Globe className="size-4" />}
+          />
+          <StatTile
+            label={t("proxies.enabledCount")}
+            value={enabledCount}
+            icon={<Power className="size-4" />}
+            tone="success"
+          />
+          <StatTile
+            label={t("proxies.boundAccounts")}
+            value={totalBoundAccounts}
+            icon={<Users className="size-4" />}
+            tone="info"
+          />
+          <StatTile
+            label={t("proxies.untestedCount")}
+            value={untestedCount}
+            icon={<Zap className="size-4" />}
+            tone="warning"
+          />
+        </div>
+      )}
 
       {/* Table */}
       <Card className="py-0">
         <CardContent className="p-0">
           {loading ? (
-            <div className="flex justify-center items-center py-16">
-              <Loader2 className="size-6 animate-spin text-primary" />
+            <div className="space-y-2 p-4" aria-busy="true">
+              <div className="h-9 w-full animate-pulse rounded-md bg-muted/60" />
+              {[0, 1, 2, 3, 4].map((i) => (
+                <div
+                  key={i}
+                  className="h-12 w-full animate-pulse rounded-md bg-muted/40"
+                />
+              ))}
             </div>
           ) : proxies.length === 0 ? (
             <div className="text-center py-16 text-muted-foreground">
@@ -1033,7 +1026,9 @@ export default function Proxies() {
                         />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-start gap-2">
-                            <button
+                            <Button
+                              variant="ghost"
+                              size="icon"
                               onClick={() => {
                                 setRevealedIds((prev) => {
                                   const next = new Set(prev);
@@ -1042,7 +1037,7 @@ export default function Proxies() {
                                   return next;
                                 });
                               }}
-                              className="flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                              className="shrink-0 text-muted-foreground hover:text-foreground"
                               title={
                                 revealedIds.has(p.id)
                                   ? t("proxies.hideProxyUrl")
@@ -1054,7 +1049,7 @@ export default function Proxies() {
                               ) : (
                                 <Eye className="size-3.5" />
                               )}
-                            </button>
+                            </Button>
                             <span className="min-w-0 flex-1 break-all font-mono text-[12px] font-medium leading-relaxed text-foreground">
                               {revealedIds.has(p.id) ? p.url : maskUrl(p.url)}
                             </span>
@@ -1087,24 +1082,30 @@ export default function Proxies() {
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-1.5">
-                            <button
+                            <Button
+                              variant="outline"
+                              size="sm"
                               onClick={() => openBindModal(p)}
-                              className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-primary/25 bg-primary/5 px-2.5 text-xs font-medium text-primary hover:bg-primary/10"
+                              className="min-h-9 flex-1 border-primary/25 bg-primary/5 text-primary hover:bg-primary/10 hover:text-primary dark:border-primary/25 dark:bg-primary/10 dark:hover:bg-primary/15"
                             >
                               <Link2 className="size-3.5" />
                               {t("proxies.bindAccounts")}
-                            </button>
-                            <button
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
                               onClick={() => startEdit(p)}
-                              className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-border px-2.5 text-xs font-medium text-foreground hover:bg-muted/50"
+                              className="min-h-9 flex-1"
                             >
                               <Pencil className="size-3.5" />
                               {t("proxies.editProxy")}
-                            </button>
-                            <button
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
                               onClick={() => handleTest(p)}
                               disabled={isTesting || cleaningErrors}
-                              className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-border px-2.5 text-xs font-medium text-foreground hover:bg-muted/50 disabled:opacity-50"
+                              className="min-h-9 flex-1"
                             >
                               {isTesting ? (
                                 <Loader2 className="size-3.5 animate-spin" />
@@ -1112,27 +1113,31 @@ export default function Proxies() {
                                 <Play className="size-3.5" />
                               )}
                               {t("proxies.test")}
-                            </button>
-                            <button
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
                               onClick={() => handleToggle(p)}
-                              className={`inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+                              className={`min-h-9 flex-1 ${
                                 p.enabled
-                                  ? "border-amber-500/25 text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
-                                  : "border-emerald-500/25 text-emerald-600 hover:bg-emerald-500/10 dark:text-emerald-400"
+                                  ? "border-amber-500/25 text-amber-600 hover:bg-amber-500/10 hover:text-amber-600 dark:border-amber-500/25 dark:text-amber-400 dark:hover:bg-amber-500/10 dark:hover:text-amber-400"
+                                  : "border-emerald-500/25 text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600 dark:border-emerald-500/25 dark:text-emerald-400 dark:hover:bg-emerald-500/10 dark:hover:text-emerald-400"
                               }`}
                             >
                               <Power className="size-3.5" />
                               {p.enabled
                                 ? t("proxies.disableAction")
                                 : t("proxies.enableAction")}
-                            </button>
-                            <button
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
                               onClick={() => handleDelete(p.id)}
-                              className="inline-flex min-h-9 items-center justify-center rounded-lg px-2.5 text-destructive hover:bg-destructive/10"
+                              className="min-h-9 text-destructive hover:bg-destructive/10 hover:text-destructive dark:hover:bg-destructive/10"
                               title={t("common.delete")}
                             >
                               <Trash2 className="size-3.5" />
-                            </button>
+                            </Button>
                           </div>
                         </div>
                       </div>
@@ -1143,49 +1148,34 @@ export default function Proxies() {
 
               {/* Desktop table */}
               <div className="data-table-shell hidden lg:block">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-border text-left text-muted-foreground">
-                      <th className="p-3 w-10">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-10">
                         <input
                           type="checkbox"
                           checked={allSelected}
                           onChange={toggleSelectAll}
                           className="size-4 rounded"
                         />
-                      </th>
-                      <th className="p-3 font-semibold">
-                        {t("proxies.colUrl")}
-                      </th>
-                      <th className="p-3 font-semibold">
-                        {t("proxies.colStatus")}
-                      </th>
-                      <th className="p-3 font-semibold">
-                        {t("proxies.colBound")}
-                      </th>
-                      <th className="p-3 font-semibold">
-                        {t("proxies.colLocation")}
-                      </th>
-                      <th className="p-3 font-semibold">
-                        {t("proxies.colIp")}
-                      </th>
-                      <th className="p-3 font-semibold">
-                        {t("proxies.colLatency")}
-                      </th>
-                      <th className="p-3 font-semibold text-right">
+                      </TableHead>
+                      <TableHead>{t("proxies.colUrl")}</TableHead>
+                      <TableHead>{t("proxies.colStatus")}</TableHead>
+                      <TableHead>{t("proxies.colBound")}</TableHead>
+                      <TableHead>{t("proxies.colLocation")}</TableHead>
+                      <TableHead>{t("proxies.colIp")}</TableHead>
+                      <TableHead>{t("proxies.colLatency")}</TableHead>
+                      <TableHead className="text-right">
                         {t("proxies.colActions")}
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
                     {pagedProxies.map((p) => {
                       const isTesting = testingIds.has(p.id);
                       return (
-                        <tr
-                          key={p.id}
-                          className="border-b border-border/50 hover:bg-muted/30 transition-colors"
-                        >
-                          <td className="p-3">
+                        <TableRow key={p.id}>
+                          <TableCell>
                             <input
                               type="checkbox"
                               checked={selected.has(p.id)}
@@ -1197,10 +1187,12 @@ export default function Proxies() {
                               }}
                               className="size-4 rounded"
                             />
-                          </td>
-                          <td className="p-3 max-w-[380px]">
+                          </TableCell>
+                          <TableCell className="max-w-[380px] whitespace-normal">
                             <div className="flex items-center gap-2">
-                              <button
+                              <Button
+                                variant="ghost"
+                                size="icon-xs"
                                 onClick={() => {
                                   setRevealedIds((prev) => {
                                     const next = new Set(prev);
@@ -1209,7 +1201,7 @@ export default function Proxies() {
                                     return next;
                                   });
                                 }}
-                                className="shrink-0 flex items-center justify-center size-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all"
+                                className="shrink-0 text-muted-foreground hover:text-foreground"
                                 title={
                                   revealedIds.has(p.id)
                                     ? t("proxies.hideProxyUrl")
@@ -1221,17 +1213,17 @@ export default function Proxies() {
                                 ) : (
                                   <Eye className="size-3.5" />
                                 )}
-                              </button>
+                              </Button>
                               <span className="font-mono text-[13px] font-medium break-all text-foreground">
                                 {revealedIds.has(p.id) ? p.url : maskUrl(p.url)}
                               </span>
                             </div>
-                          </td>
-                          <td className="p-3">
+                          </TableCell>
+                          <TableCell>
                             <ProxyStatusBadge proxy={p} />
-                          </td>
+                          </TableCell>
                           {/* Bound accounts */}
-                          <td className="p-3">
+                          <TableCell>
                             <button
                               type="button"
                               onClick={() => openBindModal(p)}
@@ -1243,9 +1235,9 @@ export default function Proxies() {
                                 {boundCountForProxy(p)}
                               </span>
                             </button>
-                          </td>
+                          </TableCell>
                           {/* Location */}
-                          <td className="p-3">
+                          <TableCell>
                             {isTesting ? (
                               <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
                             ) : p.test_location ? (
@@ -1258,9 +1250,9 @@ export default function Proxies() {
                                 -
                               </span>
                             )}
-                          </td>
+                          </TableCell>
                           {/* IP */}
-                          <td className="p-3">
+                          <TableCell>
                             {p.test_ip ? (
                               <span className="text-[13px] font-mono font-medium text-foreground whitespace-nowrap">
                                 {p.test_ip}
@@ -1270,9 +1262,9 @@ export default function Proxies() {
                                 -
                               </span>
                             )}
-                          </td>
+                          </TableCell>
                           {/* Latency */}
-                          <td className="p-3">
+                          <TableCell>
                             {p.test_latency_ms > 0 ? (
                               <span
                                 className={`inline-flex px-2 py-0.5 rounded-full text-xs font-bold ${latencyColor(p.test_latency_ms)} ${latencyBg(p.test_latency_ms)}`}
@@ -1284,28 +1276,34 @@ export default function Proxies() {
                                 -
                               </span>
                             )}
-                          </td>
-                          <td className="p-3">
-                            <div className="flex items-center gap-1.5 justify-end">
-                              <button
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-1 justify-end">
+                              <Button
+                                variant="outline"
+                                size="sm"
                                 onClick={() => openBindModal(p)}
-                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-primary/20 bg-primary/5 text-primary hover:bg-primary/10 transition-all"
+                                className="border-primary/20 bg-primary/5 text-primary hover:bg-primary/10 hover:text-primary dark:border-primary/25 dark:bg-primary/10 dark:hover:bg-primary/15"
                                 title={t("proxies.bindAccounts")}
                               >
                                 <Link2 className="size-3.5" />
                                 {t("proxies.bind")}
-                              </button>
-                              <button
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
                                 onClick={() => startEdit(p)}
-                                className="flex items-center justify-center size-7 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all"
+                                className="text-muted-foreground hover:text-foreground"
                                 title={t("proxies.editProxy")}
                               >
                                 <Pencil className="size-3.5" />
-                              </button>
-                              <button
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
                                 onClick={() => handleTest(p)}
                                 disabled={isTesting || cleaningErrors}
-                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-50"
+                                className="text-muted-foreground hover:text-foreground"
                                 title={t("proxies.testProxy")}
                               >
                                 {isTesting ? (
@@ -1313,15 +1311,16 @@ export default function Proxies() {
                                 ) : (
                                   <Play className="size-3.5" />
                                 )}
-                                {t("proxies.test")}
-                              </button>
-                              <button
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
                                 onClick={() => handleToggle(p)}
-                                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                                className={
                                   p.enabled
-                                    ? "border-amber-500/25 text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
-                                    : "border-emerald-500/25 text-emerald-600 hover:bg-emerald-500/10 dark:text-emerald-400"
-                                }`}
+                                    ? "text-amber-600 hover:bg-amber-500/10 hover:text-amber-600 dark:text-amber-400 dark:hover:bg-amber-500/10 dark:hover:text-amber-400"
+                                    : "text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600 dark:text-emerald-400 dark:hover:bg-emerald-500/10 dark:hover:text-emerald-400"
+                                }
                                 title={
                                   p.enabled
                                     ? t("proxies.disableAction")
@@ -1329,24 +1328,23 @@ export default function Proxies() {
                                 }
                               >
                                 <Power className="size-3.5" />
-                                {p.enabled
-                                  ? t("proxies.disableAction")
-                                  : t("proxies.enableAction")}
-                              </button>
-                              <button
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
                                 onClick={() => handleDelete(p.id)}
-                                className="flex items-center justify-center size-7 rounded-lg text-destructive hover:bg-destructive/10 transition-all"
+                                className="text-destructive hover:bg-destructive/10 hover:text-destructive dark:hover:bg-destructive/10"
                                 title={t("common.delete")}
                               >
                                 <Trash2 className="size-3.5" />
-                              </button>
+                              </Button>
                             </div>
-                          </td>
-                        </tr>
+                          </TableCell>
+                        </TableRow>
                       );
                     })}
-                  </tbody>
-                </table>
+                  </TableBody>
+                </Table>
               </div>
 
               <div className="px-4 pb-3">
