@@ -551,6 +551,8 @@
     "usageOfficialRefreshFailed": "刷新失败，展示的是已存快照：{{reason}}",
     "usageOfficialEmpty": "尚未记录到官方用量。后台每 6 小时快照一次。",
     "usageOfficialCost": "结算成本",
+    "usageOfficialCredits": "{{credits}} credits · {{rate}} credits/美元",
+    "usageOfficialCreditsRaw": "{{credits}} credits",
     "usageOfficialTokens": "结算 Token",
     "usageOfficialTurns": "对话轮次",
     "usageOfficialDailyTrend": "每日成本",

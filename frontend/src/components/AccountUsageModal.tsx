@@ -494,9 +494,17 @@ function OfficialUsagePage({ accountId, range }: { accountId: number; range: Usa
     () => items.reduce((max, item) => Math.max(max, item.credits), 0),
     [items],
   )
+  // 换算率由后端下发，前端不硬编码，官方改比例时只动一处。
+  const creditsPerUSD = data?.credits_per_usd || 25
   // 客户端拆分按整个窗口累加：单看某一天噪声太大，看不出入口占比。
-  const clientTotals = useMemo(() => aggregateSplits(items, 'clients'), [items])
-  const modelTotals = useMemo(() => aggregateSplits(items, 'models'), [items])
+  const clientTotals = useMemo(
+    () => aggregateSplits(items, 'clients', creditsPerUSD),
+    [items, creditsPerUSD],
+  )
+  const modelTotals = useMemo(
+    () => aggregateSplits(items, 'models', creditsPerUSD),
+    [items, creditsPerUSD],
+  )
 
   if (loading) {
     return <div className="py-12 text-center text-sm text-muted-foreground">{t('common.loading')}</div>
@@ -547,6 +555,11 @@ function OfficialUsagePage({ accountId, range }: { accountId: number; range: Usa
               icon={<Coins className="size-4" />}
               label={t('accounts.usageOfficialCost')}
               value={formatUSD(data?.totals.usd ?? 0)}
+              // 美元是按 credits 折算出来的,原始 credits 一并给出,方便与官方后台对账。
+              detail={t('accounts.usageOfficialCredits', {
+                credits: formatCredits(data?.totals.credits ?? 0),
+                rate: data?.credits_per_usd ?? 25,
+              })}
             />
             <CompactMetric
               icon={<Package className="size-4" />}
@@ -600,7 +613,10 @@ function OfficialUsageDayRow({ item, maxCredits }: { item: WhamDailyUsageItem; m
       <div className="h-4 flex-1 overflow-hidden rounded bg-muted/50">
         <div className="h-full rounded bg-primary/70" style={{ width: `${width}%` }} />
       </div>
-      <span className="w-20 shrink-0 text-right font-semibold tabular-nums text-foreground">
+      <span
+        className="w-20 shrink-0 text-right font-semibold tabular-nums text-foreground"
+        title={t('accounts.usageOfficialCreditsRaw', { credits: formatCredits(item.credits) })}
+      >
         {formatUSD(item.usd)}
       </span>
       <span className="w-20 shrink-0 text-right tabular-nums text-muted-foreground">
@@ -638,7 +654,10 @@ function OfficialSplitTable({
                 {formatNumber(row.turns)} {t('accounts.usageOfficialTurnUnit')}
               </span>
               {!hideCost && (
-                <span className="w-20 shrink-0 text-right font-semibold tabular-nums text-foreground">
+                <span
+                  className="w-20 shrink-0 text-right font-semibold tabular-nums text-foreground"
+                  title={t('accounts.usageOfficialCreditsRaw', { credits: formatCredits(row.credits) })}
+                >
                   {formatUSD(row.usd)}
                 </span>
               )}
@@ -652,6 +671,7 @@ function OfficialSplitTable({
 
 interface AggregatedSplit {
   label: string
+  credits: number
   usd: number
   turns: number
   tokens: number
@@ -659,20 +679,35 @@ interface AggregatedSplit {
 
 // aggregateSplits 把每天的拆分数组按 client_id / model 累加到整个窗口，按成本降序。
 // 模型维度上游不给 credits，退化成按轮次排序。
-function aggregateSplits(items: WhamDailyUsageItem[], field: 'clients' | 'models'): AggregatedSplit[] {
+function aggregateSplits(
+  items: WhamDailyUsageItem[],
+  field: 'clients' | 'models',
+  creditsPerUSD: number,
+): AggregatedSplit[] {
   const totals = new Map<string, AggregatedSplit>()
   for (const item of items) {
     const splits: WhamDailyUsageSplit[] = item[field] ?? []
     for (const split of splits) {
       const label = (field === 'clients' ? split.client_id : split.model)?.trim() || '-'
-      const current = totals.get(label) ?? { label, usd: 0, turns: 0, tokens: 0 }
-      current.usd += (split.credits ?? 0) / 25
+      const current = totals.get(label) ?? { label, credits: 0, usd: 0, turns: 0, tokens: 0 }
+      current.credits += split.credits ?? 0
+      current.usd += (split.credits ?? 0) / creditsPerUSD
       current.turns += split.turns ?? 0
       current.tokens += split.text_total_tokens ?? 0
       totals.set(label, current)
     }
   }
   return [...totals.values()].sort((a, b) => (b.usd - a.usd) || (b.turns - a.turns))
+}
+
+// credits 是官方的原始计费单位,保留两位小数(上游给的是小数),整数则不补零。
+function formatCredits(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  const rounded = Math.round(value * 100) / 100
+  return rounded.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })
 }
 
 function formatUSD(value: number): string {
@@ -1379,7 +1414,18 @@ function MiniPill({ label, value }: { label: string; value: string }) {
   )
 }
 
-function CompactMetric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
+function CompactMetric({
+  icon,
+  label,
+  value,
+  detail,
+}: {
+  icon: ReactNode
+  label: string
+  value: string
+  // 副行:展示换算前的原始口径(如美元下面的 credits 原值)。
+  detail?: string
+}) {
   return (
     <div className="rounded-xl border bg-background px-3 py-3">
       <div className="mb-2 flex items-center gap-2 text-muted-foreground">
@@ -1387,6 +1433,9 @@ function CompactMetric({ icon, label, value }: { icon: ReactNode; label: string;
         <span className="text-xs font-medium">{label}</span>
       </div>
       <div className="text-xl font-semibold tabular-nums text-foreground">{value}</div>
+      {detail && (
+        <div className="mt-0.5 text-[11px] tabular-nums text-muted-foreground">{detail}</div>
+      )}
     </div>
   )
 }

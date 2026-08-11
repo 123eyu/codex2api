@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -19,8 +20,9 @@ import (
 // 可以看更长，所以默认给 30。
 const whamDailyUsageDefaultDays = 30
 
-// whamDailyUsageMaxDays 限制单次查询窗口，避免误传超大值把整表拉出来。
-const whamDailyUsageMaxDays = 180
+// whamDailyUsageMaxDays 限制单次查询窗口。与快照保留期 whamDailyUsageKeepDays
+// 对齐：留了一年就要查得到一年，否则超出上限的那部分数据永远看不到。
+const whamDailyUsageMaxDays = whamDailyUsageKeepDays
 
 func (h *Handler) queryWhamDailyUsageUpstream(ctx context.Context, account *auth.Account, proxyURL, startDate, endDate string) (*proxy.WhamDailyUsageResponse, *http.Response, error) {
 	if h != nil && h.queryWhamDailyUsage != nil {
@@ -49,7 +51,7 @@ func (h *Handler) GetAccountWhamDailyUsage(c *gin.Context) {
 	if raw := strings.TrimSpace(c.Query("days")); raw != "" {
 		parsed, parseErr := strconv.Atoi(raw)
 		if parseErr != nil || parsed <= 0 || parsed > whamDailyUsageMaxDays {
-			writeError(c, http.StatusBadRequest, "days 必须是 1~180 的整数")
+			writeError(c, http.StatusBadRequest, fmt.Sprintf("days 必须是 1~%d 的整数", whamDailyUsageMaxDays))
 			return
 		}
 		days = parsed

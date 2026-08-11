@@ -551,6 +551,8 @@
     "usageOfficialRefreshFailed": "Refresh failed, showing stored snapshots: {{reason}}",
     "usageOfficialEmpty": "No official usage recorded yet. Snapshots are taken every 6 hours.",
     "usageOfficialCost": "Billed cost",
+    "usageOfficialCredits": "{{credits}} credits · {{rate}} per USD",
+    "usageOfficialCreditsRaw": "{{credits}} credits",
     "usageOfficialTokens": "Billed tokens",
     "usageOfficialTurns": "Turns",
     "usageOfficialDailyTrend": "Daily cost",
