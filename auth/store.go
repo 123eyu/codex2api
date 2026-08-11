@@ -7373,6 +7373,27 @@ func (s *Store) MarkModelCooldown(acc *Account, model string, duration time.Dura
 	return s.MarkModelCooldownWithBackoff(acc, model, duration, reason, true)
 }
 
+// modelCooldownStreakTTL 是模型冷却退避的连击有效期，取值远大于 30 分钟的冷却上限。
+//
+// 退避档位原先只在「冷却还没到期时又失败」才升级，可低流量部署两次失败的间隔通常
+// 比冷却本身还长：冷却早已过期，档位于是永远停在第一级，退避形同虚设。改按最近一次
+// 失败的时间判定——TTL 内再失败就继续升级，成功（ClearModelCooldown 会删掉表项）
+// 或超过 TTL 才回到第一级。
+const modelCooldownStreakTTL = time.Hour
+
+// modelCooldownStreakActive 报告该模型的失败连击是否仍在有效期内。
+func modelCooldownStreakActive(current ModelCooldown, now time.Time) bool {
+	if current.ResetAt.After(now) {
+		return true
+	}
+	if current.UpdatedAt.IsZero() {
+		return false
+	}
+	// 时钟回拨时 elapsed 为负，按「刚刚失败过」处理：宁可多退避一档，
+	// 也不要因为系统时间跳动把上游再撞一遍。
+	return now.Sub(current.UpdatedAt) < modelCooldownStreakTTL
+}
+
 func (s *Store) MarkModelCooldownWithBackoff(acc *Account, model string, duration time.Duration, reason string, backoffEnabled bool) ModelCooldown {
 	if acc == nil {
 		return ModelCooldown{}
@@ -7395,7 +7416,10 @@ func (s *Store) MarkModelCooldownWithBackoff(acc *Account, model string, duratio
 	}
 	current := acc.ModelCooldowns[key]
 	level := current.BackoffLevel
-	if backoffEnabled && current.ResetAt.After(now) {
+	switch {
+	case !backoffEnabled:
+		level = 0
+	case modelCooldownStreakActive(current, now):
 		level++
 		duration *= 2
 		for i := 0; i < level-1; i++ {
@@ -7404,7 +7428,8 @@ func (s *Store) MarkModelCooldownWithBackoff(acc *Account, model string, duratio
 		if duration > 30*time.Minute {
 			duration = 30 * time.Minute
 		}
-	} else if !backoffEnabled {
+	default:
+		// 连击已断：回到第一级，别让旧档位无限期挂在账号上。
 		level = 0
 	}
 	resetAt := now.Add(duration)
