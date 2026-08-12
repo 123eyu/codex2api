@@ -72,9 +72,12 @@ interface Props {
   // 打开时直接停在指定 tab（列表里点「官方 7d」成本就该落在官方统计上，
   // 而不是让用户开完概览再自己切一次）。
   initialPage?: UsagePage
+  // 官方统计手动刷新成功后回调:列表页借此重拉 page-stats,
+  // 让「官方 7d」成本胶囊立即同步,不用等下一次翻页或静默刷新。
+  onOfficialUsageRefreshed?: () => void
 }
 
-export default function AccountUsageModal({ account, onClose, onCreditsReset, showCreditSettings = true, initialPage }: Props) {
+export default function AccountUsageModal({ account, onClose, onCreditsReset, showCreditSettings = true, initialPage, onOfficialUsageRefreshed }: Props) {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [data, setData] = useState<AccountUsageDetail | null>(null)
@@ -193,6 +196,7 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset, sh
           onRangeChange={setRange}
           onViewLogs={handleViewLogs}
           showOfficialUsage={supportsOfficialUsage}
+          onOfficialUsageRefreshed={onOfficialUsageRefreshed}
         />
       )}
 
@@ -227,6 +231,7 @@ function UsageStatsContent({
   onRangeChange,
   onViewLogs,
   showOfficialUsage,
+  onOfficialUsageRefreshed,
 }: {
   account: AccountRow
   accountLabel: string
@@ -240,6 +245,7 @@ function UsageStatsContent({
   onRangeChange: (range: UsageRangeKey) => void
   onViewLogs: () => void
   showOfficialUsage: boolean
+  onOfficialUsageRefreshed?: () => void
 }) {
   const { t } = useTranslation()
   const activeDays = Math.max(0, data.active_days || 0)
@@ -371,7 +377,7 @@ function UsageStatsContent({
             periodDays={periodDays}
           />
         ) : page === 'official' ? (
-          <OfficialUsagePage accountId={account.id} range={range} />
+          <OfficialUsagePage accountId={account.id} range={range} onRefreshed={onOfficialUsageRefreshed} />
         ) : (
           <QualityPage data={data} />
         )}
@@ -483,7 +489,7 @@ function QualityPage({ data }: { data: AccountUsageDetail }) {
 // OfficialUsagePage 展示 OpenAI 侧的结算口径用量，与其他 tab 的本地 usage_logs
 // 聚合是两套数据：这里的 credits 与 token 是官方账单数，且能按客户端入口拆分，
 // 能看出某个号有多少消耗来自本网关、多少来自官方客户端。
-function OfficialUsagePage({ accountId, range }: { accountId: number; range: UsageRangeKey }) {
+function OfficialUsagePage({ accountId, range, onRefreshed }: { accountId: number; range: UsageRangeKey; onRefreshed?: () => void }) {
   const fullNumbers = useShowFullUsageNumbers()
   const { t } = useTranslation()
   const [data, setData] = useState<WhamDailyUsageResponse | null>(null)
@@ -504,6 +510,8 @@ function OfficialUsagePage({ accountId, range }: { accountId: number; range: Usa
       const result = await api.getWhamDailyUsage(accountId, days, refresh)
       if (requestSeq.current !== seq) return
       setData(result)
+      // 只有真刷成功了才通知列表(refresh_error 时快照没变,重拉没意义)。
+      if (refresh && !result.refresh_error) onRefreshed?.()
     } catch (err) {
       if (requestSeq.current !== seq) return
       setError(getErrorMessage(err))
@@ -513,7 +521,7 @@ function OfficialUsagePage({ accountId, range }: { accountId: number; range: Usa
         setRefreshing(false)
       }
     }
-  }, [accountId, days])
+  }, [accountId, days, onRefreshed])
 
   useEffect(() => { void load(false) }, [load])
 
