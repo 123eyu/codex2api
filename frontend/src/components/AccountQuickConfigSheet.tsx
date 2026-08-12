@@ -126,32 +126,52 @@ export default function AccountQuickConfigSheet({
   const [groupIds, setGroupIds] = useState<number[]>([]);
 
   useEffect(() => {
-    if (!account) return;
-    setFingerprintMode(account.codex_fingerprint_mode ?? "off");
-    if (account.score_bias_override != null) {
-      setScoreMode("custom");
-      setScoreInput(String(account.score_bias_override));
-    } else {
-      setScoreMode("default");
-      setScoreInput("");
-    }
-    if (account.base_concurrency_override != null) {
-      setConcurrencyMode("custom");
-      setConcurrencyInput(String(account.base_concurrency_override));
-    } else {
-      setConcurrencyMode("default");
-      setConcurrencyInput("");
-    }
-    setSchedulerPriorityInput(
-      account.scheduler_priority != null
-        ? String(account.scheduler_priority)
-        : "",
-    );
-    setSkipWarmTier(account.skip_warm_tier ?? false);
-    setProxyUrl(account.proxy_url ?? "");
-    setCustomHeadersText(formatCustomHeadersText(account.custom_headers));
-    setTags(account.tags ?? []);
-    setGroupIds(account.group_ids ?? []);
+    if (!account) return undefined;
+
+    let cancelled = false;
+
+    const populateForm = (acc: AccountRow) => {
+      const mode = (acc.codex_fingerprint_mode as string) || "off";
+      setFingerprintMode(
+        mode === "device" || mode === "session" || mode === "full" ? mode : "off",
+      );
+      if (acc.score_bias_override != null) {
+        setScoreMode("custom");
+        setScoreInput(String(acc.score_bias_override));
+      } else {
+        setScoreMode("default");
+        setScoreInput("");
+      }
+      if (acc.base_concurrency_override != null) {
+        setConcurrencyMode("custom");
+        setConcurrencyInput(String(acc.base_concurrency_override));
+      } else {
+        setConcurrencyMode("default");
+        setConcurrencyInput("");
+      }
+      setSchedulerPriorityInput(
+        acc.scheduler_priority != null ? String(acc.scheduler_priority) : "",
+      );
+      setSkipWarmTier(acc.skip_warm_tier ?? false);
+      setProxyUrl(acc.proxy_url ?? "");
+      setCustomHeadersText(formatCustomHeadersText(acc.custom_headers));
+      setTags(acc.tags ?? []);
+      setGroupIds(acc.group_ids ?? []);
+    };
+
+    populateForm(account);
+
+    void api.getAccount(account.id)
+      .then((detailed) => {
+        if (!cancelled && detailed) {
+          populateForm(detailed);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
   }, [account]);
 
   if (!account) return null;
