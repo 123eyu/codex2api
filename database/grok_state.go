@@ -25,6 +25,9 @@ const (
 	GrokProtocolResponses       = "responses"
 	GrokProtocolChatCompletions = "chat_completions"
 	GrokProtocolMessages        = "messages"
+
+	dataMigrationGrokStateBackfillV1     = "20260813_grok_state_backfill_v1"
+	grokStateHistoricalBackfillBatchSize = 500
 )
 
 // GrokAccountFact is one independently refreshed control-plane observation.
@@ -123,12 +126,22 @@ type GrokAccountState struct {
 	Capabilities         []GrokModelCapability      `json:"capabilities"`
 }
 
-// ensureGrokStateSchema is intentionally additive. Older binaries can keep
-// reading credentials while the new tables become authoritative.
+// ensureGrokStateSchema keeps schema creation separate from the potentially
+// expensive historical data migration. The completion marker makes normal
+// startups DDL-only after the one-time backfill has finished.
 func (db *DB) ensureGrokStateSchema(ctx context.Context) error {
 	if db == nil || db.conn == nil {
 		return errors.New("database is not initialized")
 	}
+	if err := db.ensureGrokStateTables(ctx); err != nil {
+		return err
+	}
+	return db.ensureGrokStateHistoricalBackfill(ctx)
+}
+
+// ensureGrokStateTables is intentionally additive. Older binaries can keep
+// reading credentials while the new tables become authoritative.
+func (db *DB) ensureGrokStateTables(ctx context.Context) error {
 	if db.isSQLite() {
 		if err := db.ensureSQLiteColumn(ctx, "accounts", "credential_generation", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 			return err
@@ -180,6 +193,11 @@ func (db *DB) ensureGrokStateSchema(ctx context.Context) error {
 			CREATE TABLE IF NOT EXISTS grok_credential_identity_claims (
 				identity_key TEXT NOT NULL PRIMARY KEY, account_id INTEGER NOT NULL,
 				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+			);
+			CREATE TABLE IF NOT EXISTS grok_state_migration_progress (
+				version TEXT NOT NULL PRIMARY KEY, phase TEXT NOT NULL DEFAULT 'families',
+				last_account_id INTEGER NOT NULL DEFAULT 0, completed_at TIMESTAMP NULL,
+				updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 			);
 			CREATE INDEX IF NOT EXISTS idx_grok_facts_expires ON grok_account_fact_snapshots(expires_at);
 			CREATE INDEX IF NOT EXISTS idx_grok_catalog_items_model ON grok_model_catalog_items(model_id, account_id);
@@ -237,6 +255,11 @@ func (db *DB) ensureGrokStateSchema(ctx context.Context) error {
 				identity_key TEXT NOT NULL PRIMARY KEY, account_id BIGINT NOT NULL,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 			);
+			CREATE TABLE IF NOT EXISTS grok_state_migration_progress (
+				version TEXT NOT NULL PRIMARY KEY, phase TEXT NOT NULL DEFAULT 'families',
+				last_account_id BIGINT NOT NULL DEFAULT 0, completed_at TIMESTAMPTZ NULL,
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			);
 			CREATE INDEX IF NOT EXISTS idx_grok_facts_expires ON grok_account_fact_snapshots(expires_at);
 			CREATE INDEX IF NOT EXISTS idx_grok_catalog_items_model ON grok_model_catalog_items(model_id, account_id);
 			CREATE INDEX IF NOT EXISTS idx_grok_capabilities_expires ON grok_model_capabilities(expires_at);
@@ -246,10 +269,98 @@ func (db *DB) ensureGrokStateSchema(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := db.backfillCredentialFamilies(ctx); err != nil {
+	return nil
+}
+
+// ensureGrokStateHistoricalBackfill commits bounded, cursor-tracked batches.
+// A crash repeats at most one idempotent batch, while the final marker makes
+// every later startup skip the historical account scan.
+func (db *DB) ensureGrokStateHistoricalBackfill(ctx context.Context) error {
+	if err := db.ensureDataMigrationsTable(ctx); err != nil {
 		return err
 	}
-	return db.backfillGrokCredentialIdentityClaims(ctx)
+	var completed int
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM data_migrations WHERE version=$1`, dataMigrationGrokStateBackfillV1).Scan(&completed); err != nil {
+		return fmt.Errorf("check Grok state backfill marker: %w", err)
+	}
+	if completed != 0 {
+		return nil
+	}
+	if _, err := db.conn.ExecContext(ctx, `
+		INSERT INTO grok_state_migration_progress(version,phase,last_account_id,updated_at)
+		VALUES($1,'families',0,CURRENT_TIMESTAMP) ON CONFLICT(version) DO NOTHING`, dataMigrationGrokStateBackfillV1); err != nil {
+		return fmt.Errorf("initialize Grok state migration progress: %w", err)
+	}
+	for {
+		done, err := db.runGrokStateHistoricalBackfillBatch(ctx)
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+	}
+}
+
+func (db *DB) runGrokStateHistoricalBackfillBatch(ctx context.Context) (bool, error) {
+	done := false
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		progressQuery := `SELECT phase,last_account_id,completed_at FROM grok_state_migration_progress WHERE version=$1`
+		if !db.isSQLite() {
+			progressQuery += ` FOR UPDATE`
+		}
+		var phase string
+		var lastAccountID int64
+		var completedAt sql.NullTime
+		if err := tx.QueryRowContext(ctx, progressQuery, dataMigrationGrokStateBackfillV1).Scan(&phase, &lastAccountID, &completedAt); err != nil {
+			return fmt.Errorf("read Grok state migration progress: %w", err)
+		}
+		if completedAt.Valid {
+			done = true
+			return tx.Commit()
+		}
+
+		switch phase {
+		case "families":
+			processed, err := db.backfillCredentialFamiliesBatch(ctx, tx, grokStateHistoricalBackfillBatchSize)
+			if err != nil {
+				return fmt.Errorf("backfill Grok credential families: %w", err)
+			}
+			if processed == 0 {
+				if _, err := tx.ExecContext(ctx, `UPDATE grok_state_migration_progress SET phase='identities',last_account_id=0,updated_at=CURRENT_TIMESTAMP WHERE version=$1`, dataMigrationGrokStateBackfillV1); err != nil {
+					return err
+				}
+			}
+		case "identities":
+			processed, nextID, err := db.backfillGrokCredentialIdentityClaimsBatch(ctx, tx, lastAccountID, grokStateHistoricalBackfillBatchSize)
+			if err != nil {
+				return fmt.Errorf("backfill Grok credential identity claims: %w", err)
+			}
+			if processed > 0 {
+				if _, err := tx.ExecContext(ctx, `UPDATE grok_state_migration_progress SET last_account_id=$1,updated_at=CURRENT_TIMESTAMP WHERE version=$2`, nextID, dataMigrationGrokStateBackfillV1); err != nil {
+					return err
+				}
+			} else {
+				if _, err := tx.ExecContext(ctx, `UPDATE grok_state_migration_progress SET completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE version=$1`, dataMigrationGrokStateBackfillV1); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(ctx, `INSERT INTO data_migrations(version,applied_at) VALUES($1,CURRENT_TIMESTAMP) ON CONFLICT(version) DO NOTHING`, dataMigrationGrokStateBackfillV1); err != nil {
+					return err
+				}
+				done = true
+			}
+		default:
+			return fmt.Errorf("unknown Grok state migration phase %q", phase)
+		}
+		return tx.Commit()
+	})
+	return done, err
 }
 
 func credentialFamilyCandidate(credentials map[string]any) string {
@@ -341,6 +452,48 @@ func (db *DB) backfillCredentialFamilies(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (db *DB) backfillCredentialFamiliesBatch(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id,credentials FROM accounts
+		WHERE COALESCE(credential_family_id,'')=''
+		ORDER BY id LIMIT $1`, limit)
+	if err != nil {
+		return 0, err
+	}
+	type pending struct {
+		id     int64
+		family string
+	}
+	updates := make([]pending, 0, limit)
+	for rows.Next() {
+		var id int64
+		var raw any
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		family := credentialFamilyCandidate(decodeCredentials(raw))
+		if family == "" {
+			family = "cf_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		}
+		updates = append(updates, pending{id: id, family: family})
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	stmt, err := tx.PrepareContext(ctx, `UPDATE accounts SET credential_family_id=$1 WHERE id=$2 AND COALESCE(credential_family_id,'')=''`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	for _, update := range updates {
+		if _, err := stmt.ExecContext(ctx, update.family, update.id); err != nil {
+			return 0, err
+		}
+	}
+	return len(updates), nil
 }
 
 func grokCredentialIdentityKey(kind, value string) string {
@@ -488,6 +641,54 @@ func (db *DB) backfillGrokCredentialIdentityClaims(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (db *DB) backfillGrokCredentialIdentityClaimsBatch(ctx context.Context, tx *sql.Tx, afterID int64, limit int) (processed int, nextID int64, err error) {
+	query := `SELECT id,credentials,credential_family_id FROM accounts WHERE id>$1 ORDER BY id LIMIT $2`
+	if !db.isSQLite() {
+		query = `SELECT id,credentials,credential_family_id FROM accounts WHERE id>$1 AND LOWER(COALESCE(credentials->>'upstream_type',''))='grok' ORDER BY id LIMIT $2`
+	}
+	rows, err := tx.QueryContext(ctx, query, afterID, limit)
+	if err != nil {
+		return 0, afterID, err
+	}
+	type identity struct {
+		accountID int64
+		keys      []string
+	}
+	identities := make([]identity, 0, limit)
+	for rows.Next() {
+		var accountID int64
+		var raw any
+		var familyID string
+		if err := rows.Scan(&accountID, &raw, &familyID); err != nil {
+			rows.Close()
+			return 0, afterID, err
+		}
+		nextID = accountID
+		processed++
+		credentials := decodeCredentials(raw)
+		if db.isSQLite() && !strings.EqualFold(strings.TrimSpace(credentialStringFromMap(credentials, "upstream_type")), "grok") {
+			continue
+		}
+		identities = append(identities, identity{accountID: accountID, keys: grokCredentialIdentityKeys(credentials, familyID)})
+	}
+	if err := rows.Close(); err != nil {
+		return 0, afterID, err
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO grok_credential_identity_claims(identity_key,account_id) VALUES($1,$2) ON CONFLICT(identity_key) DO NOTHING`)
+	if err != nil {
+		return 0, afterID, err
+	}
+	defer stmt.Close()
+	for _, item := range identities {
+		for _, key := range item.keys {
+			if _, err := stmt.ExecContext(ctx, key, item.accountID); err != nil {
+				return 0, afterID, err
+			}
+		}
+	}
+	return processed, nextID, nil
 }
 
 func (db *DB) GetAccountCredentialState(ctx context.Context, accountID int64) (generation int64, familyID string, err error) {

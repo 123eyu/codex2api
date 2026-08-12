@@ -561,6 +561,68 @@ func TestGrokSchemaMigrationIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestGrokStateBackfillMarkerSkipsHistoricalScan(t *testing.T) {
+	db := newGrokStateTestDB(t)
+	ctx := context.Background()
+
+	if _, err := db.conn.ExecContext(ctx, `
+		CREATE TRIGGER reject_historical_claim_scan
+		BEFORE INSERT ON grok_credential_identity_claims
+		BEGIN SELECT RAISE(ABORT, 'historical claims were scanned again'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ensureGrokStateSchema(ctx); err != nil {
+		t.Fatalf("completed migration did not skip historical scan: %v", err)
+	}
+}
+
+func TestGrokStateBackfillResumesPartialProgress(t *testing.T) {
+	db := newGrokStateTestDB(t)
+	ctx := context.Background()
+	credentials := map[string]any{
+		"upstream_type": "grok", "refresh_token": "resume-token", "account_id": "resume-subject",
+	}
+	first, err := db.InsertAccountWithUpstream(ctx, "resume-first", "xai", "grok", credentials, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.InsertAccountWithUpstream(ctx, "resume-second", "xai", "grok", credentials, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.conn.ExecContext(ctx, `DELETE FROM grok_credential_identity_claims; DELETE FROM data_migrations WHERE version=$1; DELETE FROM grok_state_migration_progress WHERE version=$1`, dataMigrationGrokStateBackfillV1); err != nil {
+		t.Fatal(err)
+	}
+	family, err := db.EnsureAccountCredentialFamilyID(ctx, first, "resume-family")
+	if err != nil {
+		t.Fatal(err)
+	}
+	principalKey := grokCredentialIdentityKeys(credentials, family)[0]
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO grok_credential_identity_claims(identity_key,account_id) VALUES($1,$2)`, principalKey, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ensureGrokStateSchema(ctx); err != nil {
+		t.Fatalf("resume partial migration: %v", err)
+	}
+	var owner int64
+	if err := db.conn.QueryRowContext(ctx, `SELECT account_id FROM grok_credential_identity_claims WHERE identity_key=$1`, principalKey).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != first {
+		t.Fatalf("existing oldest identity owner = %d, want %d (second=%d)", owner, first, second)
+	}
+	var emptyFamilies, markers int
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts WHERE COALESCE(credential_family_id,'')=''`).Scan(&emptyFamilies); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM data_migrations WHERE version=$1`, dataMigrationGrokStateBackfillV1).Scan(&markers); err != nil {
+		t.Fatal(err)
+	}
+	if emptyFamilies != 0 || markers != 1 {
+		t.Fatalf("partial resume result: empty families=%d markers=%d", emptyFamilies, markers)
+	}
+}
+
 func TestGrokCredentialFamilyMatchesImporterAlgorithm(t *testing.T) {
 	got := credentialFamilyCandidate(map[string]any{
 		"upstream_type": "grok", "refresh_token": "rt",
@@ -655,6 +717,12 @@ func TestGrokIdentityClaimBackfillToleratesHistoricalDuplicates(t *testing.T) {
 	}
 	second, err := db.InsertAccountWithUpstream(ctx, "legacy-second", "xai", "grok", credentials, "")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.conn.ExecContext(ctx, `DELETE FROM data_migrations WHERE version=$1`, dataMigrationGrokStateBackfillV1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.conn.ExecContext(ctx, `DELETE FROM grok_state_migration_progress WHERE version=$1`, dataMigrationGrokStateBackfillV1); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.ensureGrokStateSchema(ctx); err != nil {

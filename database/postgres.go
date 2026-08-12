@@ -24,6 +24,8 @@ import (
 
 const usageStatsRollupInitTimeout = 5 * time.Minute
 
+const grokStateBackfillInitTimeout = 5 * time.Minute
+
 // AccountRow 数据库中的账号行
 type AccountRow struct {
 	ID                      int64
@@ -429,9 +431,17 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 	if err := db.migrate(ctx); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
-	if err := db.ensureGrokStateSchema(ctx); err != nil {
-		return nil, fmt.Errorf("初始化 Grok 状态表失败: %w", err)
+	grokStateCtx, grokStateCancel := grokStateStartupContext(ctx)
+	grokStateErr := db.ensureGrokStateSchema(grokStateCtx)
+	grokStateCancel()
+	if grokStateErr != nil {
+		return nil, fmt.Errorf("初始化 Grok 状态表失败: %w", grokStateErr)
 	}
+	// The detached Grok backfill may legitimately consume minutes. Do not reuse
+	// the original ten-second startup context for the remaining small schemas.
+	postGrokCtx, postGrokCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer postGrokCancel()
+	ctx = postGrokCtx
 	if err := db.ensurePromptFilterNewAPIBindingsTable(ctx); err != nil {
 		return nil, fmt.Errorf("创建 NewAPI 平台绑定表失败: %w", err)
 	}
@@ -555,6 +565,13 @@ type usageStatsRollup struct {
 // without weakening normal request or database-operation timeouts.
 func usageStatsRollupStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), usageStatsRollupInitTimeout)
+}
+
+// grokStateStartupContext detaches the one-time historical account backfill
+// from the shared ten-second schema deadline while preserving startup values.
+// A bounded deadline still prevents a stuck migration from hanging forever.
+func grokStateStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), grokStateBackfillInitTimeout)
 }
 
 func (db *DB) ensureUsageStatsRollup(ctx context.Context) error {
