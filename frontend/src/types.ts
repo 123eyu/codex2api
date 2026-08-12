@@ -635,6 +635,120 @@ export interface FetchGrokModelsResponse {
   models: string[]
 }
 
+export type GrokFactKind = 'user' | 'settings' | 'billing' | 'auto_topup'
+export type GrokProtocol = 'responses' | 'chat_completions' | 'messages'
+
+/** A sanitized control-plane observation. Token material is never included. */
+export interface GrokAccountFact {
+  account_id: number
+  kind: GrokFactKind | string
+  status: string
+  http_status?: number
+  payload?: Record<string, unknown> | null
+  field_presence?: Record<string, string>
+  credential_generation: number
+  source?: string
+  observed_at?: ISODateString
+  expires_at?: ISODateString
+  updated_at?: ISODateString
+}
+
+export interface GrokAccountIdentitySummary {
+  credential_family_id: string
+  archive_plan?: string
+  archive_plan_source?: string
+  jwt_tier?: string
+  jwt_tier_trust?: string
+}
+
+export interface GrokModelCatalogSnapshot {
+  account_id: number
+  origin: string
+  credential_generation: number
+  auth_kind?: string
+  status: string
+  http_etag?: string
+  etag_hint?: string
+  etag_hint_observed_at?: ISODateString
+  observed_at?: ISODateString
+  expires_at?: ISODateString
+  updated_at?: ISODateString
+}
+
+export interface GrokModelCatalogItem {
+  account_id: number
+  origin: string
+  model_id: string
+  display_name?: string
+  description?: string
+  base_url?: string
+  api_base_url?: string
+  api_backend?: GrokProtocol | string
+  context_window?: number
+  max_output_tokens?: number
+  reasoning?: boolean | null
+  backend_search?: boolean | null
+  stream_tool_calls?: boolean | null
+  supported_in_api?: boolean | null
+  hidden?: boolean | null
+  first_seen_at?: ISODateString
+  observed_at?: ISODateString
+}
+
+export interface GrokModelCatalog {
+  snapshot: GrokModelCatalogSnapshot
+  items: GrokModelCatalogItem[]
+}
+
+export interface GrokModelCapability {
+  account_id: number
+  model_id: string
+  origin: string
+  protocol: GrokProtocol | string
+  credential_generation: number
+  status: string
+  http_status?: number
+  provider_code?: string
+  source?: string
+  retry_after_seconds?: number | null
+  observed_at?: ISODateString
+  expires_at?: ISODateString
+  updated_at?: ISODateString
+}
+
+export interface GrokAccountState {
+  account_id: number
+  credential_generation: number
+  identity?: GrokAccountIdentitySummary | null
+  facts: Record<string, GrokAccountFact>
+  catalogs: GrokModelCatalog[]
+  capabilities: GrokModelCapability[]
+}
+
+export interface GrokStateSyncResponse {
+  message: string
+  state: GrokAccountState
+  models: string[]
+  synced_facts?: string[]
+  errors?: Record<string, string>
+}
+
+export interface GrokCapabilityProbeResult {
+  model_id: string
+  protocol: GrokProtocol | string
+  status: string
+  http_status?: number
+  provider_code?: string
+  retry_after_seconds?: number | null
+  observed_at?: ISODateString
+}
+
+export interface GrokCapabilityProbeResponse {
+  message: string
+  state: GrokAccountState
+  results: GrokCapabilityProbeResult[]
+}
+
 // Grok Device Code OAuth（与 CLIProxyAPI / Grok CLI 一致）。
 export interface GrokDeviceStartRequest {
   proxy_url?: string

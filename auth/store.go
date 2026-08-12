@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,8 +90,12 @@ func NormalizeTestContent(content string) string {
 
 // Account 运行时账号状态
 type Account struct {
-	mu                      sync.RWMutex
-	usageSyncMu             sync.Mutex
+	mu          sync.RWMutex
+	usageSyncMu sync.Mutex
+	// grokRuntimeFactsMu serializes inference-response observations for this
+	// account. The sink performs generation-fenced database writes before it
+	// publishes any hard gate or routing invalidation back to memory.
+	grokRuntimeFactsMu      sync.Mutex
 	usageObservedAt         time.Time
 	DBID                    int64 // 数据库 ID
 	RefreshToken            string
@@ -121,10 +126,37 @@ type Account struct {
 	GrokOIDCIssuer    string
 	GrokPrincipalType string
 	GrokPrincipalID   string
+	// CredentialGeneration fences every asynchronous Grok observation and OAuth
+	// refresh result. CredentialFamilyID is stable across AT/RT rotation and is
+	// safe to use as a cross-instance lease key (it contains no credential).
+	CredentialGeneration int64
+	CredentialFamilyID   string
+	// Grok live account facts are deliberately separate from PlanType. PlanType
+	// remains a legacy/JWT/archive display hint; only a fresh live plan may pass
+	// an API key plan_allow gate for Grok OAuth.
+	GrokLivePlan           string
+	GrokLivePlanObservedAt time.Time
+	GrokLivePlanExpiresAt  time.Time
+	GrokLivePlanKnown      bool
+	GrokAccessAllowed      *bool
+	GrokAccessExpiresAt    time.Time
+	GrokBillingExhausted   bool
+	GrokBillingExpiresAt   time.Time
+	GrokFactsGeneration    int64
+	// grokRouting 是按账号、凭据 generation 隔离的模型目录与协议能力快照。
+	// 目录本身由控制面同步并持久化；执行路径只读取这份不可变副本，不现场访问上游。
+	grokRouting     *GrokRoutingState
+	grokRuntimeSink grokRuntimeFactSink
+	// Last successfully persisted inference hint. It suppresses a database write
+	// on every token request while preserving DB-first semantics on changes.
+	grokRuntimeModelsHint           string
+	grokRuntimeModelsHintOrigin     string
+	grokRuntimeModelsHintGeneration int64
 	// grokRateLimit 是上游逐请求返回的配额余量快照（x-ratelimit-* 头）。
 	// 内存实时更新;dirty 位驱动 store 后台循环按分钟批量落库(grok_rate_limit 凭据)。
-	grokRateLimit      *GrokRateLimitSnapshot
-	grokRateLimitDirty bool
+	grokRateLimit        *GrokRateLimitSnapshot
+	grokRateLimitDirty   bool
+	grokRateLimitVersion uint64
 	// grokContextWindow 是上游 x-grok-context-window 响应头的观测值，用于推导
 	// 客户端压缩阈值。仅内存保留：值只能在收到响应后才知道，落库也救不了首个请求。
 	grokContextWindow int64
@@ -1760,6 +1792,27 @@ func (a *Account) IsBanned() bool {
 	return a.healthTierLocked() == HealthTierBanned
 }
 
+// ModelCatalogEligible reports only durable account gates used by /v1/models.
+// It intentionally ignores active request count, short cooldowns and transient
+// rate limits so a client model menu does not flicker under load.
+func (a *Account) ModelCatalogEligible() bool {
+	if a == nil || atomic.LoadInt32(&a.Disabled) != 0 || atomic.LoadInt32(&a.DispatchPaused) != 0 {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.Status == StatusError || a.healthTierLocked() == HealthTierBanned {
+		return false
+	}
+	// Legacy Codex Free windows are an account availability gate. Grok billing
+	// is represented separately by an explicit, fresh exhausted fact; a lone
+	// 100% percentage must not override PAYG/prepaid semantics.
+	if !a.isGrokAPILocked() && a.usageExhaustedLocked() {
+		return false
+	}
+	return a.hasDispatchCredentialLocked()
+}
+
 // RuntimeStatus 返回运行时状态字符串（供 admin API 使用）
 func (a *Account) RuntimeStatus() string {
 	a.mu.RLock()
@@ -2251,6 +2304,56 @@ func (a *Account) GetPlanType() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.PlanType
+}
+
+// GetCredentialFamilyID returns the stable, irreversible refresh family key.
+func (a *Account) GetCredentialFamilyID() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.CredentialFamilyID
+}
+
+// GetCredentialGeneration returns the current identity generation.
+func (a *Account) GetCredentialGeneration() int64 {
+	if a == nil {
+		return 0
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.CredentialGeneration
+}
+
+// GetFreshGrokLivePlan returns API-key accounts as plan "api" and OAuth live
+// subscriptionTier only while the matching fact is fresh. JWT/archive hints
+// never enter this method.
+func (a *Account) GetFreshGrokLivePlan(now time.Time) (string, bool) {
+	if a == nil {
+		return "", false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.isGrokAPILocked() {
+		return "", false
+	}
+	if strings.TrimSpace(a.APIKey) != "" {
+		return "api", true
+	}
+	if !a.GrokLivePlanKnown || a.GrokFactsGeneration != a.CredentialGeneration ||
+		a.GrokLivePlanExpiresAt.IsZero() || !now.Before(a.GrokLivePlanExpiresAt) {
+		return "", false
+	}
+	plan := CanonicalGrokLivePlanFilter(a.GrokLivePlan)
+	return plan, plan != ""
+}
+
+// GrokModelCatalogHardAllowed applies only durable control-plane gates. It
+// intentionally ignores concurrency, local cooldowns, and transient 429s so
+// /v1/models does not flicker under load. Missing allow_access is fail-open.
+func (a *Account) GrokModelCatalogHardAllowed(now time.Time) bool {
+	return a.GrokDispatchHardAllowed(now)
 }
 
 // GroupIDSnapshot 返回账号当前所属组 ID 的副本。GroupIDs 写入受 a.mu 保护
@@ -4249,6 +4352,7 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 		if account == nil {
 			continue
 		}
+		account.grokRuntimeSink = s
 		s.accounts = append(s.accounts, account)
 	}
 
@@ -4301,6 +4405,8 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 
 	account := &Account{
 		DBID:                    row.ID,
+		CredentialGeneration:    row.CredentialGeneration,
+		CredentialFamilyID:      row.CredentialFamilyID,
 		RefreshToken:            rt,
 		SessionToken:            st,
 		ProxyURL:                strings.TrimSpace(row.ProxyURL),
@@ -4313,6 +4419,9 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		Models:                  models,
 		ModelMapping:            modelMapping,
 		CodexClientMetadataMode: codexClientMetadataMode,
+	}
+	if account.CredentialGeneration <= 0 {
+		account.CredentialGeneration = 1
 	}
 	if isOpenAIResponsesAccount {
 		account.HealthTier = HealthTierHealthy
@@ -4342,23 +4451,19 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		if strings.TrimSpace(apiKey) != "" || at != "" {
 			account.HealthTier = HealthTierHealthy
 		}
-		// billing 探针的周/月用量随 credentials 落库，重启后在此恢复运行时快照
-		// （周额度占用 5h 槽位、月额度占用 7d 槽位，与探针写入端一致）
-		grokUsageUpdatedAt := time.Time{}
-		if raw := row.GetCredential("grok_usage_updated_at"); raw != "" {
-			if t, err := time.Parse(time.RFC3339, raw); err == nil {
-				grokUsageUpdatedAt = t
-			}
+		// Control-plane facts and catalog entries are generation-fenced. Loading
+		// stale rows into memory would otherwise revive an old credential's plan,
+		// access gate, or protocol capability after rotation.
+		if state, stateErr := s.db.GetGrokAccountState(ctx, row.ID); stateErr == nil &&
+			state.CredentialGeneration == account.CredentialGeneration {
+			applyGrokPersistentState(account, state)
+		} else if stateErr != nil && !errors.Is(stateErr, sql.ErrNoRows) {
+			log.Printf("[账号 %d] 加载 Grok 富状态失败: %v", row.ID, stateErr)
 		}
-		if pct, ok := row.GetCredentialFloat64("grok_weekly_usage_percent"); ok {
-			account.SetUsageSnapshot5hAt(pct, grokParseTime(row.GetCredential("grok_weekly_period_end")), grokUsageUpdatedAt)
-		}
-		if pct, ok := row.GetCredentialFloat64("grok_monthly_usage_percent"); ok {
-			account.SetUsageSnapshot(pct, grokUsageUpdatedAt)
-			if end := grokParseTime(row.GetCredential("grok_monthly_period_end")); !end.IsZero() {
-				account.SetReset7dAt(end)
-			}
-		}
+		// Legacy grok_weekly/monthly credentials remain readable by old versions,
+		// but are not projected into Codex-style 5h/7d scheduler windows. Grok
+		// billing describes its real current period; rolling 7d/30d statistics
+		// come from terminal gateway usage events.
 		// 免费额度耗尽快照（429 错误体解析的权威用量）重启后恢复
 		if raw := strings.TrimSpace(row.GetCredential("grok_free_quota")); raw != "" {
 			var snap GrokFreeQuotaSnapshot
@@ -4684,7 +4789,7 @@ func (s *Store) flushGrokRateLimitSnapshots() {
 		if !acc.IsGrokAPI() {
 			continue
 		}
-		snap, dirty := acc.TakeGrokRateLimitSnapshotIfDirty()
+		snap, version, dirty := acc.PeekGrokRateLimitSnapshotIfDirty()
 		if !dirty {
 			continue
 		}
@@ -4695,6 +4800,8 @@ func (s *Store) flushGrokRateLimitSnapshots() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		if err := s.db.UpdateCredentials(ctx, acc.DBID, map[string]interface{}{"grok_rate_limit": string(raw)}); err != nil {
 			log.Printf("[账号 %d] 持久化 grok_rate_limit 失败: %v", acc.DBID, err)
+		} else {
+			acc.ConfirmGrokRateLimitSnapshotPersisted(version)
 		}
 		cancel()
 	}
@@ -6571,6 +6678,7 @@ func (s *Store) AddAccount(acc *Account) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	acc.mu.Lock()
+	acc.grokRuntimeSink = s
 	acc.recomputeEffectiveIgnoreUsageLimitStatus(s.IgnoreUsageLimitStatus())
 	acc.recomputeEffectiveGroupBaseConcurrency(s)
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
@@ -7013,7 +7121,20 @@ func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
 	acc.mu.RLock()
 	defer acc.mu.RUnlock()
 	if len(allowedPlans) > 0 {
-		if _, ok := allowedPlans[lowerTrimPlan(acc.PlanType)]; !ok {
+		plan := lowerTrimPlan(acc.PlanType)
+		// Grok OAuth archive/JWT labels are not authorization facts. A plan
+		// whitelist is fail-closed unless /user returned an explicit fresh tier.
+		if acc.isGrokAPILocked() {
+			if strings.TrimSpace(acc.APIKey) != "" {
+				plan = "api"
+			} else if acc.GrokLivePlanKnown && acc.GrokFactsGeneration == acc.CredentialGeneration &&
+				!acc.GrokLivePlanExpiresAt.IsZero() && time.Now().Before(acc.GrokLivePlanExpiresAt) {
+				plan = CanonicalGrokLivePlanFilter(acc.GrokLivePlan)
+			} else {
+				return false
+			}
+		}
+		if _, ok := allowedPlans[plan]; !ok {
 			return false
 		}
 	}
@@ -7781,7 +7902,7 @@ func isUsageLimitCooldownReason(reason string) bool {
 // ConfirmResponsesAvailable preserves the original API for callers whose
 // success evidence is current at call time.
 func (s *Store) ConfirmResponsesAvailable(acc *Account) bool {
-	return s.ConfirmResponsesAvailableSince(acc, time.Now())
+	return s.confirmResponsesAvailable(acc, time.Time{}, false)
 }
 
 // ConfirmResponsesAvailableSince clears only a usage/rate-limit cooldown when
@@ -7789,6 +7910,10 @@ func (s *Store) ConfirmResponsesAvailable(acc *Account) bool {
 // A stale in-flight success must not undo a newer usage_limit_reached result.
 // Authentication and unrelated error states are intentionally untouched.
 func (s *Store) ConfirmResponsesAvailableSince(acc *Account, requestStartedAt time.Time) bool {
+	return s.confirmResponsesAvailable(acc, requestStartedAt, true)
+}
+
+func (s *Store) confirmResponsesAvailable(acc *Account, requestStartedAt time.Time, fenceNewerRateLimit bool) bool {
 	if s == nil || acc == nil {
 		return false
 	}
@@ -7797,7 +7922,7 @@ func (s *Store) ConfirmResponsesAvailableSince(acc *Account, requestStartedAt ti
 	if !acc.ignoreUsageLimitStatus ||
 		acc.Status != StatusCooldown ||
 		!isUsageLimitCooldownReason(acc.CooldownReason) ||
-		(!acc.LastRateLimitedAt.IsZero() && !requestStartedAt.After(acc.LastRateLimitedAt)) {
+		(fenceNewerRateLimit && !acc.LastRateLimitedAt.IsZero() && !requestStartedAt.After(acc.LastRateLimitedAt)) {
 		acc.mu.Unlock()
 		return false
 	}
@@ -8739,6 +8864,54 @@ func (s *Store) RefreshSingle(ctx context.Context, dbID int64) error {
 		return fmt.Errorf("账号 %d 不存在", dbID)
 	}
 	return s.refreshAccountForced(ctx, target)
+}
+
+// RefreshGrokAccountByID refreshes an explicitly addressed Grok account even
+// when it is dispatch-paused. Administrative synchronization and isolated
+// acceptance need this path so an archived disabled account can rotate an
+// expired refresh token without first entering the scheduler pool.
+func (s *Store) RefreshGrokAccountByID(ctx context.Context, dbID int64) error {
+	if s == nil || s.db == nil || dbID <= 0 {
+		return fmt.Errorf("账号 %d 不存在", dbID)
+	}
+	if account := s.FindByID(dbID); account != nil {
+		if !account.IsGrokAPI() {
+			return fmt.Errorf("账号 %d 不是 Grok 账号", dbID)
+		}
+		return s.refreshGrokAccount(ctx, account, true)
+	}
+	account, err := s.BuildTransientAccountByID(ctx, dbID)
+	if err != nil {
+		return err
+	}
+	if !account.IsGrokAPI() {
+		return fmt.Errorf("账号 %d 不是 Grok 账号", dbID)
+	}
+	account.mu.Lock()
+	account.grokRuntimeSink = s
+	account.mu.Unlock()
+	return s.refreshGrokAccount(ctx, account, true)
+}
+
+// BuildGrokAdministrativeAccountByID returns a database-backed, non-scheduled
+// account view. It is used when a disabled archive entry must be synchronized
+// or capability-probed explicitly. Runtime observations still use the normal
+// generation-fenced Store sink, but the account is never added to dispatch.
+func (s *Store) BuildGrokAdministrativeAccountByID(ctx context.Context, dbID int64) (*Account, error) {
+	if s == nil || s.db == nil || dbID <= 0 {
+		return nil, fmt.Errorf("账号 %d 不存在", dbID)
+	}
+	account, err := s.BuildTransientAccountByID(ctx, dbID)
+	if err != nil {
+		return nil, err
+	}
+	if !account.IsGrokAPI() {
+		return nil, fmt.Errorf("账号 %d 不是 Grok 账号", dbID)
+	}
+	account.mu.Lock()
+	account.grokRuntimeSink = s
+	account.mu.Unlock()
+	return account, nil
 }
 
 // RefreshSingleAsync performs a forced refresh under the database lifecycle.

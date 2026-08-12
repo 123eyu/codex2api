@@ -3274,6 +3274,139 @@ func TestGetAccountUsageWindowsAggregatesBothRangesInOnePass(t *testing.T) {
 	}
 }
 
+func TestAccountUsageAggregatesExcludeTransportRetries(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	insertUsage := func(accountID int64, createdAt time.Time, tokens int, billed float64, retry any, statusCode int) {
+		t.Helper()
+		if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs
+			(account_id, status_code, total_tokens, account_billed, user_billed, is_retry_attempt, created_at)
+			VALUES ($1, $2, $3, $4, $4, $5, $6)`, accountID, statusCode, tokens, billed, retry, sqliteTimeParam(createdAt)); err != nil {
+			t.Fatalf("insert usage log: %v", err)
+		}
+	}
+
+	// NULL is a legacy/non-retry row and must remain part of all aggregates.
+	insertUsage(1, now.Add(-time.Hour), 100, 1, nil, 200)
+	insertUsage(1, now.Add(-2*time.Hour), 200, 2, 0, 200)
+	// A transport retry carries usage-like fields but must not double count them.
+	insertUsage(1, now.Add(-30*time.Minute), 900, 9, 1, 502)
+	// Client-cancelled rows remain excluded independently of retry classification.
+	insertUsage(1, now.Add(-20*time.Minute), 700, 7, 0, 499)
+	insertUsage(2, now.Add(-time.Hour), 400, 4, 1, 429)
+
+	assertUsage := func(label string, got *AccountTimeRangeUsage, requests, tokens int64, billed float64) {
+		t.Helper()
+		if got == nil {
+			t.Fatalf("%s missing account usage", label)
+		}
+		if got.Requests != requests || got.Tokens != tokens || got.AccountBilled != billed || got.UserBilled != billed {
+			t.Fatalf("%s = %+v, want requests=%d tokens=%d billed=%.2f", label, got, requests, tokens, billed)
+		}
+	}
+
+	rangeUsage, err := db.GetAccountTimeRangeUsage(ctx, now.Add(-3*time.Hour))
+	if err != nil {
+		t.Fatalf("GetAccountTimeRangeUsage: %v", err)
+	}
+	assertUsage("range account 1", rangeUsage[1], 2, 300, 3)
+	if _, ok := rangeUsage[2]; ok {
+		t.Fatalf("range account 2 should be absent when it has only retry rows: %+v", rangeUsage[2])
+	}
+
+	shortWindow, longWindow, err := db.GetAccountUsageWindows(ctx, now.Add(-90*time.Minute), now.Add(-3*time.Hour))
+	if err != nil {
+		t.Fatalf("GetAccountUsageWindows: %v", err)
+	}
+	assertUsage("global short account 1", shortWindow[1], 1, 100, 1)
+	assertUsage("global long account 1", longWindow[1], 2, 300, 3)
+	if _, ok := longWindow[2]; ok {
+		t.Fatalf("global account 2 should be absent when it has only retry rows: %+v", longWindow[2])
+	}
+
+	shortByID, longByID, err := db.GetAccountUsageWindowsByIDs(ctx, []int64{1, 2}, now.Add(-90*time.Minute), now.Add(-3*time.Hour))
+	if err != nil {
+		t.Fatalf("GetAccountUsageWindowsByIDs: %v", err)
+	}
+	assertUsage("scoped short account 1", shortByID[1], 1, 100, 1)
+	assertUsage("scoped long account 1", longByID[1], 2, 300, 3)
+	if _, ok := longByID[2]; ok {
+		t.Fatalf("scoped account 2 should be absent when it has only retry rows: %+v", longByID[2])
+	}
+}
+
+func TestNonRetryUsageLogPredicateUsesDatabaseBooleanType(t *testing.T) {
+	if got := (&DB{driver: "sqlite"}).nonRetryUsageLogPredicate(); got != "COALESCE(is_retry_attempt, 0) = 0" {
+		t.Fatalf("SQLite retry predicate = %q", got)
+	}
+	if got := (&DB{driver: "postgres"}).nonRetryUsageLogPredicate(); got != "COALESCE(is_retry_attempt, false) = false" {
+		t.Fatalf("PostgreSQL retry predicate = %q", got)
+	}
+}
+
+func TestAccountUsageAggregatesExcludeStaleCredentialGeneration(t *testing.T) {
+	db := newGrokStateTestDB(t)
+	ctx := context.Background()
+	accountID, err := db.InsertAccountWithUpstream(ctx, "generation-usage", "xai", "grok", map[string]interface{}{
+		"upstream_type": "grok", "api_key": "first-key",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert account: %v", err)
+	}
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, fixture := range []struct {
+		generation int64
+		tokens     int
+	}{
+		{0, 100}, // legacy/unscoped traffic remains visible
+		{row.CredentialGeneration, 200},
+	} {
+		if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs
+			(account_id,credential_generation,status_code,total_tokens,created_at)
+			VALUES($1,$2,200,$3,$4)`, accountID, fixture.generation, fixture.tokens, sqliteTimeParam(now)); err != nil {
+			t.Fatalf("insert usage fixture: %v", err)
+		}
+	}
+	if err := db.UpdateCredentials(ctx, accountID, map[string]interface{}{"api_key": "rotated-key"}); err != nil {
+		t.Fatalf("rotate identity: %v", err)
+	}
+	rotated, err := db.GetAccountByID(ctx, accountID)
+	if err != nil || rotated.CredentialGeneration == row.CredentialGeneration {
+		t.Fatalf("generation did not rotate: before=%d after=%v err=%v", row.CredentialGeneration, rotated, err)
+	}
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs
+		(account_id,credential_generation,status_code,total_tokens,created_at)
+		VALUES($1,$2,200,300,$3)`, accountID, rotated.CredentialGeneration, sqliteTimeParam(now)); err != nil {
+		t.Fatalf("insert current-generation usage: %v", err)
+	}
+
+	usage, err := db.GetAccountTimeRangeUsage(ctx, now.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("GetAccountTimeRangeUsage: %v", err)
+	}
+	if got := usage[accountID]; got == nil || got.Requests != 2 || got.Tokens != 400 {
+		t.Fatalf("generation-filtered usage = %+v, want legacy + current only", got)
+	}
+	_, longWindow, err := db.GetAccountUsageWindowsByIDs(ctx, []int64{accountID}, now.Add(-time.Minute), now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("GetAccountUsageWindowsByIDs: %v", err)
+	}
+	if got := longWindow[accountID]; got == nil || got.Requests != 2 || got.Tokens != 400 {
+		t.Fatalf("generation-filtered scoped usage = %+v, want legacy + current only", got)
+	}
+}
+
 func TestFlushLogsRequeuesBatchWhenSQLiteBeginFails(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 

@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/codex2api/internal/openaiidentity"
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 	_ "modernc.org/sqlite"
 )
@@ -26,6 +27,8 @@ const usageStatsRollupInitTimeout = 5 * time.Minute
 // AccountRow 数据库中的账号行
 type AccountRow struct {
 	ID                      int64
+	CredentialGeneration    int64
+	CredentialFamilyID      string
 	Name                    string
 	Platform                string
 	Type                    string
@@ -244,7 +247,7 @@ const (
 	maxUsageLogFlushIntervalSeconds     = 300
 
 	postgresMaxBindParams       = 65535
-	usageLogInsertColumnCount   = 49
+	usageLogInsertColumnCount   = 50
 	maxUsageLogInsertRowsPerSQL = 1000
 
 	// usageLogBufferHardLimit 内存缓冲的硬上限。PG 长时间不可用时（维护、主从切换、
@@ -292,6 +295,7 @@ func NormalizeUsageLogFlushIntervalSeconds(n int) int {
 type usageLogEntry struct {
 	StoreUsageLog          bool
 	AccountID              int64
+	CredentialGeneration   int64
 	Channel                string
 	ClientIP               string
 	ClientUserAgent        string
@@ -424,6 +428,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 	}
 	if err := db.migrate(ctx); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
+	}
+	if err := db.ensureGrokStateSchema(ctx); err != nil {
+		return nil, fmt.Errorf("初始化 Grok 状态表失败: %w", err)
 	}
 	if err := db.ensurePromptFilterNewAPIBindingsTable(ctx); err != nil {
 		return nil, fmt.Errorf("创建 NewAPI 平台绑定表失败: %w", err)
@@ -1067,6 +1074,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS attempt_index INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS upstream_error_kind VARCHAR(64) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS error_message TEXT DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS credential_generation BIGINT NOT NULL DEFAULT 0;
+	CREATE INDEX IF NOT EXISTS idx_usage_logs_account_generation_created_at ON usage_logs(account_id, credential_generation, created_at);
 	-- 上游渠道（codex/grok），写入时按调度账号固化，供仪表盘/用量分渠道聚合
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS channel VARCHAR(16) DEFAULT '';
 	ALTER TABLE usage_logs ALTER COLUMN reasoning_effort TYPE VARCHAR(100);
@@ -3274,6 +3283,7 @@ func (db *DB) CleanErrorProxies(ctx context.Context) (ProxyErrorCleanupResult, e
 type UsageLog struct {
 	ID                     int64     `json:"id"`
 	AccountID              int64     `json:"account_id"`
+	CredentialGeneration   int64     `json:"credential_generation,omitempty"`
 	Channel                string    `json:"channel,omitempty"`
 	ClientIP               string    `json:"client_ip"`
 	ClientUserAgent        string    `json:"client_user_agent"`
@@ -3416,6 +3426,7 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 	db.logBuf = append(db.logBuf, usageLogEntry{
 		StoreUsageLog:          storeUsageLog,
 		AccountID:              log.AccountID,
+		CredentialGeneration:   log.CredentialGeneration,
 		Channel:                clampUsageLogText(log.Channel, usageLogChannelMaxLen),
 		ClientIP:               clampUsageLogText(log.ClientIP, usageLogShortTextMaxLen),
 		ClientUserAgent:        log.ClientUserAgent,
@@ -3479,6 +3490,9 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 // UsageLogInput 日志写入参数
 type UsageLogInput struct {
 	AccountID int64
+	// CredentialGeneration attributes internally-generated Grok traffic to the
+	// credential snapshot that issued it. Zero is legacy/unscoped traffic.
+	CredentialGeneration int64
 	// Channel 是处理该请求的上游渠道（codex/grok），写入时固化，空值表示未知。
 	Channel                string
 	ClientIP               string
@@ -3816,20 +3830,20 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 	logsToStore := storedUsageLogs(batch)
 	if len(logsToStore) > 0 {
 		stmt, err := tx.PrepareContext(ctx,
-			`INSERT INTO usage_logs (account_id, channel, client_ip, endpoint, model, effective_model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
+			`INSERT INTO usage_logs (account_id, credential_generation, channel, client_ip, endpoint, model, effective_model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
 				  input_tokens, output_tokens, reasoning_tokens, first_token_ms, ws_acquire_ms, reasoning_effort, inbound_endpoint, upstream_endpoint, stream, compact, has_compaction_history, cached_tokens, service_tier,
 				  requested_service_tier, actual_service_tier, billing_service_tier,
 				  api_key_id, api_key_name, api_key_masked, image_count, image_width, image_height, image_bytes, image_format, image_size, account_billed, user_billed,
 				  is_retry_attempt, attempt_index, upstream_error_kind, error_message, via_websocket,
 				  client_user_agent, upstream_user_agent, user_agent_overridden, internal_reason, parent_request_id, prompt_policy_incident_id)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49)`)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50)`)
 		if err != nil {
 			return fmt.Errorf("准备语句: %w", err)
 		}
 		defer stmt.Close()
 
 		for _, e := range logsToStore {
-			if _, err := stmt.ExecContext(ctx, e.AccountID, e.Channel, e.ClientIP, e.Endpoint, e.Model, e.EffectiveModel, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
+			if _, err := stmt.ExecContext(ctx, e.AccountID, e.CredentialGeneration, e.Channel, e.ClientIP, e.Endpoint, e.Model, e.EffectiveModel, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
 				e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.FirstTokenMs, e.WsAcquireMs, e.ReasoningEffort, e.InboundEndpoint, e.UpstreamEndpoint, e.Stream, e.Compact, e.HasCompactionHistory, e.CachedTokens, e.ServiceTier,
 				e.RequestedServiceTier, e.ActualServiceTier, e.BillingServiceTier,
 				e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize, e.AccountBilled, e.UserBilled,
@@ -3919,7 +3933,7 @@ func (db *DB) batchInsertLogsChunk(ctx context.Context, execer sqlExecer, batch 
 			placeholders[i] = fmt.Sprintf("$%d", argIdx+i)
 		}
 		valueStrings = append(valueStrings, "("+strings.Join(placeholders, ", ")+")")
-		valueArgs = append(valueArgs, e.AccountID, e.Channel, e.ClientIP, e.Endpoint, e.Model, e.EffectiveModel, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
+		valueArgs = append(valueArgs, e.AccountID, e.CredentialGeneration, e.Channel, e.ClientIP, e.Endpoint, e.Model, e.EffectiveModel, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
 			e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.FirstTokenMs, e.WsAcquireMs, e.ReasoningEffort, e.InboundEndpoint, e.UpstreamEndpoint, e.Stream, e.Compact, e.HasCompactionHistory, e.CachedTokens, e.ServiceTier,
 			e.RequestedServiceTier, e.ActualServiceTier, e.BillingServiceTier,
 			e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize, e.AccountBilled, e.UserBilled,
@@ -3928,7 +3942,7 @@ func (db *DB) batchInsertLogsChunk(ctx context.Context, execer sqlExecer, batch 
 		argIdx += usageLogInsertColumnCount
 	}
 
-	query := fmt.Sprintf(`INSERT INTO usage_logs (account_id, channel, client_ip, endpoint, model, effective_model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
+	query := fmt.Sprintf(`INSERT INTO usage_logs (account_id, credential_generation, channel, client_ip, endpoint, model, effective_model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
 		input_tokens, output_tokens, reasoning_tokens, first_token_ms, ws_acquire_ms, reasoning_effort, inbound_endpoint, upstream_endpoint, stream, compact, has_compaction_history, cached_tokens, service_tier,
 		requested_service_tier, actual_service_tier, billing_service_tier,
 		api_key_id, api_key_name, api_key_masked, image_count, image_width, image_height, image_bytes, image_format, image_size, account_billed, user_billed,
@@ -5388,6 +5402,26 @@ type AccountTimeRangeUsage struct {
 	UserBilled    float64
 }
 
+// nonRetryUsageLogPredicate keeps transport retry attempts out of end-user
+// request, token, and billing aggregates. Historical rows can contain NULL;
+// SQLite stores booleans as integers while PostgreSQL uses BOOLEAN.
+func (db *DB) nonRetryUsageLogPredicate() string {
+	if db.isSQLite() {
+		return "COALESCE(is_retry_attempt, 0) = 0"
+	}
+	return "COALESCE(is_retry_attempt, false) = false"
+}
+
+// currentAccountUsageGenerationPredicate keeps generation-scoped internal
+// traffic (currently Grok capability probes) attached to the credential
+// identity that issued it. Legacy and ordinary request rows use generation 0
+// and remain visible. The correlated account lookup also makes a buffered old
+// probe harmless if credentials rotate after the probe's final pre-write CAS.
+func (db *DB) currentAccountUsageGenerationPredicate() string {
+	return `(COALESCE(usage_logs.credential_generation, 0) = 0 OR
+		usage_logs.credential_generation = COALESCE((SELECT accounts.credential_generation FROM accounts WHERE accounts.id = usage_logs.account_id), usage_logs.credential_generation))`
+}
+
 // GetAccountRequestCounts 按 account_id 聚合近 7 天成功/失败请求数
 func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRequestCount, error) {
 	since := time.Now().AddDate(0, 0, -7)
@@ -5426,16 +5460,16 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 
 // GetAccountTimeRangeUsage 按 account_id 聚合 since 之后的请求数和 token 数。
 func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (map[int64]*AccountTimeRangeUsage, error) {
-	query := `
+	query := fmt.Sprintf(`
 	SELECT account_id,
 		COUNT(*) AS requests,
 		COALESCE(SUM(total_tokens), 0) AS tokens,
 		COALESCE(SUM(account_billed), 0) AS account_billed,
 		COALESCE(SUM(user_billed), 0) AS user_billed
 	FROM usage_logs
-	WHERE created_at >= $1 AND status_code <> 499
+	WHERE created_at >= $1 AND status_code <> 499 AND %s AND %s
 	GROUP BY account_id
-	`
+	`, db.nonRetryUsageLogPredicate(), db.currentAccountUsageGenerationPredicate())
 	rows, err := db.conn.QueryContext(ctx, query, db.timeArg(since))
 	if err != nil {
 		return nil, err
@@ -5459,15 +5493,16 @@ func (db *DB) GetAccountUsageWindows(ctx context.Context, shortSince, longSince 
 	if shortSince.Before(longSince) {
 		shortSince, longSince = longSince, shortSince
 	}
-	rows, err := db.conn.QueryContext(ctx, `SELECT account_id,
+	query := fmt.Sprintf(`SELECT account_id,
 		COALESCE(SUM(CASE WHEN created_at >= $1 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN created_at >= $1 THEN total_tokens ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN created_at >= $1 THEN account_billed ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN created_at >= $1 THEN user_billed ELSE 0 END), 0),
 		COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(account_billed), 0), COALESCE(SUM(user_billed), 0)
 	FROM usage_logs
-	WHERE created_at >= $2 AND status_code <> 499
-	GROUP BY account_id`, db.timeArg(shortSince), db.timeArg(longSince))
+	WHERE created_at >= $2 AND status_code <> 499 AND %s AND %s
+	GROUP BY account_id`, db.nonRetryUsageLogPredicate(), db.currentAccountUsageGenerationPredicate())
+	rows, err := db.conn.QueryContext(ctx, query, db.timeArg(shortSince), db.timeArg(longSince))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -5611,7 +5646,7 @@ func (db *DB) ListActiveByChannel(ctx context.Context, channel string) ([]*Accou
 	}
 
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, '')
 		FROM accounts
 		WHERE ` + where + `
 		ORDER BY id
@@ -5652,6 +5687,8 @@ func (db *DB) ListActiveByChannel(ctx context.Context, channel string) ([]*Accou
 			&a.Note,
 			&createdAtRaw,
 			&updatedAtRaw,
+			&a.CredentialGeneration,
+			&a.CredentialFamilyID,
 		); err != nil {
 			return nil, fmt.Errorf("扫描账号行失败: %w", err)
 		}
@@ -5778,7 +5815,7 @@ func (db *DB) getAccountByID(ctx context.Context, id int64, includeDeleted bool)
 		deletedFilter = ""
 	}
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, '')
 		FROM accounts
 		WHERE id = $1 ` + deletedFilter + `
 		LIMIT 1
@@ -5811,6 +5848,8 @@ func (db *DB) getAccountByID(ctx context.Context, id int64, includeDeleted bool)
 		&a.Note,
 		&createdAtRaw,
 		&updatedAtRaw,
+		&a.CredentialGeneration,
+		&a.CredentialFamilyID,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -5927,103 +5966,113 @@ func (db *DB) UpdateAccountSchedulerConfig(ctx context.Context, id int64, scoreB
 // UpdateAccountSchedulerMetadata applies scheduler overrides and UI metadata in
 // one transaction. Runtime store updates should happen only after this returns.
 func (db *DB) UpdateAccountSchedulerMetadata(ctx context.Context, id int64, scoreBiasOverride OptionalNullInt64, baseConcurrencyOverride OptionalNullInt64, skipWarmTier OptionalBool, allowedAPIKeyIDs OptionalInt64Slice, tags OptionalStringSlice, groupIDs OptionalInt64Slice, proxyURL OptionalString, credentialUpdates map[string]interface{}) error {
-	tx, err := db.conn.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	query := `SELECT credentials FROM accounts WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
-	if db.isSQLite() {
-		query = `SELECT credentials FROM accounts WHERE id = ? AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
-	} else {
-		query += ` FOR UPDATE`
-	}
-	var currentRaw interface{}
-	if err := tx.QueryRowContext(ctx, query, id).Scan(&currentRaw); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return sql.ErrNoRows
-		}
-		return err
-	}
-
-	sets := make([]string, 0, 6)
-	args := make([]interface{}, 0, 8)
-	add := func(column string, value interface{}) {
-		args = append(args, value)
-		ph := "?"
-		if !db.isSQLite() {
-			ph = fmt.Sprintf("$%d", len(args))
-		}
-		sets = append(sets, column+" = "+ph)
-	}
-	if scoreBiasOverride.Set {
-		add("score_bias_override", nullableInt64Value(scoreBiasOverride.Value))
-	}
-	if baseConcurrencyOverride.Set {
-		add("base_concurrency_override", nullableInt64Value(baseConcurrencyOverride.Value))
-	}
-	if skipWarmTier.Set {
-		add("skip_warm_tier", skipWarmTier.Value)
-	}
-	if tags.Set {
-		if db.isSQLite() {
-			add("tags", encodeTagsJSON(tags.Values))
-		} else {
-			args = append(args, encodeTagsJSON(tags.Values))
-			sets = append(sets, fmt.Sprintf("tags = $%d::jsonb", len(args)))
-		}
-	}
-	if proxyURL.Set {
-		add("proxy_url", strings.TrimSpace(proxyURL.Value))
-	}
-	if allowedAPIKeyIDs.Set {
-		if credentialUpdates == nil {
-			credentialUpdates = make(map[string]interface{}, 1)
-		}
-		credentialUpdates["allowed_api_key_ids"] = normalizePositiveInt64Slice(allowedAPIKeyIDs.Values)
-	}
-	if len(credentialUpdates) > 0 {
-		merged := mergeCredentialMaps(decodeCredentials(currentRaw), credentialUpdates)
-		credJSON, err := json.Marshal(merged)
+	return db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
 		if err != nil {
-			return fmt.Errorf("序列化 credentials 失败: %w", err)
+			return err
 		}
+		defer tx.Rollback()
+
+		query := `SELECT credentials FROM accounts WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
 		if db.isSQLite() {
-			add("credentials", credJSON)
+			query = `SELECT credentials FROM accounts WHERE id = ? AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
 		} else {
-			args = append(args, credJSON)
-			sets = append(sets, fmt.Sprintf("credentials = $%d::jsonb", len(args)))
+			query += ` FOR UPDATE`
 		}
-	}
-	if len(sets) > 0 {
-		sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
-		args = append(args, id)
-		ph := "?"
-		if !db.isSQLite() {
-			ph = fmt.Sprintf("$%d", len(args))
-		}
-		if _, err := tx.ExecContext(ctx, "UPDATE accounts SET "+strings.Join(sets, ", ")+" WHERE id = "+ph, args...); err != nil {
+		var currentRaw interface{}
+		if err := tx.QueryRowContext(ctx, query, id).Scan(&currentRaw); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return sql.ErrNoRows
+			}
 			return err
 		}
-	}
-	if groupIDs.Set {
-		ph := "$1"
-		insertQ := "INSERT INTO account_group_members (account_id, group_id) VALUES ($1, $2)"
-		if db.isSQLite() {
-			ph = "?"
-			insertQ = "INSERT INTO account_group_members (account_id, group_id) VALUES (?, ?)"
+
+		sets := make([]string, 0, 6)
+		args := make([]interface{}, 0, 8)
+		add := func(column string, value interface{}) {
+			args = append(args, value)
+			ph := "?"
+			if !db.isSQLite() {
+				ph = fmt.Sprintf("$%d", len(args))
+			}
+			sets = append(sets, column+" = "+ph)
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM account_group_members WHERE account_id = "+ph, id); err != nil {
-			return err
+		if scoreBiasOverride.Set {
+			add("score_bias_override", nullableInt64Value(scoreBiasOverride.Value))
 		}
-		for _, gid := range normalizeIDSlice(groupIDs.Values) {
-			if _, err := tx.ExecContext(ctx, insertQ, id, gid); err != nil {
+		if baseConcurrencyOverride.Set {
+			add("base_concurrency_override", nullableInt64Value(baseConcurrencyOverride.Value))
+		}
+		if skipWarmTier.Set {
+			add("skip_warm_tier", skipWarmTier.Value)
+		}
+		if tags.Set {
+			if db.isSQLite() {
+				add("tags", encodeTagsJSON(tags.Values))
+			} else {
+				args = append(args, encodeTagsJSON(tags.Values))
+				sets = append(sets, fmt.Sprintf("tags = $%d::jsonb", len(args)))
+			}
+		}
+		if proxyURL.Set {
+			add("proxy_url", strings.TrimSpace(proxyURL.Value))
+		}
+		if allowedAPIKeyIDs.Set {
+			if credentialUpdates == nil {
+				credentialUpdates = make(map[string]interface{}, 1)
+			}
+			credentialUpdates["allowed_api_key_ids"] = normalizePositiveInt64Slice(allowedAPIKeyIDs.Values)
+		}
+		if len(credentialUpdates) > 0 {
+			current := decodeCredentials(currentRaw)
+			merged := mergeCredentialMaps(cloneCredentialUpdates(current), credentialUpdates)
+			identityChanged := grokIdentityCredentialChanged(current, merged)
+			credJSON, err := json.Marshal(merged)
+			if err != nil {
+				return fmt.Errorf("序列化 credentials 失败: %w", err)
+			}
+			if db.isSQLite() {
+				add("credentials", credJSON)
+			} else {
+				args = append(args, credJSON)
+				sets = append(sets, fmt.Sprintf("credentials = $%d::jsonb", len(args)))
+			}
+			if identityChanged {
+				// Keep the credentials document and its identity generation in the
+				// same row update/transaction. Configuration-only merges deliberately
+				// leave the generation untouched.
+				sets = append(sets, "credential_generation = credential_generation + 1")
+			}
+		}
+		if len(sets) > 0 {
+			sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
+			args = append(args, id)
+			ph := "?"
+			if !db.isSQLite() {
+				ph = fmt.Sprintf("$%d", len(args))
+			}
+			if _, err := tx.ExecContext(ctx, "UPDATE accounts SET "+strings.Join(sets, ", ")+" WHERE id = "+ph, args...); err != nil {
 				return err
 			}
 		}
-	}
-	return tx.Commit()
+		if groupIDs.Set {
+			ph := "$1"
+			insertQ := "INSERT INTO account_group_members (account_id, group_id) VALUES ($1, $2)"
+			if db.isSQLite() {
+				ph = "?"
+				insertQ = "INSERT INTO account_group_members (account_id, group_id) VALUES (?, ?)"
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM account_group_members WHERE account_id = "+ph, id); err != nil {
+				return err
+			}
+			for _, gid := range normalizeIDSlice(groupIDs.Values) {
+				if _, err := tx.ExecContext(ctx, insertQ, id, gid); err != nil {
+					return err
+				}
+			}
+		}
+		return tx.Commit()
+	})
 }
 
 func (db *DB) BatchUpdateAccountMetadata(ctx context.Context, ids []int64, update BatchAccountMetadataUpdate) ([]int64, error) {
@@ -6031,50 +6080,50 @@ func (db *DB) BatchUpdateAccountMetadata(ctx context.Context, ids []int64, updat
 	if len(ids) == 0 || !update.HasChanges() {
 		return nil, nil
 	}
-
-	tx, err := db.conn.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	credentialUpdates := cloneCredentialUpdates(update.CredentialUpdates)
-	if update.AllowedAPIKeyIDs.Set {
-		if credentialUpdates == nil {
-			credentialUpdates = make(map[string]interface{}, 1)
+	var updatedIDs []int64
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
 		}
-		credentialUpdates["allowed_api_key_ids"] = normalizePositiveInt64Slice(update.AllowedAPIKeyIDs.Values)
-	}
+		defer tx.Rollback()
 
-	active, err := db.selectBatchAccounts(ctx, tx, ids, len(credentialUpdates) > 0)
-	if err != nil {
-		return nil, err
-	}
-	if len(active.ids) == 0 {
-		if err := tx.Commit(); err != nil {
-			return nil, err
+		credentialUpdates := cloneCredentialUpdates(update.CredentialUpdates)
+		if update.AllowedAPIKeyIDs.Set {
+			if credentialUpdates == nil {
+				credentialUpdates = make(map[string]interface{}, 1)
+			}
+			credentialUpdates["allowed_api_key_ids"] = normalizePositiveInt64Slice(update.AllowedAPIKeyIDs.Values)
 		}
-		return nil, nil
-	}
 
-	if err := db.batchUpdateAccountColumns(ctx, tx, active.ids, update); err != nil {
-		return nil, err
-	}
-	if len(credentialUpdates) > 0 {
-		if err := db.batchUpdateAccountCredentials(ctx, tx, active.credentials, credentialUpdates); err != nil {
-			return nil, err
+		active, selectErr := db.selectBatchAccounts(ctx, tx, ids, len(credentialUpdates) > 0)
+		if selectErr != nil {
+			return selectErr
 		}
-	}
-	if update.GroupIDs.Set {
-		if err := db.batchReplaceAccountGroups(ctx, tx, active.ids, update.GroupIDs.Values); err != nil {
-			return nil, err
+		if len(active.ids) == 0 {
+			return tx.Commit()
 		}
-	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return active.ids, nil
+		if updateErr := db.batchUpdateAccountColumns(ctx, tx, active.ids, update); updateErr != nil {
+			return updateErr
+		}
+		if len(credentialUpdates) > 0 {
+			if updateErr := db.batchUpdateAccountCredentials(ctx, tx, active.credentials, credentialUpdates); updateErr != nil {
+				return updateErr
+			}
+		}
+		if update.GroupIDs.Set {
+			if updateErr := db.batchReplaceAccountGroups(ctx, tx, active.ids, update.GroupIDs.Values); updateErr != nil {
+				return updateErr
+			}
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return commitErr
+		}
+		updatedIDs = active.ids
+		return nil
+	})
+	return updatedIDs, err
 }
 
 type batchAccountCredentials struct {
@@ -6186,16 +6235,26 @@ func (db *DB) batchUpdateAccountColumns(ctx context.Context, tx *sql.Tx, ids []i
 
 func (db *DB) batchUpdateAccountCredentials(ctx context.Context, tx *sql.Tx, current map[int64]map[string]interface{}, updates map[string]interface{}) error {
 	query := `UPDATE accounts SET credentials = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	identityQuery := `UPDATE accounts SET credentials = ?, credential_generation = credential_generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
 	if !db.isSQLite() {
 		query = `UPDATE accounts SET credentials = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
+		identityQuery = `UPDATE accounts SET credentials = $1::jsonb, credential_generation = credential_generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
 	}
 	for id, credentials := range current {
-		merged := mergeCredentialMaps(credentials, updates)
+		// Each account can start with a different value. Compare independently
+		// so an idempotent update for one row does not inherit another row's
+		// generation bump.
+		merged := mergeCredentialMaps(cloneCredentialUpdates(credentials), updates)
+		identityChanged := grokIdentityCredentialChanged(credentials, merged)
 		credJSON, err := json.Marshal(merged)
 		if err != nil {
 			return fmt.Errorf("序列化 credentials 失败: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, query, credJSON, id); err != nil {
+		updateQuery := query
+		if identityChanged {
+			updateQuery = identityQuery
+		}
+		if _, err := tx.ExecContext(ctx, updateQuery, credJSON, id); err != nil {
 			return err
 		}
 	}
@@ -6370,14 +6429,19 @@ func (db *DB) updateCredentialsReadMerge(ctx context.Context, id int64, credenti
 	}
 
 	merged := mergeCredentialMaps(decodeCredentials(currentRaw), credentials)
+	identityChanged := grokIdentityCredentialChanged(decodeCredentials(currentRaw), merged)
 	credJSON, err := json.Marshal(merged)
 	if err != nil {
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
 	}
 
-	updateQuery := `UPDATE accounts SET credentials = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
+	generationUpdate := ""
+	if identityChanged {
+		generationUpdate = ", credential_generation = credential_generation + 1"
+	}
+	updateQuery := `UPDATE accounts SET credentials = $1` + generationUpdate + `, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
 	if !db.isSQLite() {
-		updateQuery = `UPDATE accounts SET credentials = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
+		updateQuery = `UPDATE accounts SET credentials = $1::jsonb` + generationUpdate + `, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
 	}
 	if _, err := tx.ExecContext(ctx, updateQuery, credJSON, id); err != nil {
 		return err
@@ -6390,13 +6454,16 @@ func (db *DB) updateCredentialsSQLite(ctx context.Context, id int64, credentials
 		if len(credentials) == 0 {
 			return nil
 		}
+		if grokIdentityUpdateKeysPresent(credentials) {
+			return db.updateCredentialsReadMergeSQLiteUnlocked(ctx, id, credentials)
+		}
 
 		args := make([]interface{}, 0, len(credentials)*2+1)
 		jsonSetArgs := make([]string, 0, len(credentials)*2)
 		argIdx := 1
 		for key, value := range credentials {
 			if !sqliteJSONSetKeySupported(key) {
-				return db.updateCredentialsReadMergeSQLite(ctx, id, credentials)
+				return db.updateCredentialsReadMergeSQLiteUnlocked(ctx, id, credentials)
 			}
 			valueJSON, err := json.Marshal(value)
 			if err != nil {
@@ -6428,6 +6495,12 @@ func (db *DB) updateCredentialsSQLite(ctx context.Context, id int64, credentials
 }
 
 func (db *DB) updateCredentialsReadMergeSQLite(ctx context.Context, id int64, credentials map[string]interface{}) error {
+	return db.withSQLiteWriteLock(ctx, func() error {
+		return db.updateCredentialsReadMergeSQLiteUnlocked(ctx, id, credentials)
+	})
+}
+
+func (db *DB) updateCredentialsReadMergeSQLiteUnlocked(ctx context.Context, id int64, credentials map[string]interface{}) error {
 	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -6439,15 +6512,49 @@ func (db *DB) updateCredentialsReadMergeSQLite(ctx context.Context, id int64, cr
 		return err
 	}
 
+	current := decodeCredentials(currentRaw)
 	merged := mergeCredentialMaps(decodeCredentials(currentRaw), credentials)
+	identityChanged := grokIdentityCredentialChanged(current, merged)
 	credJSON, err := json.Marshal(merged)
 	if err != nil {
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET credentials = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, credJSON, id); err != nil {
+	generationUpdate := ""
+	if identityChanged {
+		generationUpdate = ", credential_generation = credential_generation + 1"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET credentials = $1`+generationUpdate+`, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, credJSON, id); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+var grokIdentityCredentialKeys = map[string]struct{}{
+	"access_token": {}, "refresh_token": {}, "api_key": {}, "upstream_type": {},
+	"base_url": {}, "grok_client_id": {}, "grok_token_endpoint": {},
+	"grok_oidc_issuer": {}, "grok_principal_type": {}, "grok_principal_id": {},
+	"account_id": {},
+}
+
+func grokIdentityUpdateKeysPresent(updates map[string]interface{}) bool {
+	for key := range updates {
+		if _, ok := grokIdentityCredentialKeys[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func grokIdentityCredentialChanged(before, after map[string]interface{}) bool {
+	if !strings.EqualFold(strings.TrimSpace(credentialStringFromMap(after, "upstream_type")), "grok") {
+		return false
+	}
+	for key := range grokIdentityCredentialKeys {
+		if strings.TrimSpace(credentialStringFromMap(before, key)) != strings.TrimSpace(credentialStringFromMap(after, key)) {
+			return true
+		}
+	}
+	return false
 }
 
 func sqliteJSONSetKeySupported(key string) bool {
@@ -6644,7 +6751,7 @@ func (db *DB) SoftDeleteAccount(ctx context.Context, id int64) error {
 // ListDeleted 获取回收站中的账号（被软删除、尚未彻底清除的账号）。
 func (db *DB) ListDeleted(ctx context.Context) ([]*AccountRow, error) {
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, deleted_at
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, deleted_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, '')
 		FROM accounts
 		WHERE status = 'deleted' OR COALESCE(error_message, '') = 'deleted'
 		ORDER BY deleted_at DESC, id DESC
@@ -6687,6 +6794,8 @@ func (db *DB) ListDeleted(ctx context.Context) ([]*AccountRow, error) {
 			&createdAtRaw,
 			&updatedAtRaw,
 			&deletedAtRaw,
+			&a.CredentialGeneration,
+			&a.CredentialFamilyID,
 		); err != nil {
 			return nil, fmt.Errorf("扫描回收站账号行失败: %w", err)
 		}
@@ -6746,6 +6855,11 @@ func (db *DB) PurgeAccount(ctx context.Context, id int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	// Grok observations intentionally do not rely on foreign-key cascades; keep
+	// purge behavior consistent across SQLite and PostgreSQL.
+	if err := db.deleteGrokAccountStateTx(ctx, tx, "= $1", id); err != nil {
+		return err
+	}
 	query := `DELETE FROM accounts WHERE id = $1 AND (status = 'deleted' OR COALESCE(error_message, '') = 'deleted')`
 	res, err := tx.ExecContext(ctx, query, id)
 	if err != nil {
@@ -6771,6 +6885,10 @@ func (db *DB) PurgeDeletedAccounts(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	deletedPredicate := `IN (SELECT id FROM accounts WHERE status = 'deleted' OR COALESCE(error_message, '') = 'deleted')`
+	if err := db.deleteGrokAccountStateTx(ctx, tx, deletedPredicate); err != nil {
+		return 0, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM account_group_members
 		WHERE account_id IN (SELECT id FROM accounts WHERE status = 'deleted' OR COALESCE(error_message, '') = 'deleted')
@@ -6984,9 +7102,10 @@ func (db *DB) InsertAccountWithCredentials(ctx context.Context, name string, cre
 		return 0, err
 	}
 
-	return db.insertRowID(ctx,
+	return db.insertAccountRowWithFamily(ctx,
 		`INSERT INTO accounts (name, credentials, proxy_url) VALUES ($1, $2, $3) RETURNING id`,
 		`INSERT INTO accounts (name, credentials, proxy_url) VALUES ($1, $2, $3)`,
+		credentials,
 		name, credJSON, proxyURL,
 	)
 }
@@ -7000,9 +7119,10 @@ func (db *DB) InsertOpenAIResponsesAccount(ctx context.Context, name string, cre
 		return 0, err
 	}
 
-	return db.insertRowID(ctx,
+	return db.insertAccountRowWithFamily(ctx,
 		`INSERT INTO accounts (name, platform, type, credentials, proxy_url) VALUES ($1, 'openai', 'responses_api', $2, $3) RETURNING id`,
 		`INSERT INTO accounts (name, platform, type, credentials, proxy_url) VALUES ($1, 'openai', 'responses_api', $2, $3)`,
+		credentials,
 		name, credJSON, proxyURL,
 	)
 }
@@ -7023,11 +7143,48 @@ func (db *DB) InsertAccountWithUpstream(ctx context.Context, name, platform, acc
 	if err != nil {
 		return 0, err
 	}
-	return db.insertRowID(ctx,
+	return db.insertAccountRowWithFamily(ctx,
 		`INSERT INTO accounts (name, platform, type, credentials, proxy_url) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
 		`INSERT INTO accounts (name, platform, type, credentials, proxy_url) VALUES ($1, $2, $3, $4, $5)`,
+		credentials,
 		name, platform, accountType, credJSON, proxyURL,
 	)
+}
+
+// insertAccountRowWithFamily keeps legacy insert SQL untouched while ensuring
+// every newly-created account immediately receives its stable family key.
+func (db *DB) insertAccountRowWithFamily(ctx context.Context, postgresQuery, sqliteQuery string, credentials map[string]interface{}, args ...interface{}) (int64, error) {
+	candidate := credentialFamilyCandidate(credentials)
+	returnID := int64(0)
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if db.isSQLite() {
+			query := strings.TrimSpace(sqliteQuery)
+			if _, err = tx.ExecContext(ctx, query, args...); err != nil {
+				return err
+			}
+			if err = tx.QueryRowContext(ctx, "SELECT last_insert_rowid()").Scan(&returnID); err != nil {
+				return err
+			}
+		} else if err = tx.QueryRowContext(ctx, strings.TrimSpace(postgresQuery), args...).Scan(&returnID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(candidate) == "" {
+			candidate = "cf_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE accounts SET credential_family_id=$1 WHERE id=$2 AND COALESCE(credential_family_id,'')=''`, candidate, returnID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return 0, err
+	}
+	return returnID, nil
 }
 
 // UpdateAccountName 仅更新账号名称。

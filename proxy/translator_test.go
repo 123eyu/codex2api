@@ -23,6 +23,116 @@ func TestNormalizeServiceTierField(t *testing.T) {
 	}
 }
 
+func TestTranslateRequestRejectsOrphanToolMessage(t *testing.T) {
+	_, err := TranslateRequest([]byte(`{"model":"grok-4.5","messages":[{"role":"tool","content":"result"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "tool_call_id") {
+		t.Fatalf("orphan tool message error = %v", err)
+	}
+}
+
+func TestTranslateRequestRejectsUnknownToolCallID(t *testing.T) {
+	raw := []byte(`{
+		"model":"grok-4.5",
+		"messages":[
+			{"role":"assistant","tool_calls":[{"id":"call_known","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_unknown","content":"result"}
+		]
+	}`)
+	_, err := TranslateRequest(raw)
+	if err == nil || !strings.Contains(err.Error(), `unknown tool_call_id "call_unknown"`) {
+		t.Fatalf("unknown tool call error = %v", err)
+	}
+}
+
+func TestTranslateRequestAcceptsParallelToolResults(t *testing.T) {
+	raw := []byte(`{
+		"model":"grok-4.5",
+		"messages":[
+			{"role":"assistant","tool_calls":[
+				{"id":"call_a","type":"function","function":{"name":"first","arguments":"{}"}},
+				{"id":"call_b","type":"function","function":{"name":"second","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_b","content":"B"},
+			{"role":"tool","tool_call_id":"call_a","content":"A"}
+		]
+	}`)
+	got, err := TranslateRequest(raw)
+	if err != nil {
+		t.Fatalf("parallel tool results should be valid: %v", err)
+	}
+	count := 0
+	for _, item := range gjson.GetBytes(got, "input").Array() {
+		if item.Get("type").String() == "function_call_output" {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("function_call_output count = %d, want 2; body=%s", count, got)
+	}
+}
+
+func TestTranslateChatToResponsesForGrokPreservesControls(t *testing.T) {
+	raw := []byte(`{
+		"model":"grok-4.5",
+		"messages":[{"role":"user","content":"hello"}],
+		"temperature":0.25,
+		"top_p":0.8,
+		"max_tokens":111,
+		"max_completion_tokens":222,
+		"stop":["END","DONE"],
+		"seed":17,
+		"presence_penalty":0.2,
+		"frequency_penalty":-0.1,
+		"parallel_tool_calls":false,
+		"tools":[{"type":"function","function":{"name":"lookup","description":"Lookup","parameters":{"type":"object","uniqueItems":true}}}],
+		"tool_choice":{"type":"function","function":{"name":"lookup"}},
+		"response_format":{"type":"json_schema","json_schema":{"name":"answer","strict":true,"schema":{"type":"object","uniqueItems":true}}}
+	}`)
+	got, err := TranslateChatToResponsesForGrok(raw)
+	if err != nil {
+		t.Fatalf("TranslateChatToResponsesForGrok: %v", err)
+	}
+	checks := map[string]string{
+		"temperature":             "0.25",
+		"top_p":                   "0.8",
+		"max_output_tokens":       "222",
+		"stop.0":                  "END",
+		"stop.1":                  "DONE",
+		"seed":                    "17",
+		"presence_penalty":        "0.2",
+		"frequency_penalty":       "-0.1",
+		"tool_choice.type":        "function",
+		"tool_choice.name":        "lookup",
+		"text.format.type":        "json_schema",
+		"text.format.name":        "answer",
+		"tools.0.parameters.type": "object",
+	}
+	for path, want := range checks {
+		if value := gjson.GetBytes(got, path); value.String() != want {
+			t.Fatalf("%s = %q, want %q; body=%s", path, value.String(), want, got)
+		}
+	}
+	if value := gjson.GetBytes(got, "parallel_tool_calls"); !value.Exists() || value.Bool() {
+		t.Fatalf("parallel_tool_calls should preserve explicit false; body=%s", got)
+	}
+	if !gjson.GetBytes(got, "tools.0.parameters.uniqueItems").Bool() || !gjson.GetBytes(got, "text.format.schema.uniqueItems").Bool() {
+		t.Fatalf("Grok canonical conversion must not apply Codex schema stripping; body=%s", got)
+	}
+}
+
+func TestTranslateRequestRemainsCodexSafeWhenChatControlsPresent(t *testing.T) {
+	raw := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"temperature":0.25,"max_tokens":10,"stop":"END","tool_choice":"none"}`)
+	got, err := TranslateRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"temperature", "max_output_tokens", "stop", "tool_choice"} {
+		if gjson.GetBytes(got, field).Exists() {
+			t.Fatalf("Codex converter unexpectedly retained %s; body=%s", field, got)
+		}
+	}
+}
+
 func TestResolveServiceTier(t *testing.T) {
 	if got := resolveServiceTier("fast", "default"); got != "fast" {
 		t.Fatalf("expected actual tier to win, got %q", got)
@@ -2483,6 +2593,7 @@ func TestPrepareResponsesBodyDropsBareReasoningItems(t *testing.T) {
 func TestConvertMessagesToInput_ToolRole(t *testing.T) {
 	raw := []byte(`{
 		"messages":[
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_abc","type":"function","function":{"name":"weather","arguments":"{}"}}]},
 			{"role":"tool","tool_call_id":"call_abc","content":"{\"temp\":72}"}
 		]
 	}`)
@@ -2496,7 +2607,7 @@ func TestConvertMessagesToInput_ToolRole(t *testing.T) {
 		t.Fatal("input should be an array")
 	}
 
-	item := input.Array()[0]
+	item := input.Array()[1]
 	if item.Get("type").String() != "function_call_output" {
 		t.Fatalf("expected type function_call_output, got %q", item.Get("type").String())
 	}
@@ -2819,6 +2930,22 @@ func TestFinalChunk_AlwaysCarriesEmptyDeltaObject(t *testing.T) {
 		t.Fatalf("stateful tool: finish_reason = %q, want tool_calls", got)
 	}
 	assertDelta(t, "stateful tool", toolChunk)
+}
+
+func TestChatStreamTranslationDistinguishesFailedTerminal(t *testing.T) {
+	failed := NewStreamTranslator("chatcmpl-test", "grok-4.5", 0).TranslateParsedResult(gjson.Parse(
+		`{"type":"response.failed","response":{"error":{"message":"boom"}}}`,
+	))
+	if !failed.Terminal || !failed.Failed || !gjson.GetBytes(failed.Chunk, "error").Exists() {
+		t.Fatalf("failed translation = %#v, chunk=%s", failed, failed.Chunk)
+	}
+
+	completed := NewStreamTranslator("chatcmpl-test", "grok-4.5", 0).TranslateParsedResult(gjson.Parse(
+		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`,
+	))
+	if !completed.Terminal || completed.Failed {
+		t.Fatalf("completed translation = %#v", completed)
+	}
 }
 
 func TestStreamTranslator_TextOnly(t *testing.T) {

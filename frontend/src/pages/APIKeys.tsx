@@ -3457,6 +3457,14 @@ const PLAN_FILTER_OPTIONS = [
   "team",
   "k12",
   "go",
+  "api",
+  "supergrok",
+  "x_basic",
+  "x_premium",
+  "x_premium_plus",
+  "supergrok_heavy",
+  "supergrok_lite",
+  "supergrok_plus",
 ] as const;
 
 // PlanMultiSelect 让 API Key 选择只调度哪些账号套餐。空表示不限套餐。

@@ -22,6 +22,9 @@ import type {
   GrokSSOImportResponse,
   GrokBatchImportRequest,
   GrokBatchImportResponse,
+  GrokAccountState,
+  GrokStateSyncResponse,
+  GrokCapabilityProbeResponse,
   AdminErrorResponse,
   APIKeysResponse,
   APIKeyTokenStat,
@@ -609,6 +612,18 @@ export const api = {
     }),
   updateGrokAccount: (id: number, data: UpdateGrokAccountRequest) =>
     request<MessageResponse>(`/accounts/${id}/grok`, { method: 'PATCH', body: JSON.stringify(data) }),
+  getGrokAccountState: (id: number, signal?: AbortSignal) =>
+    request<GrokAccountState>(`/accounts/${id}/grok/state`, { signal }),
+  syncGrokAccountState: (id: number) =>
+    request<GrokStateSyncResponse>(`/accounts/${id}/grok/sync`, {
+      method: 'POST',
+      timeoutMs: 120_000,
+    }),
+  probeGrokAccountCapabilities: (id: number) =>
+    request<GrokCapabilityProbeResponse>(`/accounts/${id}/grok/capabilities/probe`, {
+      method: 'POST',
+      timeoutMs: 180_000,
+    }),
   deleteAccount: (id: number) =>
     request<MessageResponse>(`/accounts/${id}`, { method: 'DELETE' }),
   updateAccountNote: (id: number, note: string) =>
