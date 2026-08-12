@@ -134,6 +134,18 @@ import {
   Sparkles,
   Wallet,
   Banknote,
+  Gauge,
+  Sliders,
+  Flame,
+  ShieldAlert,
+  Globe,
+  Tag,
+  Users,
+  ShieldCheck,
+  Activity,
+  Shield,
+  ArrowUpRight,
+  Settings2,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import AccountUsageModal from "../components/AccountUsageModal";
@@ -7992,42 +8004,60 @@ export default function Accounts() {
             }
           >
             {editingAccount && editPreview ? (
-              <div className="space-y-5">
-                <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-                  <div className="font-semibold text-foreground">
-                    {formatAccountName(editingAccount)}
-                  </div>
-                  <div className="mt-1">
-                    {t("accounts.schedulerEditDesc", {
-                      plan: editingAccount.plan_type || "-",
-                    })}
+              <div className="space-y-6">
+                {/* 顶栏：账号状态与简要概览 */}
+                <div className="relative overflow-hidden rounded-xl border border-border/80 bg-gradient-to-r from-primary/5 via-muted/30 to-background p-4 shadow-2xs">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base font-bold text-foreground tracking-tight">
+                          {formatAccountName(editingAccount)}
+                        </span>
+                        <Badge variant="outline" className="capitalize text-xs font-semibold bg-background/80 border-border/80">
+                          {editingAccount.plan_type || "Standard"}
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {t("accounts.schedulerEditDesc", {
+                          plan: editingAccount.plan_type || "-",
+                        })}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-xs font-mono font-medium text-primary">
+                        ID: {editingAccount.id}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
+                {/* 选项卡切换 */}
                 {(editingAccount.openai_responses_api ||
                   isOAuthAccount(editingAccount)) && (
-                  <div className="flex gap-1 rounded-xl border border-border bg-muted/50 p-1">
+                  <div className="flex gap-1.5 rounded-xl border border-border/60 bg-muted/40 p-1.5 shadow-2xs">
                     <button
                       type="button"
                       onClick={() => setEditTab("scheduler")}
-                      className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition-all ${
+                      className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-all duration-150 ${
                         editTab === "scheduler"
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
+                          ? "bg-background text-foreground shadow-xs ring-1 ring-border/50"
+                          : "text-muted-foreground hover:text-foreground hover:bg-background/40"
                       }`}
                     >
-                      {t("accounts.editTabScheduler")}
+                      <SlidersHorizontal className="size-4 text-primary" />
+                      <span>{t("accounts.editTabScheduler")}</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => setEditTab("account")}
-                      className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition-all ${
+                      className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-all duration-150 ${
                         editTab === "account"
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
+                          ? "bg-background text-foreground shadow-xs ring-1 ring-border/50"
+                          : "text-muted-foreground hover:text-foreground hover:bg-background/40"
                       }`}
                     >
-                      {t("accounts.editTabAccount")}
+                      <KeyRound className="size-4 text-primary" />
+                      <span>{t("accounts.editTabAccount")}</span>
                     </button>
                   </div>
                 )}
@@ -8035,191 +8065,203 @@ export default function Accounts() {
                 {editTab === "account" &&
                 editingAccount.openai_responses_api ? (
                   <div className="space-y-4">
-                    <div>
-                      <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                        {t("accounts.openaiNameLabel")}
-                      </label>
-                      <Input
-                        placeholder={t("accounts.openaiNamePlaceholder")}
-                        value={editOpenAIForm.name ?? ""}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                          setEditOpenAIForm((form) => ({
-                            ...form,
-                            name: event.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                        {t("accounts.openaiBaseUrl")} *
-                      </label>
-                      <Input
-                        placeholder="https://api.openai.com"
-                        value={editOpenAIForm.base_url}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                          setEditOpenAIForm((form) => ({
-                            ...form,
-                            base_url: event.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                        {t("accounts.openaiApiKey")}
-                      </label>
-                      <Input
-                        type="password"
-                        placeholder={t("accounts.openaiApiKeyKeepPlaceholder")}
-                        value={editOpenAIForm.api_key ?? ""}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                          setEditOpenAIForm((form) => ({
-                            ...form,
-                            api_key: event.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                        {t("accounts.codexClientMetadataMode")}
-                      </label>
-                      <Select
-                        value={
-                          editOpenAIForm.codex_client_metadata_mode ?? "auto"
-                        }
-                        onValueChange={(value) =>
-                          setEditOpenAIForm((form) => ({
-                            ...form,
-                            codex_client_metadata_mode:
-                              value as CodexClientMetadataMode,
-                          }))
-                        }
-                        options={[
-                          {
-                            value: "auto",
-                            label: t("accounts.codexClientMetadataAuto"),
-                          },
-                          {
-                            value: "always",
-                            label: t("accounts.codexClientMetadataAlways"),
-                          },
-                          {
-                            value: "off",
-                            label: t("accounts.codexClientMetadataOff"),
-                          },
-                        ]}
-                      />
-                    </div>
-                    <div>
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <label className="text-sm font-semibold text-muted-foreground">
-                          {t("accounts.openaiModels")} *
+                    <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs space-y-4">
+                      <div className="flex items-center gap-2 font-semibold text-foreground text-sm border-b border-border/50 pb-3">
+                        <Settings2 className="size-4 text-primary" />
+                        <span>OpenAI Responses API 参数</span>
+                      </div>
+                      <div>
+                        <label className="block mb-2 text-xs font-semibold text-muted-foreground">
+                          {t("accounts.openaiNameLabel")}
                         </label>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => void handleFetchEditOpenAIModels()}
-                          disabled={editOpenAIModelsLoading}
-                        >
-                          <RefreshCw
-                            className={`size-3.5 ${editOpenAIModelsLoading ? "animate-spin" : ""}`}
-                          />
-                          {editOpenAIModelsLoading
-                            ? t("accounts.openaiModelsFetching")
-                            : t("accounts.openaiModelsFetch")}
-                        </Button>
-                      </div>
-                      <div className="mb-3 flex gap-2">
                         <Input
-                          placeholder={t("accounts.openaiModelsPlaceholder")}
-                          value={editOpenAIModelDraft}
+                          placeholder={t("accounts.openaiNamePlaceholder")}
+                          value={editOpenAIForm.name ?? ""}
                           onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            setEditOpenAIModelDraft(event.target.value)
+                            setEditOpenAIForm((form) => ({
+                              ...form,
+                              name: event.target.value,
+                            }))
                           }
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") {
-                              event.preventDefault();
-                              addEditOpenAIModelValues(editOpenAIModelDraft);
-                            }
-                          }}
-                          onPaste={(event) => {
-                            const pasted = event.clipboardData.getData("text");
-                            if (parseModelTokens(pasted).length > 1) {
-                              event.preventDefault();
-                              addEditOpenAIModelValues(pasted);
-                            }
-                          }}
                         />
-                        <Button
-                          type="button"
-                          variant="outline"
-                          onClick={() =>
-                            addEditOpenAIModelValues(editOpenAIModelDraft)
-                          }
-                          disabled={!editOpenAIModelDraft.trim()}
-                        >
-                          <Plus className="size-3.5" />
-                          {t("accounts.openaiModelsAdd")}
-                        </Button>
                       </div>
-                      <ModelChipGrid
-                        models={editOpenAIForm.models}
-                        onRemove={removeEditOpenAIModel}
-                        emptyLabel={t("accounts.openaiModelsEmpty")}
-                      />
-                      <div className="mt-1.5 flex items-center justify-between gap-2">
-                        <p className="text-xs text-muted-foreground">
-                          {t("accounts.openaiModelsHint", {
-                            count: editOpenAIForm.models.length,
-                          })}
-                        </p>
-                        {editOpenAIForm.models.length > 0 && (
-                          <button
-                            type="button"
-                            className="shrink-0 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-                            disabled={editOpenAIModelsLoading || editSubmitting}
-                            onClick={clearEditOpenAIModels}
-                          >
-                            {t("accounts.supportedModelsClearAll")}
-                          </button>
-                        )}
+                      <div>
+                        <label className="block mb-2 text-xs font-semibold text-muted-foreground">
+                          {t("accounts.openaiBaseUrl")} *
+                        </label>
+                        <Input
+                          placeholder="https://api.openai.com"
+                          value={editOpenAIForm.base_url}
+                          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setEditOpenAIForm((form) => ({
+                              ...form,
+                              base_url: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-2 text-xs font-semibold text-muted-foreground">
+                          {t("accounts.openaiApiKey")}
+                        </label>
+                        <Input
+                          type="password"
+                          placeholder={t("accounts.openaiApiKeyKeepPlaceholder")}
+                          value={editOpenAIForm.api_key ?? ""}
+                          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setEditOpenAIForm((form) => ({
+                              ...form,
+                              api_key: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-2 text-xs font-semibold text-muted-foreground">
+                          {t("accounts.codexClientMetadataMode")}
+                        </label>
+                        <Select
+                          value={
+                            editOpenAIForm.codex_client_metadata_mode ?? "auto"
+                          }
+                          onValueChange={(value) =>
+                            setEditOpenAIForm((form) => ({
+                              ...form,
+                              codex_client_metadata_mode:
+                                value as CodexClientMetadataMode,
+                            }))
+                          }
+                          options={[
+                            {
+                              value: "auto",
+                              label: t("accounts.codexClientMetadataAuto"),
+                            },
+                            {
+                              value: "always",
+                              label: t("accounts.codexClientMetadataAlways"),
+                            },
+                            {
+                              value: "off",
+                              label: t("accounts.codexClientMetadataOff"),
+                            },
+                          ]}
+                        />
                       </div>
                     </div>
-                    {renderModelMappingEditor({
-                      value: editOpenAIModelMappingText,
-                      onChange: setEditOpenAIModelMappingText,
-                      mode: editOpenAIModelMappingMode,
-                      onModeChange: setEditOpenAIModelMappingMode,
-                      entries: editOpenAIModelMappingEntries,
-                      onEntriesChange: setEditOpenAIModelMappingEntries,
-                    })}
-                    {renderProxyInput({
-                      value: editOpenAIForm.proxy_url,
-                      testKey: "edit-openai-responses",
-                      onChange: (value) =>
-                        setEditOpenAIForm((form) => ({
-                          ...form,
-                          proxy_url: value,
-                        })),
-                    })}
-                    {renderCustomHeadersTextarea({
-                      value: editCustomHeadersText,
-                      onChange: setEditCustomHeadersText,
-                    })}
+
+                    <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs space-y-4">
+                      <div>
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <label className="text-xs font-semibold text-muted-foreground">
+                            {t("accounts.openaiModels")} *
+                          </label>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void handleFetchEditOpenAIModels()}
+                            disabled={editOpenAIModelsLoading}
+                          >
+                            <RefreshCw
+                              className={`size-3.5 ${editOpenAIModelsLoading ? "animate-spin" : ""}`}
+                            />
+                            {editOpenAIModelsLoading
+                              ? t("accounts.openaiModelsFetching")
+                              : t("accounts.openaiModelsFetch")}
+                          </Button>
+                        </div>
+                        <div className="mb-3 flex gap-2">
+                          <Input
+                            placeholder={t("accounts.openaiModelsPlaceholder")}
+                            value={editOpenAIModelDraft}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                              setEditOpenAIModelDraft(event.target.value)
+                            }
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                addEditOpenAIModelValues(editOpenAIModelDraft);
+                              }
+                            }}
+                            onPaste={(event) => {
+                              const pasted = event.clipboardData.getData("text");
+                              if (parseModelTokens(pasted).length > 1) {
+                                event.preventDefault();
+                                addEditOpenAIModelValues(pasted);
+                              }
+                            }}
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() =>
+                              addEditOpenAIModelValues(editOpenAIModelDraft)
+                            }
+                            disabled={!editOpenAIModelDraft.trim()}
+                          >
+                            <Plus className="size-3.5" />
+                            {t("accounts.openaiModelsAdd")}
+                          </Button>
+                        </div>
+                        <ModelChipGrid
+                          models={editOpenAIForm.models}
+                          onRemove={removeEditOpenAIModel}
+                          emptyLabel={t("accounts.openaiModelsEmpty")}
+                        />
+                        <div className="mt-1.5 flex items-center justify-between gap-2">
+                          <p className="text-xs text-muted-foreground">
+                            {t("accounts.openaiModelsHint", {
+                              count: editOpenAIForm.models.length,
+                            })}
+                          </p>
+                          {editOpenAIForm.models.length > 0 && (
+                            <button
+                              type="button"
+                              className="shrink-0 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                              disabled={editOpenAIModelsLoading || editSubmitting}
+                              onClick={clearEditOpenAIModels}
+                            >
+                              {t("accounts.supportedModelsClearAll")}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {renderModelMappingEditor({
+                        value: editOpenAIModelMappingText,
+                        onChange: setEditOpenAIModelMappingText,
+                        mode: editOpenAIModelMappingMode,
+                        onModeChange: setEditOpenAIModelMappingMode,
+                        entries: editOpenAIModelMappingEntries,
+                        onEntriesChange: setEditOpenAIModelMappingEntries,
+                      })}
+                    </div>
+
+                    <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs space-y-4">
+                      {renderProxyInput({
+                        value: editOpenAIForm.proxy_url,
+                        testKey: "edit-openai-responses",
+                        onChange: (value) =>
+                          setEditOpenAIForm((form) => ({
+                            ...form,
+                            proxy_url: value,
+                          })),
+                      })}
+                      {renderCustomHeadersTextarea({
+                        value: editCustomHeadersText,
+                        onChange: setEditCustomHeadersText,
+                      })}
+                    </div>
                   </div>
                 ) : editTab === "account" && isOAuthAccount(editingAccount) ? (
                   <div className="space-y-4">
-                    <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+                    <div className="rounded-xl border border-border/80 bg-muted/30 p-4.5 text-sm text-muted-foreground">
                       <p className="font-semibold text-foreground mb-1">
                         {t("accounts.oauthEditIntroTitle")}
                       </p>
                       <p>{t("accounts.oauthEditIntroDesc")}</p>
                     </div>
                     <div>
-                      <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                      <label className="block mb-2 text-xs font-semibold text-muted-foreground">
                         {t("accounts.oauthCurrentAccount")}
                       </label>
                       <div className="rounded-lg border border-dashed border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
@@ -8228,7 +8270,7 @@ export default function Accounts() {
                     </div>
                     {editOAuthStep === "generate" ? (
                       <>
-                        <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+                        <div className="rounded-xl border border-border/80 bg-muted/30 p-4.5 text-sm text-muted-foreground">
                           <p className="font-semibold text-foreground mb-1">
                             {t("accounts.oauthStep1Title")}
                           </p>
@@ -8244,14 +8286,14 @@ export default function Accounts() {
                       </>
                     ) : (
                       <>
-                        <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+                        <div className="rounded-xl border border-border/80 bg-muted/30 p-4.5 text-sm text-muted-foreground">
                           <p className="font-semibold text-foreground mb-1">
                             {t("accounts.oauthStep2Title")}
                           </p>
                           <p>{t("accounts.oauthStep2Desc")}</p>
                         </div>
                         {editOAuthSession && (
-                          <div className="rounded-xl border border-primary/30 bg-primary/5 px-4 py-3">
+                          <div className="rounded-xl border border-primary/30 bg-primary/5 p-4.5">
                             <p className="text-xs font-semibold text-muted-foreground mb-2">
                               {t("accounts.oauthAuthLinkLabel")}
                             </p>
@@ -8281,7 +8323,7 @@ export default function Accounts() {
                           </div>
                         )}
                         <div>
-                          <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                          <label className="block mb-2 text-xs font-semibold text-muted-foreground">
                             {t("accounts.oauthCallbackUrlLabel")}
                           </label>
                           <Input
@@ -8309,427 +8351,484 @@ export default function Accounts() {
                     )}
                   </div>
                 ) : (
-                  <>
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div className="rounded-xl border border-border p-4">
-                        <div className="text-sm font-semibold text-foreground">
-                          {t("accounts.schedulerScoreLabel")}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {t("accounts.schedulerScoreHint")}
-                        </div>
-                        <div className="mt-3 flex gap-2">
-                          <TogglePill
-                            active={scoreMode === "default"}
-                            onClick={() => setScoreMode("default")}
-                            label={t("accounts.schedulerScoreAuto")}
-                          />
-                          <TogglePill
-                            active={scoreMode === "custom"}
-                            onClick={() => setScoreMode("custom")}
-                            label={t("accounts.schedulerCustom")}
-                          />
-                        </div>
-                        {scoreMode === "default" ? (
-                          <div className="mt-3 rounded-lg border border-dashed border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
-                            {t("accounts.schedulerScoreAutoValue", {
-                              value: formatSignedNumber(
-                                getDefaultScoreBias(editingAccount.plan_type),
-                              ),
-                            })}
-                          </div>
-                        ) : (
-                          <div className="mt-3 space-y-2">
-                            <Input
-                              inputMode="numeric"
-                              value={scoreInput}
-                              onChange={(
-                                event: ChangeEvent<HTMLInputElement>,
-                              ) => setScoreInput(event.target.value)}
-                              placeholder={t(
-                                "accounts.schedulerScorePlaceholder",
-                              )}
-                            />
-                            <div
-                              className={`text-xs ${scoreInputInvalid ? "text-red-500" : "text-muted-foreground"}`}
-                            >
-                              {scoreInputInvalid
-                                ? t("accounts.schedulerScoreRange")
-                                : t("accounts.schedulerCustomValuePreview", {
-                                    value: formatSignedNumber(
-                                      parsedScoreBias ??
-                                        getEffectiveScoreBias(editingAccount),
-                                    ),
-                                  })}
-                            </div>
-                          </div>
-                        )}
+                  <div className="space-y-6">
+                    {/* 分组 1: 调度与并发加权 */}
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground/80">
+                        <Gauge className="size-3.5 text-primary" />
+                        <span>{t("accounts.categoryDispatch")}</span>
+                        <div className="h-px flex-1 bg-border/60" />
                       </div>
 
-                      <div className="rounded-xl border border-border p-4">
-                        <div className="text-sm font-semibold text-foreground">
-                          {t("accounts.schedulerConcurrencyLabel")}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {t("accounts.schedulerConcurrencyHint")}
-                        </div>
-                        <div className="mt-3 flex gap-2">
-                          <TogglePill
-                            active={concurrencyMode === "default"}
-                            onClick={() => setConcurrencyMode("default")}
-                            label={t("accounts.schedulerConcurrencyAuto")}
-                          />
-                          <TogglePill
-                            active={concurrencyMode === "custom"}
-                            onClick={() => setConcurrencyMode("custom")}
-                            label={t("accounts.schedulerCustom")}
-                          />
-                        </div>
-                        {concurrencyMode === "default" ? (
-                          <div className="mt-3 rounded-lg border border-dashed border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
-                            {t("accounts.schedulerConcurrencyAutoValue", {
-                              value:
-                                getEffectiveBaseConcurrency(editingAccount),
-                            })}
+                      <div className="grid gap-4 md:grid-cols-2">
+                        {/* 权重分 */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors">
+                          <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                            <Gauge className="size-4 text-blue-500" />
+                            <span>{t("accounts.schedulerScoreLabel")}</span>
                           </div>
-                        ) : (
-                          <div className="mt-3 space-y-2">
-                            <Input
-                              inputMode="numeric"
-                              value={concurrencyInput}
-                              onChange={(
-                                event: ChangeEvent<HTMLInputElement>,
-                              ) => setConcurrencyInput(event.target.value)}
-                              placeholder={t(
-                                "accounts.schedulerConcurrencyPlaceholder",
-                              )}
+                          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                            {t("accounts.schedulerScoreHint")}
+                          </p>
+                          <div className="mt-3.5 flex gap-2">
+                            <TogglePill
+                              active={scoreMode === "default"}
+                              onClick={() => setScoreMode("default")}
+                              label={t("accounts.schedulerScoreAuto")}
                             />
-                            <div
-                              className={`text-xs ${concurrencyInputInvalid ? "text-red-500" : "text-muted-foreground"}`}
-                            >
-                              {concurrencyInputInvalid
-                                ? t("accounts.schedulerConcurrencyRange")
-                                : t("accounts.schedulerCustomValuePreview", {
-                                    value:
-                                      parsedBaseConcurrency ??
-                                      getEffectiveBaseConcurrency(
-                                        editingAccount,
+                            <TogglePill
+                              active={scoreMode === "custom"}
+                              onClick={() => setScoreMode("custom")}
+                              label={t("accounts.schedulerCustom")}
+                            />
+                          </div>
+                          {scoreMode === "default" ? (
+                            <div className="mt-3 flex items-center justify-between rounded-lg border border-border/60 bg-muted/20 px-3.5 py-2.5 text-xs">
+                              <span className="text-muted-foreground font-medium">当前默认加权</span>
+                              <span className="font-mono font-semibold text-blue-600 dark:text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
+                                {formatSignedNumber(getDefaultScoreBias(editingAccount.plan_type))}
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="mt-3 space-y-2">
+                              <Input
+                                inputMode="numeric"
+                                value={scoreInput}
+                                onChange={(
+                                  event: ChangeEvent<HTMLInputElement>,
+                                ) => setScoreInput(event.target.value)}
+                                placeholder={t(
+                                  "accounts.schedulerScorePlaceholder",
+                                )}
+                              />
+                              <div
+                                className={`text-xs ${scoreInputInvalid ? "text-red-500" : "text-muted-foreground"}`}
+                              >
+                                {scoreInputInvalid
+                                  ? t("accounts.schedulerScoreRange")
+                                  : t("accounts.schedulerCustomValuePreview", {
+                                      value: formatSignedNumber(
+                                        parsedScoreBias ??
+                                          getEffectiveScoreBias(editingAccount),
                                       ),
-                                  })}
+                                    })}
+                              </div>
                             </div>
-                          </div>
-                        )}
-                      </div>
+                          )}
+                        </div>
 
-                      <div className="rounded-xl border border-border p-4">
-                        <div className="flex items-start justify-between gap-4">
-                          <div>
-                            <div className="text-sm font-semibold text-foreground">
-                              {t("accounts.schedulerSkipWarmLabel")}
-                            </div>
-                            <div className="mt-1 text-xs text-muted-foreground">
-                              {t("accounts.schedulerSkipWarmHint")}
-                            </div>
+                        {/* 基础并发 */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors">
+                          <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                            <Zap className="size-4 text-amber-500" />
+                            <span>{t("accounts.schedulerConcurrencyLabel")}</span>
                           </div>
-                          <button
-                            type="button"
-                            role="switch"
-                            aria-label={t("accounts.schedulerSkipWarmLabel")}
-                            aria-checked={skipWarmTier}
-                            onClick={() =>
-                              setSkipWarmTier((current) => !current)
-                            }
-                            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 ${skipWarmTier ? "bg-primary" : "bg-muted"}`}
-                          >
-                            <span
-                              className={`pointer-events-none block size-4 rounded-full bg-white shadow transition-transform ${skipWarmTier ? "translate-x-4" : "translate-x-0"}`}
+                          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                            {t("accounts.schedulerConcurrencyHint")}
+                          </p>
+                          <div className="mt-3.5 flex gap-2">
+                            <TogglePill
+                              active={concurrencyMode === "default"}
+                              onClick={() => setConcurrencyMode("default")}
+                              label={t("accounts.schedulerConcurrencyAuto")}
                             />
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-border p-4 md:col-span-2">
-                        <div className="text-sm font-semibold text-foreground">
-                          {t("accounts.dispatchCountLimitTitle")}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {t("accounts.dispatchCountLimitHint")}
-                        </div>
-                        <div className="mt-3">
-                          <label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                            {t("accounts.dispatchCountLimitLabel")}
-                          </label>
-                          <Input
-                            inputMode="numeric"
-                            value={editDispatchCountLimitInput}
-                            placeholder={t(
-                              "accounts.dispatchCountLimitPlaceholder",
-                            )}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                              setEditDispatchCountLimitInput(event.target.value)
-                            }
-                          />
-                          <div
-                            className={`mt-1.5 text-xs ${editDispatchCountLimitInvalid ? "text-red-500" : "text-muted-foreground"}`}
-                          >
-                            {editDispatchCountLimitInvalid
-                              ? t("accounts.dispatchCountLimitRange")
-                              : editDispatchCountLimitPreview
-                                ? t("accounts.dispatchCountLimitStatus", {
-                                    used:
-                                      editingAccount.dispatch_count_used ?? 0,
-                                    limit: editDispatchCountLimitPreview,
-                                  })
-                                : t("accounts.dispatchCountLimitDisabled")}
+                            <TogglePill
+                              active={concurrencyMode === "custom"}
+                              onClick={() => setConcurrencyMode("custom")}
+                              label={t("accounts.schedulerCustom")}
+                            />
                           </div>
-                          {editDispatchCountResetTime ? (
+                          {concurrencyMode === "default" ? (
+                            <div className="mt-3 flex items-center justify-between rounded-lg border border-border/60 bg-muted/20 px-3.5 py-2.5 text-xs">
+                              <span className="text-muted-foreground font-medium">当前基础并发</span>
+                              <span className="font-mono font-semibold text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                                {getEffectiveBaseConcurrency(editingAccount)}
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="mt-3 space-y-2">
+                              <Input
+                                inputMode="numeric"
+                                value={concurrencyInput}
+                                onChange={(
+                                  event: ChangeEvent<HTMLInputElement>,
+                                ) => setConcurrencyInput(event.target.value)}
+                                placeholder={t(
+                                  "accounts.schedulerConcurrencyPlaceholder",
+                                )}
+                              />
+                              <div
+                                className={`text-xs ${concurrencyInputInvalid ? "text-red-500" : "text-muted-foreground"}`}
+                              >
+                                {concurrencyInputInvalid
+                                  ? t("accounts.schedulerConcurrencyRange")
+                                  : t("accounts.schedulerCustomValuePreview", {
+                                      value:
+                                        parsedBaseConcurrency ??
+                                        getEffectiveBaseConcurrency(
+                                          editingAccount,
+                                        ),
+                                    })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 调度优先级 */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
+                          <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                            <Sliders className="size-4 text-indigo-500" />
+                            <span>{t("accounts.schedulerPriorityTitle")}</span>
+                          </div>
+                          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                            {t("accounts.schedulerPriorityHint")}
+                          </p>
+                          <div className="mt-3">
+                            <Input
+                              inputMode="numeric"
+                              value={editSchedulerPriorityInput}
+                              placeholder={t(
+                                "accounts.schedulerPriorityPlaceholder",
+                              )}
+                              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                setEditSchedulerPriorityInput(event.target.value)
+                              }
+                            />
                             <div
-                              className="mt-1 text-xs text-muted-foreground"
-                              title={editDispatchCountResetTime.title}
+                              className={`mt-1.5 text-xs ${editSchedulerPriorityInvalid ? "text-red-500" : "text-muted-foreground"}`}
                             >
-                              {t("accounts.dispatchCountLimitResetAt", {
-                                time: editDispatchCountResetTime.label,
-                              })}
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-border p-4 md:col-span-2">
-                        <div className="text-sm font-semibold text-foreground">
-                          {t("accounts.schedulerPriorityTitle")}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {t("accounts.schedulerPriorityHint")}
-                        </div>
-                        <div className="mt-3">
-                          <label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                            {t("accounts.schedulerPriorityLabel")}
-                          </label>
-                          <Input
-                            inputMode="numeric"
-                            value={editSchedulerPriorityInput}
-                            placeholder={t(
-                              "accounts.schedulerPriorityPlaceholder",
-                            )}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                              setEditSchedulerPriorityInput(event.target.value)
-                            }
-                          />
-                          <div
-                            className={`mt-1.5 text-xs ${editSchedulerPriorityInvalid ? "text-red-500" : "text-muted-foreground"}`}
-                          >
-                            {editSchedulerPriorityInvalid
-                              ? t("accounts.schedulerPriorityRange")
-                              : t("accounts.schedulerPriorityDefault")}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-border p-4 md:col-span-2">
-                        <div className="text-sm font-semibold text-foreground">
-                          {t("accounts.autoPauseTitle")}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {t("accounts.autoPauseHint")}
-                        </div>
-                        <div className="mt-4 flex flex-col gap-3 border-b border-border pb-4 sm:flex-row sm:items-center sm:justify-between">
-                          <div className="min-w-0">
-                            <div className="text-sm font-semibold text-foreground">
-                              {t("accounts.ignoreUsageLimitStatus")}
-                            </div>
-                            <div className="mt-1 text-xs text-muted-foreground">
-                              {t("accounts.ignoreUsageLimitStatusHint")}
+                              {editSchedulerPriorityInvalid
+                                ? t("accounts.schedulerPriorityRange")
+                                : t("accounts.schedulerPriorityDefault")}
                             </div>
                           </div>
-                          <div className="flex shrink-0 flex-wrap gap-2">
-                            <TogglePill
-                              active={editIgnoreUsageLimitStatusMode === "inherit"}
-                              onClick={() => setEditIgnoreUsageLimitStatusMode("inherit")}
-                              label={t("accounts.ignoreUsageLimitStatusInherit")}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 分组 2: 熔断与限流 */}
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground/80 pt-1">
+                        <ShieldCheck className="size-3.5 text-primary" />
+                        <span>{t("accounts.categorySafety")}</span>
+                        <div className="h-px flex-1 bg-border/60" />
+                      </div>
+
+                      <div className="grid gap-4 md:grid-cols-2">
+                        {/* 跳过预热层级 */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors">
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                                <Flame className="size-4 text-orange-500" />
+                                <span>{t("accounts.schedulerSkipWarmLabel")}</span>
+                              </div>
+                              <p className="text-xs text-muted-foreground leading-relaxed">
+                                {t("accounts.schedulerSkipWarmHint")}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-label={t("accounts.schedulerSkipWarmLabel")}
+                              aria-checked={skipWarmTier}
+                              onClick={() =>
+                                setSkipWarmTier((current) => !current)
+                              }
+                              className={`relative inline-flex h-5.5 w-10 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 ${skipWarmTier ? "bg-primary" : "bg-muted"}`}
+                            >
+                              <span
+                                className={`pointer-events-none block size-4.5 rounded-full bg-white shadow-xs transition-transform ${skipWarmTier ? "translate-x-4.5" : "translate-x-0"}`}
+                              />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* 请求次数限流 */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors">
+                          <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                            <Timer className="size-4 text-purple-500" />
+                            <span>{t("accounts.dispatchCountLimitTitle")}</span>
+                          </div>
+                          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                            {t("accounts.dispatchCountLimitHint")}
+                          </p>
+                          <div className="mt-3">
+                            <Input
+                              inputMode="numeric"
+                              value={editDispatchCountLimitInput}
+                              placeholder={t(
+                                "accounts.dispatchCountLimitPlaceholder",
+                              )}
+                              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                setEditDispatchCountLimitInput(event.target.value)
+                              }
                             />
-                            <TogglePill
-                              active={editIgnoreUsageLimitStatusMode === "enabled"}
-                              onClick={() => setEditIgnoreUsageLimitStatusMode("enabled")}
-                              label={t("common.enabled")}
+                            <div
+                              className={`mt-1.5 text-xs ${editDispatchCountLimitInvalid ? "text-red-500" : "text-muted-foreground"}`}
+                            >
+                              {editDispatchCountLimitInvalid
+                                ? t("accounts.dispatchCountLimitRange")
+                                : editDispatchCountLimitPreview
+                                  ? t("accounts.dispatchCountLimitStatus", {
+                                      used:
+                                        editingAccount.dispatch_count_used ?? 0,
+                                      limit: editDispatchCountLimitPreview,
+                                    })
+                                  : t("accounts.dispatchCountLimitDisabled")}
+                            </div>
+                            {editDispatchCountResetTime ? (
+                              <div
+                                className="mt-1 text-xs text-muted-foreground"
+                                title={editDispatchCountResetTime.title}
+                              >
+                                {t("accounts.dispatchCountLimitResetAt", {
+                                  time: editDispatchCountResetTime.label,
+                                })}
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+
+                        {/* 用量自动暂停 */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
+                          <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                            <ShieldAlert className="size-4 text-rose-500" />
+                            <span>{t("accounts.autoPauseTitle")}</span>
+                          </div>
+                          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                            {t("accounts.autoPauseHint")}
+                          </p>
+                          <div className="mt-3.5 flex flex-col gap-3 rounded-lg border border-border/50 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-foreground">
+                                {t("accounts.ignoreUsageLimitStatus")}
+                              </div>
+                              <div className="mt-0.5 text-xs text-muted-foreground">
+                                {t("accounts.ignoreUsageLimitStatusHint")}
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 flex-wrap gap-2">
+                              <TogglePill
+                                active={editIgnoreUsageLimitStatusMode === "inherit"}
+                                onClick={() => setEditIgnoreUsageLimitStatusMode("inherit")}
+                                label={t("accounts.ignoreUsageLimitStatusInherit")}
+                              />
+                              <TogglePill
+                                active={editIgnoreUsageLimitStatusMode === "enabled"}
+                                onClick={() => setEditIgnoreUsageLimitStatusMode("enabled")}
+                                label={t("common.enabled")}
+                              />
+                              <TogglePill
+                                active={editIgnoreUsageLimitStatusMode === "disabled"}
+                                onClick={() => setEditIgnoreUsageLimitStatusMode("disabled")}
+                                label={t("common.disabled")}
+                              />
+                            </div>
+                          </div>
+                          <div className="mt-3.5 grid gap-4 md:grid-cols-2">
+                            <QuotaAutoPauseWindowEditor
+                              disabledLabel={t("accounts.autoPause5hDisabled")}
+                              disabledHint={t("accounts.autoPauseDisabledHint")}
+                              thresholdLabel={t(
+                                "accounts.autoPause5hThreshold",
+                              )}
+                              thresholdHint={t("accounts.autoPauseThresholdHint")}
+                              thresholdPlaceholder={t(
+                                "accounts.autoPauseThresholdPlaceholder",
+                              )}
+                              thresholdValue={editAutoPause5hThresholdInput}
+                              thresholdInvalid={editAutoPause5hThresholdInvalid}
+                              disabled={editAutoPause5hDisabled}
+                              invalidLabel={t("accounts.autoPauseThresholdRange")}
+                              onThresholdChange={setEditAutoPause5hThresholdInput}
+                              onDisabledChange={setEditAutoPause5hDisabled}
                             />
-                            <TogglePill
-                              active={editIgnoreUsageLimitStatusMode === "disabled"}
-                              onClick={() => setEditIgnoreUsageLimitStatusMode("disabled")}
-                              label={t("common.disabled")}
+                            <QuotaAutoPauseWindowEditor
+                              disabledLabel={t("accounts.autoPause7dDisabled")}
+                              disabledHint={t("accounts.autoPauseDisabledHint")}
+                              thresholdLabel={t(
+                                "accounts.autoPause7dThreshold",
+                              )}
+                              thresholdHint={t("accounts.autoPauseThresholdHint")}
+                              thresholdPlaceholder={t(
+                                "accounts.autoPauseThresholdPlaceholder",
+                              )}
+                              thresholdValue={editAutoPause7dThresholdInput}
+                              thresholdInvalid={editAutoPause7dThresholdInvalid}
+                              disabled={editAutoPause7dDisabled}
+                              invalidLabel={t("accounts.autoPauseThresholdRange")}
+                              onThresholdChange={setEditAutoPause7dThresholdInput}
+                              onDisabledChange={setEditAutoPause7dDisabled}
                             />
                           </div>
                         </div>
-                        <div className="mt-4 grid gap-4 md:grid-cols-2">
-                          <QuotaAutoPauseWindowEditor
-                            disabledLabel={t("accounts.autoPause5hDisabled")}
-                            disabledHint={t("accounts.autoPauseDisabledHint")}
-                            thresholdLabel={t(
-                              "accounts.autoPause5hThreshold",
-                            )}
-                            thresholdHint={t("accounts.autoPauseThresholdHint")}
-                            thresholdPlaceholder={t(
-                              "accounts.autoPauseThresholdPlaceholder",
-                            )}
-                            thresholdValue={editAutoPause5hThresholdInput}
-                            thresholdInvalid={editAutoPause5hThresholdInvalid}
-                            disabled={editAutoPause5hDisabled}
-                            invalidLabel={t("accounts.autoPauseThresholdRange")}
-                            onThresholdChange={setEditAutoPause5hThresholdInput}
-                            onDisabledChange={setEditAutoPause5hDisabled}
-                          />
-                          <QuotaAutoPauseWindowEditor
-                            disabledLabel={t("accounts.autoPause7dDisabled")}
-                            disabledHint={t("accounts.autoPauseDisabledHint")}
-                            thresholdLabel={t(
-                              "accounts.autoPause7dThreshold",
-                            )}
-                            thresholdHint={t("accounts.autoPauseThresholdHint")}
-                            thresholdPlaceholder={t(
-                              "accounts.autoPauseThresholdPlaceholder",
-                            )}
-                            thresholdValue={editAutoPause7dThresholdInput}
-                            thresholdInvalid={editAutoPause7dThresholdInvalid}
-                            disabled={editAutoPause7dDisabled}
-                            invalidLabel={t("accounts.autoPauseThresholdRange")}
-                            onThresholdChange={setEditAutoPause7dThresholdInput}
-                            onDisabledChange={setEditAutoPause7dDisabled}
-                          />
-                        </div>
+                      </div>
+                    </div>
+
+                    {/* 分组 3: 网络、路由与身份 */}
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground/80 pt-1">
+                        <Globe className="size-3.5 text-primary" />
+                        <span>{t("accounts.categoryNetwork")}</span>
+                        <div className="h-px flex-1 bg-border/60" />
                       </div>
 
-                      <div className="rounded-xl border border-border p-4 md:col-span-2">
-                        <div className="text-sm font-semibold text-foreground">
-                          {t("accounts.allowedAPIKeysLabel")}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {t("accounts.allowedAPIKeysHint")}
-                        </div>
-                        <div className="mt-3">
-                          <APIKeyMultiSelect
-                            options={apiKeys}
-                            value={allowedAPIKeySelection}
-                            disabled={apiKeys.length === 0}
-                            onChange={setAllowedAPIKeySelection}
-                            allLabel={t("accounts.allowedAPIKeysAll")}
-                            selectedLabel={t(
-                              "accounts.allowedAPIKeysSelected",
-                              {
-                                count: allowedAPIKeySelection.length,
-                              },
-                            )}
-                            placeholder={t("accounts.allowedAPIKeysPlaceholder")}
-                            emptyLabel={t("accounts.allowedAPIKeysNoOptions")}
-                            emptyHint={t("accounts.allowedAPIKeysNoOptionsHint")}
-                          />
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-border p-4 md:col-span-2">
-                        {renderProxyInput({
-                          value: editProxyUrl,
-                          testKey: "edit-account-proxy",
-                          onChange: setEditProxyUrl,
-                        })}
-                      </div>
-
-                      <div className="rounded-xl border border-border p-4 md:col-span-2">
-                        {renderCustomHeadersTextarea({
-                          value: editCustomHeadersText,
-                          onChange: setEditCustomHeadersText,
-                        })}
-                      </div>
-
-                      {isCodexOfficialAccount(editingAccount) ? (
-                        <div className="rounded-xl border border-border p-4 md:col-span-2">
-                          <div className="text-sm font-semibold text-foreground">
-                            {t("accounts.codexFingerprintModeTitle")}
+                      <div className="grid gap-4 md:grid-cols-2">
+                        {/* 允许绑定的 API Keys */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
+                          <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                            <KeyRound className="size-4 text-emerald-500" />
+                            <span>{t("accounts.allowedAPIKeysLabel")}</span>
                           </div>
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            {t("accounts.codexFingerprintModeHint")}
+                          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                            {t("accounts.allowedAPIKeysHint")}
+                          </p>
+                          <div className="mt-3">
+                            <APIKeyMultiSelect
+                              options={apiKeys}
+                              value={allowedAPIKeySelection}
+                              disabled={apiKeys.length === 0}
+                              onChange={setAllowedAPIKeySelection}
+                              allLabel={t("accounts.allowedAPIKeysAll")}
+                              selectedLabel={t(
+                                "accounts.allowedAPIKeysSelected",
+                                {
+                                  count: allowedAPIKeySelection.length,
+                                },
+                              )}
+                              placeholder={t("accounts.allowedAPIKeysPlaceholder")}
+                              emptyLabel={t("accounts.allowedAPIKeysNoOptions")}
+                              emptyHint={t("accounts.allowedAPIKeysNoOptionsHint")}
+                            />
                           </div>
-                          <Select
+                        </div>
+
+                        {/* 代理服务器 */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
+                          {renderProxyInput({
+                            value: editProxyUrl,
+                            testKey: "edit-account-proxy",
+                            onChange: setEditProxyUrl,
+                          })}
+                        </div>
+
+                        {/* 设备指纹收敛 */}
+                        {isCodexOfficialAccount(editingAccount) ? (
+                          <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
+                            <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                              <Fingerprint className="size-4 text-teal-500" />
+                              <span>{t("accounts.codexFingerprintModeTitle")}</span>
+                            </div>
+                            <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                              {t("accounts.codexFingerprintModeHint")}
+                            </p>
+                            <Select
+                              className="mt-3"
+                              value={editCodexFingerprintMode}
+                              onValueChange={(value) =>
+                                setEditCodexFingerprintMode(
+                                  value as CodexFingerprintMode,
+                                )
+                              }
+                              options={codexFingerprintModeOptions(t)}
+                            />
+                            <div className="mt-2 rounded-lg border border-border/50 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                              {codexFingerprintModeDetail(
+                                t,
+                                editCodexFingerprintMode,
+                              )}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {/* 自定义请求头 */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
+                          {renderCustomHeadersTextarea({
+                            value: editCustomHeadersText,
+                            onChange: setEditCustomHeadersText,
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 分组 4: 组织与属性 */}
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground/80 pt-1">
+                        <Tag className="size-3.5 text-primary" />
+                        <span>{t("accounts.categoryOrg")}</span>
+                        <div className="h-px flex-1 bg-border/60" />
+                      </div>
+
+                      <div className="grid gap-4 md:grid-cols-2">
+                        {/* 标签 */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors">
+                          <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                            <Tag className="size-4 text-violet-500" />
+                            <span>{t("accounts.tagsLabel")}</span>
+                          </div>
+                          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                            {t("accounts.tagsHint")}
+                          </p>
+                          <ChipInput
                             className="mt-3"
-                            value={editCodexFingerprintMode}
-                            onValueChange={(value) =>
-                              setEditCodexFingerprintMode(
-                                value as CodexFingerprintMode,
-                              )
-                            }
-                            options={codexFingerprintModeOptions(t)}
+                            value={editTags}
+                            onChange={setEditTags}
+                            placeholder={t("accounts.tagsPlaceholder")}
+                            maxVisible={3}
                           />
-                          <div className="mt-1.5 text-xs text-muted-foreground">
-                            {codexFingerprintModeDetail(
-                              t,
-                              editCodexFingerprintMode,
-                            )}
-                          </div>
                         </div>
-                      ) : null}
-                    </div>
 
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div className="rounded-xl border border-border p-4">
-                        <div className="text-sm font-semibold text-foreground">
-                          {t("accounts.tagsLabel")}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {t("accounts.tagsHint")}
-                        </div>
-                        <ChipInput
-                          className="mt-3"
-                          value={editTags}
-                          onChange={setEditTags}
-                          placeholder={t("accounts.tagsPlaceholder")}
-                          maxVisible={3}
-                        />
-                      </div>
-
-                      <div className="rounded-xl border border-border p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="text-sm font-semibold text-foreground">
-                              {t("accounts.groupsLabel")}
+                        {/* 分组 */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                                <Users className="size-4 text-blue-500" />
+                                <span>{t("accounts.groupsLabel")}</span>
+                              </div>
+                              <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                                {t("accounts.groupsHint")}
+                              </p>
                             </div>
-                            <div className="mt-1 text-xs text-muted-foreground">
-                              {t("accounts.groupsHint")}
-                            </div>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="xs"
+                              onClick={() => setShowGroupManager(true)}
+                            >
+                              <FolderOpen className="size-3" />
+                              {t("accounts.groupManage")}
+                            </Button>
                           </div>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="xs"
-                            onClick={() => setShowGroupManager(true)}
-                          >
-                            <FolderOpen className="size-3" />
-                            {t("accounts.groupManage")}
-                          </Button>
-                        </div>
-                        <div className="mt-3">
-                          <AccountGroupMultiSelect
-                            groups={codexGroups}
-                            value={editGroupIds}
-                            onChange={setEditGroupIds}
-                            allLabel={t("accounts.groupsUnbound")}
-                            selectedLabel={t("accounts.groupsSelected", {
-                              count: editGroupIds.length,
-                            })}
-                            placeholder={t("accounts.groupsPlaceholder")}
-                            emptyLabel={t("accounts.groupsNone")}
-                            emptyHint={t("accounts.groupsSelectHint")}
-                            onCreateGroup={handleCreateGroupInline}
-                            createLabel={t("accounts.groupCreate")}
-                            createPlaceholder={t("accounts.groupNamePlaceholder")}
-                            creatingLabel={t("accounts.groupCreating")}
-                            createEmptyHint={t("accounts.groupCreateInlineEmptyHint")}
-                          />
+                          <div className="mt-3">
+                            <AccountGroupMultiSelect
+                              groups={codexGroups}
+                              value={editGroupIds}
+                              onChange={setEditGroupIds}
+                              allLabel={t("accounts.groupsUnbound")}
+                              selectedLabel={t("accounts.groupsSelected", {
+                                count: editGroupIds.length,
+                              })}
+                              placeholder={t("accounts.groupsPlaceholder")}
+                              emptyLabel={t("accounts.groupsNone")}
+                              emptyHint={t("accounts.groupsSelectHint")}
+                              onCreateGroup={handleCreateGroupInline}
+                              createLabel={t("accounts.groupCreate")}
+                              createPlaceholder={t("accounts.groupNamePlaceholder")}
+                              creatingLabel={t("accounts.groupCreating")}
+                              createEmptyHint={t("accounts.groupCreateInlineEmptyHint")}
+                            />
+                          </div>
                         </div>
                       </div>
                     </div>
 
-                    <div className="rounded-xl border border-border bg-white/60 px-4 py-4 dark:bg-white/5">
-                      <div className="text-sm font-semibold text-foreground">
-                        {t("accounts.schedulerPreviewTitle")}
+                    {/* 实时调度预览栏 */}
+                    <div className="rounded-xl border border-border/80 bg-gradient-to-r from-muted/40 via-background to-muted/20 p-4.5 shadow-2xs">
+                      <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                        <Activity className="size-4 text-primary" />
+                        <span>{t("accounts.schedulerPreviewTitle")}</span>
                       </div>
                       <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <PreviewItem
@@ -8752,7 +8851,7 @@ export default function Accounts() {
                         />
                       </div>
                     </div>
-                  </>
+                  </div>
                 )}
               </div>
             ) : null}
@@ -11094,20 +11193,22 @@ function TogglePill({
   active,
   onClick,
   label,
+  className,
 }: {
   active: boolean;
   onClick: () => void;
   label: string;
+  className?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
+      className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all duration-150 ${
         active
-          ? "bg-primary text-primary-foreground"
-          : "bg-muted/50 text-muted-foreground hover:bg-muted"
-      }`}
+          ? "bg-primary text-primary-foreground shadow-2xs ring-1 ring-primary/20"
+          : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground"
+      } ${className ?? ""}`}
     >
       {label}
     </button>
