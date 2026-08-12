@@ -1093,6 +1093,7 @@
     "codexFingerprintModeDeviceDetail": "只收敛安装标识：上游看到 1 台设备，各用户的会话保持独立。",
     "codexFingerprintModeSessionDetail": "收敛安装标识与会话标识，并按客户端会话派生独立线程：上游看到 1 台设备、1 个会话、多个线程，接近单人开多窗口的形态。",
     "codexFingerprintModeFullDetail": "线程标识也等于会话标识：上游看到 1 台设备、1 个会话、1 个线程。最激进，并发请求会全部落在同一线程上。",
+    "quickConfigLoadingDesc": "正在读取完整账号配置。加载完成前不能保存，以免用空值覆盖请求头等详情字段。",
     "openaiModels": "模型列表",
     "openaiModelsAdd": "添加",
     "openaiModelsFetch": "请求 /v1/models",

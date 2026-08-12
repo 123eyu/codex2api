@@ -1093,6 +1093,7 @@
     "codexFingerprintModeDeviceDetail": "Converge the installation id only: upstream sees one device, while each user keeps a separate session.",
     "codexFingerprintModeSessionDetail": "Converge the installation and session ids and derive a per-client-session thread: upstream sees one device, one session and several threads, close to a single user with multiple windows.",
     "codexFingerprintModeFullDetail": "The thread id also equals the session id: upstream sees one device, one session and one thread. Most aggressive — every concurrent request lands on the same thread.",
+    "quickConfigLoadingDesc": "Loading the full account configuration. Save stays disabled until this finishes, so empty list defaults cannot wipe headers or other detail fields.",
     "openaiModels": "Models",
     "openaiModelsAdd": "Add",
     "openaiModelsFetch": "Fetch /v1/models",
