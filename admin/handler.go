@@ -78,11 +78,12 @@ type Handler struct {
 	chartCacheMu   sync.RWMutex
 	chartCacheData map[string]*chartCacheEntry
 
-	// 账号请求统计缓存（分页路径 10 秒 stale-while-revalidate；旧全量路径复用同一份值）
-	reqCountMu        sync.RWMutex
-	reqCountCache     map[int64]*database.AccountRequestCount
-	reqCountExpiresAt time.Time
-	reqCountRefreshMu sync.Mutex
+	// 账号请求统计缓存,按渠道分键(codex/grok 各自刷新互不牵连;旧全量路径
+	// 用 "all" 键)。分页路径 stale-while-revalidate,TTL 见 requestCountCacheTTL。
+	reqCountMu         sync.RWMutex
+	reqCountCache      map[string]*requestCountCacheEntry
+	reqCountRefreshMu  sync.Mutex
+	reqCountRefreshing map[string]bool
 
 	// 管理后台账号分页使用的轻量快照。快照按渠道缓存，只保存筛选、排序和
 	// 当前页定位所需的信息；完整账号响应仍只为当前页构建。
@@ -2431,14 +2432,16 @@ func reflectInt64Field(value interface{}, field string) (int64, bool) {
 	}
 }
 
-// getCachedRequestCounts preserves the legacy full-list behavior while sharing
-// the paged list's ten-second cache.
+// getCachedRequestCounts preserves the legacy full-list behavior: a blocking
+// global aggregation cached under its own key, so it never contends with the
+// per-channel paged caches.
 func (h *Handler) getCachedRequestCounts() map[int64]*database.AccountRequestCount {
+	const cacheKey = "all"
 	h.reqCountMu.RLock()
-	if h.reqCountCache != nil && time.Now().Before(h.reqCountExpiresAt) {
-		cached := h.reqCountCache
+	entry := h.reqCountCache[cacheKey]
+	if entry != nil && time.Now().Before(entry.expiresAt) {
 		h.reqCountMu.RUnlock()
-		return cached
+		return entry.counts
 	}
 	h.reqCountMu.RUnlock()
 
@@ -2449,12 +2452,7 @@ func (h *Handler) getCachedRequestCounts() map[int64]*database.AccountRequestCou
 		log.Printf("获取账号请求统计失败: %v", err)
 		return make(map[int64]*database.AccountRequestCount)
 	}
-
-	h.reqCountMu.Lock()
-	h.reqCountCache = counts
-	h.reqCountExpiresAt = time.Now().Add(requestCountCacheTTL)
-	h.reqCountMu.Unlock()
-
+	h.storeRequestCountCache(cacheKey, counts)
 	return counts
 }
 

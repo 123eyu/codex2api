@@ -2367,6 +2367,13 @@ export default function Accounts() {
   // 若把 stats 写回 data.accounts,任何静默列表刷新都会用基础行整体覆盖,
   // 成本列在 ID 不变时永久变 "-" (issue #499)。
   const [accountPageStats, setAccountPageStats] = useState<Record<string, AccountPageStatsItem>>({});
+  // 用量弹窗里手动刷新官方统计后 bump 一次,强制重拉本页 stats——
+  // 否则官方成本胶囊要等翻页/改筛选才出现,看起来像刷新没生效。
+  const [pageStatsReloadToken, setPageStatsReloadToken] = useState(0);
+  const handleOfficialUsageRefreshed = useCallback(
+    () => setPageStatsReloadToken((token) => token + 1),
+    [],
+  );
   // Codex 视图的统计卡/额度分布/列表/批量操作一律排除 Grok 账号
   // （Grok 账号由顶部切换后的 Grok 页单独统计与管理）。
   const allAccounts = useMemo(
@@ -2432,7 +2439,7 @@ export default function Accounts() {
         console.warn("account page stats load failed:", err);
       });
     return () => controller.abort();
-  }, [accountPageIDsKey]);
+  }, [accountPageIDsKey, pageStatsReloadToken]);
   const usageReloadAttemptsRef = useRef<Map<number, number>>(new Map());
   // 测试连接后需要强制刷新用量的账号 id：即使其用量数据已存在（如已显示 100%），
   // 也要在后台探针跑完后重新拉取，确保进度条更新为最新值。
@@ -2551,6 +2558,28 @@ export default function Accounts() {
       }
     };
   }, [accounts, reloadSilently, providerView]);
+
+  // stats_state 补拉:统计缓存分两层(请求数缓存→列表快照)且都是"先返回旧值
+  // 后台重建",从 stale 转 ready 需要连续两三次轮询。上面的静默刷新退避后间隔
+  // 最长 80s,不补拉的话「统计刷新中…」会常驻几分钟。这里在非 ready 时用 3s
+  // 短间隔追到 ready 为止;带次数上限,防后端统计查询持续失败时退化成常驻轮询。
+  const statsStaleRetriesRef = useRef(0);
+  useEffect(() => {
+    if (loading) return undefined;
+    if (data.statsState === "ready") {
+      statsStaleRetriesRef.current = 0;
+      return undefined;
+    }
+    if (statsStaleRetriesRef.current >= 5) return undefined;
+    const timer = window.setTimeout(() => {
+      if (document.hidden) return;
+      statsStaleRetriesRef.current += 1;
+      void reloadSilently();
+    }, 3000);
+    return () => window.clearTimeout(timer);
+    // 依赖 data 本身(而非 data.statsState):连续两次都返回 stale 时字符串不变,
+    // 只有对象身份变化才能把补拉定时器重新拉起来。
+  }, [loading, data, reloadSilently]);
 
   const accountSummary = {
     totalAccounts: data.summary?.total ?? data.total,
@@ -7749,6 +7778,7 @@ export default function Accounts() {
               // 而这个弹窗就渲染在 StateShell 里 —— 一开积分开关整个界面连同弹窗
               // 就被卸载重建（用量数据重新拉、滚动位置丢失），观感就是"闪一下全刷新"。
               onCreditsReset={() => void reloadSilently()}
+              onOfficialUsageRefreshed={handleOfficialUsageRefreshed}
             />
           )}
 
