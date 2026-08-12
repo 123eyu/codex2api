@@ -1655,6 +1655,9 @@ export interface PromptConversationLock {
   locked_at: ISODateString
   unlocked_at?: ISODateString
   unlock_reason?: string
+  restriction_scope?: 'conversation' | 'user_cooldown'
+  expires_at?: ISODateString
+  remaining_seconds?: number
   created_at: ISODateString
   updated_at: ISODateString
 }
