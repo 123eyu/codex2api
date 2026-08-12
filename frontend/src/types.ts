@@ -8,6 +8,8 @@ export interface ToastState {
 
 export type AccountStatus = 'active' | 'ready' | 'cooldown' | 'error' | 'refreshing' | 'paused' | 'quota_paused' | string
 export type CodexClientMetadataMode = 'auto' | 'always' | 'off'
+/** Codex 官方出站请求的设备指纹收敛档位，默认 off（不收敛）。 */
+export type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 export type ModelCooldownMode = 'off' | 'fixed' | 'adaptive'
 
 export interface StatsChannelCounts {
@@ -110,6 +112,7 @@ export interface AccountRow {
   models?: string[]
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
+  codex_fingerprint_mode?: CodexFingerprintMode
   custom_headers?: Record<string, string> | null
   health_tier?: string
   scheduler_score?: number
@@ -729,6 +732,7 @@ export interface UpdateAccountSchedulerRequest {
   dispatch_count_limit?: number | null
   scheduler_priority?: number | null
   custom_headers?: Record<string, string> | null
+  codex_fingerprint_mode?: CodexFingerprintMode | null
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {

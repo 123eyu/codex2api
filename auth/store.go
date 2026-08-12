@@ -108,6 +108,9 @@ type Account struct {
 	Models                  []string
 	ModelMapping            string
 	CodexClientMetadataMode string
+	// CodexFingerprintMode 见 codex_fingerprint_mode.go：Codex 官方出站请求的
+	// 设备指纹收敛档位（off / device / session / full），默认 off。
+	CodexFingerprintMode string
 	// Codex Agent Identity（auth_mode=agentIdentity）：不存 AT/RT，每次上游请求用
 	// agent_private_key(Ed25519, PKCS#8 base64) 动态签名。AgentTaskID 由 task 注册获得，
 	// 运行时缓存并落库(credentials.task_id)。
@@ -4288,6 +4291,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	models := normalizeModelList(row.GetCredentialStringSlice("models"))
 	modelMapping := strings.TrimSpace(row.GetCredential("model_mapping"))
 	codexClientMetadataMode := NormalizeCodexClientMetadataMode(row.GetCredential("codex_client_metadata_mode"))
+	codexFingerprintMode := NormalizeCodexFingerprintMode(row.GetCredential(CodexFingerprintModeCredentialKey))
 	isOpenAIResponsesAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamOpenAIResponses) && strings.TrimSpace(baseURL) != "" && strings.TrimSpace(apiKey) != ""
 	isGrokAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamGrok) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
 	// Agent Identity：无 AT/RT，凭 agent_private_key 动态签名，不能被下面的空凭据 guard 拒绝。
@@ -4313,6 +4317,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		Models:                  models,
 		ModelMapping:            modelMapping,
 		CodexClientMetadataMode: codexClientMetadataMode,
+		CodexFingerprintMode:    codexFingerprintMode,
 	}
 	if isOpenAIResponsesAccount {
 		account.HealthTier = HealthTierHealthy
@@ -7203,6 +7208,19 @@ func (s *Store) ApplyAccountCustomHeaders(dbID int64, headers map[string]string)
 	}
 	acc.mu.Lock()
 	acc.CustomHeaders = cloneStringMap(headers)
+	acc.mu.Unlock()
+	return true
+}
+
+// ApplyAccountCodexFingerprintMode 把管理端改动的指纹收敛档位同步到运行时账号，
+// 避免等到下一次全量重载才生效。
+func (s *Store) ApplyAccountCodexFingerprintMode(dbID int64, mode string) bool {
+	acc := s.FindByID(dbID)
+	if acc == nil {
+		return false
+	}
+	acc.mu.Lock()
+	acc.CodexFingerprintMode = NormalizeCodexFingerprintMode(mode)
 	acc.mu.Unlock()
 	return true
 }

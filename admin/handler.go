@@ -1022,6 +1022,7 @@ type accountResponse struct {
 	Models                        []string                    `json:"models,omitempty"`
 	ModelMapping                  string                      `json:"model_mapping,omitempty"`
 	CodexClientMetadataMode       string                      `json:"codex_client_metadata_mode,omitempty"`
+	CodexFingerprintMode          string                      `json:"codex_fingerprint_mode,omitempty"`
 	CustomHeaders                 map[string]string           `json:"custom_headers,omitempty"`
 	HealthTier                    string                      `json:"health_tier"`
 	SchedulerScore                float64                     `json:"scheduler_score"`
@@ -1453,6 +1454,7 @@ type updateAccountSchedulerReq struct {
 	SchedulerPriority       json.RawMessage `json:"scheduler_priority"`
 	ProxyURL                json.RawMessage `json:"proxy_url"`
 	CustomHeaders           json.RawMessage `json:"custom_headers"`
+	CodexFingerprintMode    json.RawMessage `json:"codex_fingerprint_mode"`
 }
 
 type accountSchedulerUpdate struct {
@@ -1471,6 +1473,7 @@ type accountSchedulerUpdate struct {
 	SchedulerPriority       database.OptionalNullInt64
 	ProxyURL                database.OptionalString
 	CustomHeaders           optionalCustomHeaders
+	CodexFingerprintMode    database.OptionalString
 	CredentialUpdates       map[string]interface{}
 }
 
@@ -1537,9 +1540,20 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if err != nil {
 		return accountSchedulerUpdate{}, err
 	}
+	// null 视为重置为默认档 off。
+	codexFingerprintMode, err := parseOptionalStringField(req.CodexFingerprintMode, "codex_fingerprint_mode", validateCodexFingerprintMode)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	if codexFingerprintMode.Set {
+		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
+	}
 	credentialUpdates := make(map[string]interface{})
 	if customHeaders.Set {
 		credentialUpdates["custom_headers"] = cloneCustomHeaders(customHeaders.Values)
+	}
+	if codexFingerprintMode.Set {
+		credentialUpdates[auth.CodexFingerprintModeCredentialKey] = codexFingerprintMode.Value
 	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
@@ -1594,8 +1608,17 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 		SchedulerPriority:       schedulerPriority,
 		ProxyURL:                proxyURL,
 		CustomHeaders:           customHeaders,
+		CodexFingerprintMode:    codexFingerprintMode,
 		CredentialUpdates:       credentialUpdates,
 	}, nil
+}
+
+// validateCodexFingerprintMode 允许空串（等价于默认档 off），其余必须是已知档位。
+func validateCodexFingerprintMode(value string) error {
+	if value == "" || auth.IsValidCodexFingerprintMode(value) {
+		return nil
+	}
+	return errors.New("必须是 off、device、session 或 full")
 }
 
 func (u accountSchedulerUpdate) hasChanges() bool {
@@ -1613,7 +1636,8 @@ func (u accountSchedulerUpdate) hasChanges() bool {
 		u.DispatchCountLimit.Set ||
 		u.SchedulerPriority.Set ||
 		u.ProxyURL.Set ||
-		u.CustomHeaders.Set
+		u.CustomHeaders.Set ||
+		u.CodexFingerprintMode.Set
 }
 
 func optionalBoolFromPtr(value *bool) database.OptionalBool {
@@ -1844,6 +1868,9 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 	}
 	if update.CustomHeaders.Set {
 		h.store.ApplyAccountCustomHeaders(id, update.CustomHeaders.Values)
+	}
+	if update.CodexFingerprintMode.Set {
+		h.store.ApplyAccountCodexFingerprintMode(id, update.CodexFingerprintMode.Value)
 	}
 }
 

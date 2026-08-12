@@ -33,6 +33,7 @@ import type {
   AddATAccountRequest,
   AddOpenAIResponsesAccountRequest,
   CodexClientMetadataMode,
+  CodexFingerprintMode,
   UpdateOpenAIResponsesAccountRequest,
   APIKeyRow,
   AccountAnalysisResponse,
@@ -392,6 +393,38 @@ function parseModelTokens(value: string): string[] {
       seen.add(key);
       return true;
     });
+}
+
+/** Codex 官方 OAuth/AT 账号（非 OpenAI Responses 中转、非 Grok），即走 Codex 出站路径的账号。 */
+function isCodexOfficialAccount(account: AccountRow): boolean {
+  return !account.openai_responses_api && !account.grok_api;
+}
+
+function codexFingerprintModeOptions(
+  t: ReturnType<typeof useTranslation>["t"],
+): { value: CodexFingerprintMode; label: string }[] {
+  return [
+    { value: "off", label: t("accounts.codexFingerprintModeOff") },
+    { value: "device", label: t("accounts.codexFingerprintModeDevice") },
+    { value: "session", label: t("accounts.codexFingerprintModeSession") },
+    { value: "full", label: t("accounts.codexFingerprintModeFull") },
+  ];
+}
+
+function codexFingerprintModeDetail(
+  t: ReturnType<typeof useTranslation>["t"],
+  mode: CodexFingerprintMode,
+): string {
+  switch (mode) {
+    case "device":
+      return t("accounts.codexFingerprintModeDeviceDetail");
+    case "session":
+      return t("accounts.codexFingerprintModeSessionDetail");
+    case "full":
+      return t("accounts.codexFingerprintModeFullDetail");
+    default:
+      return t("accounts.codexFingerprintModeOffDetail");
+  }
 }
 
 function formatCustomHeadersText(
@@ -1499,6 +1532,8 @@ export default function Accounts() {
   >([]);
   const [editProxyUrl, setEditProxyUrl] = useState("");
   const [editCustomHeadersText, setEditCustomHeadersText] = useState("");
+  const [editCodexFingerprintMode, setEditCodexFingerprintMode] =
+    useState<CodexFingerprintMode>("off");
   const [testingProxyKey, setTestingProxyKey] = useState<string | null>(null);
   // 代理池条目：账号表单里"从代理池选择"下拉的数据源。加载失败静默留空
   // （选择器为空时自动隐藏，不影响手动填代理）。
@@ -1708,6 +1743,12 @@ export default function Accounts() {
     useState(false);
   const [batchSchedulerPriorityInput, setBatchSchedulerPriorityInput] =
     useState("");
+  const [
+    batchUpdateCodexFingerprintMode,
+    setBatchUpdateCodexFingerprintMode,
+  ] = useState(false);
+  const [batchCodexFingerprintMode, setBatchCodexFingerprintMode] =
+    useState<CodexFingerprintMode>("off");
   const [batchMetaSubmitting, setBatchMetaSubmitting] = useState(false);
   const [showBatchQuotaAutoPauseEditor, setShowBatchQuotaAutoPauseEditor] =
     useState(false);
@@ -4282,6 +4323,8 @@ export default function Accounts() {
     setBatchBaseConcurrencyInput("");
     setBatchUpdateSchedulerPriority(false);
     setBatchSchedulerPriorityInput("");
+    setBatchUpdateCodexFingerprintMode(false);
+    setBatchCodexFingerprintMode("off");
     setShowBatchMetaEditor(true);
   };
 
@@ -4297,6 +4340,8 @@ export default function Accounts() {
     setBatchBaseConcurrencyInput("");
     setBatchUpdateSchedulerPriority(false);
     setBatchSchedulerPriorityInput("");
+    setBatchUpdateCodexFingerprintMode(false);
+    setBatchCodexFingerprintMode("off");
     setShowBatchMetaEditor(true);
   };
 
@@ -4529,7 +4574,8 @@ export default function Accounts() {
     batchUpdateGroups ||
     batchUpdateScoreBias ||
     batchUpdateBaseConcurrency ||
-    batchUpdateSchedulerPriority;
+    batchUpdateSchedulerPriority ||
+    batchUpdateCodexFingerprintMode;
   const batchMetaInvalid =
     batchScoreBiasInvalid ||
     batchBaseConcurrencyInvalid ||
@@ -4559,6 +4605,8 @@ export default function Accounts() {
           schedulerPriority: schedulerPriorityInputToValue(
             batchSchedulerPriorityInput,
           ),
+          updateCodexFingerprintMode: batchUpdateCodexFingerprintMode,
+          codexFingerprintMode: batchCodexFingerprintMode,
         }),
       );
       showToast(
@@ -4780,6 +4828,7 @@ export default function Accounts() {
     );
     setEditProxyUrl(account.proxy_url ?? "");
     setEditCustomHeadersText(formatCustomHeadersText(account.custom_headers));
+    setEditCodexFingerprintMode(account.codex_fingerprint_mode ?? "off");
     setEditTags(account.tags ?? []);
     setEditGroupIds(account.group_ids ?? []);
     setEditOpenAIForm({
@@ -4833,6 +4882,7 @@ export default function Accounts() {
     setAllowedAPIKeySelection([]);
     setEditProxyUrl("");
     setEditCustomHeadersText("");
+    setEditCodexFingerprintMode("off");
     setEditTags([]);
     setEditGroupIds([]);
     setEditOpenAIForm({
@@ -4987,6 +5037,10 @@ export default function Accounts() {
           editSchedulerPriorityInput,
         ),
         custom_headers: parsedCustomHeaders.value,
+        // 指纹收敛只作用于 Codex 官方出站路径，中转/Grok 账号不下发该字段。
+        ...(isCodexOfficialAccount(editingAccount)
+          ? { codex_fingerprint_mode: editCodexFingerprintMode }
+          : {}),
       };
       await api.updateAccountScheduler(editingAccount.id, payload);
       showToast(t("accounts.schedulerSaveSuccess"));
@@ -8585,6 +8639,33 @@ export default function Accounts() {
                           onChange: setEditCustomHeadersText,
                         })}
                       </div>
+
+                      {isCodexOfficialAccount(editingAccount) ? (
+                        <div className="rounded-xl border border-border p-4 md:col-span-2">
+                          <div className="text-sm font-semibold text-foreground">
+                            {t("accounts.codexFingerprintModeTitle")}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {t("accounts.codexFingerprintModeHint")}
+                          </div>
+                          <Select
+                            className="mt-3"
+                            value={editCodexFingerprintMode}
+                            onValueChange={(value) =>
+                              setEditCodexFingerprintMode(
+                                value as CodexFingerprintMode,
+                              )
+                            }
+                            options={codexFingerprintModeOptions(t)}
+                          />
+                          <div className="mt-1.5 text-xs text-muted-foreground">
+                            {codexFingerprintModeDetail(
+                              t,
+                              editCodexFingerprintMode,
+                            )}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className="grid gap-4 md:grid-cols-2">
@@ -9098,6 +9179,38 @@ export default function Accounts() {
                       {batchSchedulerPriorityInvalid
                         ? t("accounts.schedulerPriorityRange")
                         : t("accounts.batchMetaResetHint")}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-border p-4 md:col-span-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">
+                          {t("accounts.codexFingerprintModeTitle")}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t("accounts.codexFingerprintModeBatchHint")}
+                        </div>
+                      </div>
+                      <Switch
+                        checked={batchUpdateCodexFingerprintMode}
+                        onCheckedChange={setBatchUpdateCodexFingerprintMode}
+                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.codexFingerprintModeTitle")}`}
+                      />
+                    </div>
+                    <Select
+                      className="mt-3"
+                      value={batchCodexFingerprintMode}
+                      onValueChange={(value) =>
+                        setBatchCodexFingerprintMode(
+                          value as CodexFingerprintMode,
+                        )
+                      }
+                      options={codexFingerprintModeOptions(t)}
+                      disabled={!batchUpdateCodexFingerprintMode}
+                    />
+                    <div className="mt-1.5 text-xs text-muted-foreground">
+                      {codexFingerprintModeDetail(t, batchCodexFingerprintMode)}
                     </div>
                   </div>
                 </div>
