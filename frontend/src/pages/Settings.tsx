@@ -1313,6 +1313,7 @@ export default function Settings() {
     codex_ws_busy_patience_sec: 2,
     codex_continue_thinking_enabled: false,
     overflow_auto_compact_enabled: false,
+    compact_via_responses_enabled: false,
     codex_preflight_sse_passthrough_enabled: false,
     codex_continue_max_rounds: 8,
     utls_shutdown_timeout_minutes: 30,
@@ -2960,6 +2961,17 @@ export default function Settings() {
                 <Switch
                   checked={settingsForm.overflow_auto_compact_enabled}
                   onCheckedChange={(checked) => autoSaveBooleanField('overflow_auto_compact_enabled', checked)}
+                />
+              </SettingField>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.compactViaResponses')} description={t('settings.compactViaResponsesDesc')} icon={<Layers className="size-4" />}>
+            <div className={SETTINGS_SWITCH_GRID}>
+              <SettingField label={t('settings.compactViaResponsesEnabled')} description={t('settings.compactViaResponsesEnabledDesc')} layout="switch">
+                <Switch
+                  checked={settingsForm.compact_via_responses_enabled}
+                  onCheckedChange={(checked) => autoSaveBooleanField('compact_via_responses_enabled', checked)}
                 />
               </SettingField>
             </div>

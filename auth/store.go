@@ -2986,6 +2986,7 @@ type Store struct {
 	codexWSBusyOverflowEnabled  atomic.Bool  // busy session 溢出到同账号兄弟连接，默认关闭
 	codexWSBusyPatienceSec      atomic.Int64 // 触发溢出前的短等待（秒），默认 2
 	overflowAutoCompactEnabled  atomic.Bool  // 上下文超窗自动摘要重试（实验性，默认关闭，issue #415）
+	compactViaResponsesEnabled  atomic.Bool  // /v1/responses/compact 改写为 /responses body-signal 压缩，默认关闭
 	firstTokenExcludesWsAcquire atomic.Bool  // 落库 first_token_ms 扣除 WS 取连耗时，默认关闭
 
 	// 前置元数据 SSE 事件立即透传下游（旧版兼容，默认关闭，issue #425）
@@ -3530,6 +3531,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.codexWSBusyOverflowEnabled.Store(settings.CodexWSBusyOverflowEnabled)
 	s.codexWSBusyPatienceSec.Store(int64(database.NormalizeCodexWSBusyPatienceSec(settings.CodexWSBusyPatienceSec)))
 	s.overflowAutoCompactEnabled.Store(settings.OverflowAutoCompactEnabled)
+	s.compactViaResponsesEnabled.Store(settings.CompactViaResponsesEnabled)
 	s.codexPreflightSSEPassthroughEnabled.Store(settings.CodexPreflightSSEPassthroughEnabled)
 	s.firstTokenExcludesWsAcquire.Store(settings.FirstTokenExcludesWsAcquire)
 	s.codexContinueThinkingEnabled.Store(settings.CodexContinueThinkingEnabled)
@@ -3841,6 +3843,22 @@ func (s *Store) OverflowAutoCompactEnabled() bool {
 		return false
 	}
 	return s.overflowAutoCompactEnabled.Load()
+}
+
+// SetCompactViaResponsesEnabled 设置是否把 /v1/responses/compact 改写为 /responses body-signal 压缩。
+func (s *Store) SetCompactViaResponsesEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.compactViaResponsesEnabled.Store(enabled)
+}
+
+// CompactViaResponsesEnabled 返回是否把 /v1/responses/compact 改写为 /responses body-signal 压缩。
+func (s *Store) CompactViaResponsesEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.compactViaResponsesEnabled.Load()
 }
 
 // SetCodexPreflightSSEPassthroughEnabled 设置是否将前置元数据 SSE 事件立即透传下游（旧版兼容）。

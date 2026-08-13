@@ -4507,7 +4507,19 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		// compact（会话压缩续写）刻意保留确定性 IsolateCodexSessionID、不走 resolveUpstreamSessionID
 		// 的默认隔离：压缩本身是对同一会话的延续，需要稳定的 prompt_cache_key 维持缓存连续性。
 		upstreamSessionID := IsolateCodexSessionID(apiKeyID, sessionIdentity.upstreamSeed)
-		resp, reqErr := ExecuteCompactRequest(c.Request.Context(), account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
+		// compact_via_responses_enabled：上游已下线 /responses/compact 专用端点（404），
+		// 开启后官方账号改走 /responses + compaction_trigger 的 body-signal 形态
+		// （强制 HTTP SSE），成功后聚合回 compact 的一次性 JSON。
+		compactViaResponses := CurrentRuntimeSettings().CompactViaResponses
+		upstreamEndpointLabel := "/v1/responses/compact"
+		var resp *http.Response
+		var reqErr error
+		if compactViaResponses {
+			upstreamEndpointLabel = "/v1/responses"
+			resp, reqErr = ExecuteRequest(c.Request.Context(), account, appendCompactionTriggerToResponsesBody(codexBody), upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, false)
+		} else {
+			resp, reqErr = ExecuteCompactRequest(c.Request.Context(), account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
+		}
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
@@ -4578,7 +4590,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				DurationMs:             durationMs,
 				ReasoningEffort:        reasoningEffort,
 				InboundEndpoint:        "/v1/responses/compact",
-				UpstreamEndpoint:       "/v1/responses/compact",
+				UpstreamEndpoint:       upstreamEndpointLabel,
 				ServiceTier:            usageTiers.ServiceTier,
 				RequestedServiceTier:   usageTiers.RequestedServiceTier,
 				ActualServiceTier:      usageTiers.ActualServiceTier,
@@ -4603,8 +4615,15 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			return
 		}
 
-		// 成功：直接透传响应体
-		respBody, readErr := io.ReadAll(resp.Body)
+		// 成功：直接透传响应体（body-signal 兼容模式先把 SSE 聚合成一次性 JSON）
+		var respBody []byte
+		var readErr error
+		var compactFailedPayload []byte
+		if compactViaResponses {
+			respBody, compactFailedPayload, readErr = collectCompactResponsesSSE(resp.Body)
+		} else {
+			respBody, readErr = io.ReadAll(resp.Body)
+		}
 		resp.Body.Close()
 		if readErr != nil {
 			totalDuration := int(time.Since(start).Milliseconds())
@@ -4629,7 +4648,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				DurationMs:           totalDuration,
 				ReasoningEffort:      reasoningEffort,
 				InboundEndpoint:      "/v1/responses/compact",
-				UpstreamEndpoint:     "/v1/responses/compact",
+				UpstreamEndpoint:     upstreamEndpointLabel,
 				ServiceTier:          usageTiers.ServiceTier,
 				RequestedServiceTier: usageTiers.RequestedServiceTier,
 				ActualServiceTier:    usageTiers.ActualServiceTier,
@@ -4646,6 +4665,83 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				continue
 			}
 			api.SendErrorWithStatus(c, api.NewAPIError(api.ErrCodeUpstreamError, "Failed to read upstream response", api.ErrorTypeUpstream), http.StatusBadGateway)
+			return
+		}
+
+		// body-signal 兼容模式：SSE 内的 response.failed 终态按上游错误处理，
+		// 语义对齐传统 compact 链路的 HTTP 非 200 分支（含 encrypted_content 剥离重试）。
+		if compactViaResponses && len(compactFailedPayload) > 0 {
+			failStatus := responseFailedStatusCode(compactFailedPayload)
+			if isExplicitUpstreamCyberPolicy(compactFailedPayload) {
+				failStatus = http.StatusBadRequest
+			}
+			errBody := responseFailedErrorBody(compactFailedPayload)
+
+			if !invalidEncryptedContentRetried && isInvalidEncryptedContentError(failStatus, errBody) {
+				strippedRawBody, rawChanged := stripInvalidEncryptedContentFromResponsesBody(rawBody)
+				strippedCodexBody, codexChanged := stripInvalidEncryptedContentFromResponsesBody(codexBody)
+				if rawChanged || codexChanged {
+					invalidEncryptedContentRetried = true
+					if rawChanged {
+						rawBody = strippedRawBody
+						openAIResponsesBody = PrepareOpenAIResponsesCompactBody(rawBody)
+					}
+					if codexChanged {
+						codexBody = strippedCodexBody
+					}
+					log.Printf("compact(body-signal) 上游拒绝 encrypted_content，已移除加密 reasoning 上下文并重试一次 (attempt %d)", attempt+1)
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					continue
+				}
+			}
+
+			if kind := classifyHTTPFailure(failStatus); kind != "" {
+				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
+			}
+			SyncCodexUsageState(h.store, account, resp)
+			h.store.Release(account)
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			excludeAccounts[account.ID()] = true
+
+			logUpstreamError("/v1/responses/compact", failStatus, logModel, account.ID(), errBody)
+			promptPolicyIncidentID := acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/responses/compact", logModel, errBody, upstreamCyberPolicyAttempt{
+				Transport: "http", StatusCode: failStatus, AccountID: account.ID(), AttemptIndex: attempt + 1,
+			}))
+			decision := h.applyResponseFailedCooldown(account, compactFailedPayload, resp, effectiveModel)
+			shouldRetry := shouldRetryHTTPStatus(failStatus, errBody, &generalRetries, &rateLimitRetries, maxRetries, h.effectiveMaxRateLimitRetries(account, maxRateLimitRetries))
+			usageTiers := resolveUsageServiceTiers("", serviceTier)
+			h.logUsageForRequest(c, &database.UsageLogInput{
+				AccountID:              account.ID(),
+				Endpoint:               "/v1/responses/compact",
+				Model:                  logModel,
+				EffectiveModel:         logEffectiveModel,
+				StatusCode:             failStatus,
+				DurationMs:             durationMs,
+				ReasoningEffort:        reasoningEffort,
+				InboundEndpoint:        "/v1/responses/compact",
+				UpstreamEndpoint:       upstreamEndpointLabel,
+				ServiceTier:            usageTiers.ServiceTier,
+				RequestedServiceTier:   usageTiers.RequestedServiceTier,
+				ActualServiceTier:      usageTiers.ActualServiceTier,
+				BillingServiceTier:     usageTiers.BillingServiceTier,
+				IsRetryAttempt:         shouldRetry,
+				AttemptIndex:           attempt + 1,
+				UpstreamErrorKind:      upstreamErrorKind(failStatus, errBody, decision),
+				ErrorMessage:           usageLogErrorMessage(failStatus, errBody),
+				PromptPolicyIncidentID: promptPolicyIncidentID,
+			})
+
+			if shouldRetry {
+				lastStatusCode = failStatus
+				lastBody = errBody
+				if !h.waitBeforeRetry(c.Request.Context()) {
+					return
+				}
+				continue
+			}
+
+			h.sendFinalUpstreamError(c, failStatus, errBody)
 			return
 		}
 
@@ -4679,7 +4775,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			CachedTokens:         cachedTokens,
 			ReasoningEffort:      reasoningEffort,
 			InboundEndpoint:      "/v1/responses/compact",
-			UpstreamEndpoint:     "/v1/responses/compact",
+			UpstreamEndpoint:     upstreamEndpointLabel,
 			ServiceTier:          usageTiers.ServiceTier,
 			RequestedServiceTier: usageTiers.RequestedServiceTier,
 			ActualServiceTier:    usageTiers.ActualServiceTier,
