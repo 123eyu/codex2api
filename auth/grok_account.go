@@ -347,8 +347,12 @@ func (a *Account) GrokChannelSupportsModel(model string) bool {
 		return false
 	}
 	model = strings.TrimSpace(model)
-	candidates := a.Models
-	if len(candidates) == 0 && a.grokRouting != nil && a.grokRouting.CatalogKnown {
+	// 不复用 a.Models 的底层数组做 append:len==0 但 cap>0 时,两个并发请求会
+	// 在共享 RLock 下向同一空闲容量写入,构成写-写竞态。目录分支从 nil 开始。
+	var candidates []string
+	if len(a.Models) > 0 {
+		candidates = a.Models
+	} else if a.grokRouting != nil && a.grokRouting.CatalogKnown {
 		for _, route := range a.grokRouting.Models {
 			if route.Hidden || (a.GrokAuthKindLocked() == GrokAuthKindAPIKey && route.SupportedInAPI != nil && !*route.SupportedInAPI) {
 				continue
@@ -360,9 +364,9 @@ func (a *Account) GrokChannelSupportsModel(model string) bool {
 	// confused with "catalog has never been fetched" and reopen defaults.
 	if len(candidates) == 0 && (a.grokRouting == nil || !a.grokRouting.CatalogKnown) {
 		if a.GrokAuthKindLocked() == GrokAuthKindAPIKey {
-			candidates = []string{"grok-4.5", "grok-4", "grok-3-fast", "grok-3", "grok-2"}
+			candidates = GrokAPIKeyDefaultModelIDs()
 		} else {
-			candidates = []string{"grok-4.5"}
+			candidates = GrokOAuthDefaultModelIDs()
 		}
 	}
 	for _, candidate := range candidates {
