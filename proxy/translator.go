@@ -1848,7 +1848,18 @@ func normalizeResponsesFunctionTools(body map[string]any) bool {
 	if !ok {
 		return false
 	}
+	kept, modified := normalizeFunctionToolsInArray(tools)
+	if modified {
+		body["tools"] = kept
+	}
+	return modified
+}
 
+// normalizeFunctionToolsInArray 处理一组工具声明的「形态」问题：补全缺失的 type、
+// 把 Chat 形态的 function 子对象摊平到顶层、剔除无法识别的项。必须在
+// normalizeResponsesToolSchema 之前跑——后者靠顶层 type 判断是不是 function 工具，
+// 缺 type 就拿不到 parameters 根节点的 object 兜底。
+func normalizeFunctionToolsInArray(tools []any) ([]any, bool) {
 	modified := false
 	kept := make([]any, 0, len(tools))
 	for _, rawTool := range tools {
@@ -1912,10 +1923,7 @@ func normalizeResponsesFunctionTools(body map[string]any) bool {
 		delete(tool, "function")
 		modified = true
 	}
-	if modified {
-		body["tools"] = kept
-	}
-	return modified
+	return kept, modified
 }
 
 func normalizeResponsesToolChoice(body map[string]any) bool {
@@ -2755,6 +2763,74 @@ var unsupportedSchemaKeys = map[string]bool{
 	"maxProperties":    true,
 }
 
+// 值为「名称 → 子 schema」映射的关键字。`definitions` 是 draft-07 的写法，
+// pydantic v1 和旧版 zod-to-json-schema 都生成它而不是 `$defs`。
+var schemaSubSchemaMapKeys = []string{
+	"properties",
+	"patternProperties",
+	"dependentSchemas",
+	"$defs",
+	"definitions",
+}
+
+// 值为子 schema 数组的关键字。`prefixItems` 是 draft 2020-12 的 tuple 写法。
+var schemaSubSchemaListKeys = []string{"allOf", "anyOf", "oneOf", "prefixItems"}
+
+// 值为单个子 schema 的关键字。
+var schemaSubSchemaKeys = []string{
+	"additionalProperties",
+	"not",
+	"if",
+	"then",
+	"else",
+	"propertyNames",
+	"contains",
+}
+
+// forEachSubSchema 遍历 schema 的全部直接子 schema。所有递归清洗函数都必须走
+// 这里，而不是各自复制一份下钻逻辑——否则新增一种 schema 关键字要改多处，漏一处
+// 就静默放行坏 schema（`definitions` 与 tuple 形态的 `items` 就是这么漏的）。
+func forEachSubSchema(schema map[string]interface{}, visit func(map[string]interface{})) {
+	for _, key := range schemaSubSchemaMapKeys {
+		entries, ok := schema[key].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, v := range entries {
+			if sub, ok := v.(map[string]interface{}); ok {
+				visit(sub)
+			}
+		}
+	}
+	for _, key := range schemaSubSchemaListKeys {
+		arr, ok := schema[key].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, item := range arr {
+			if sub, ok := item.(map[string]interface{}); ok {
+				visit(sub)
+			}
+		}
+	}
+	for _, key := range schemaSubSchemaKeys {
+		if sub, ok := schema[key].(map[string]interface{}); ok {
+			visit(sub)
+		}
+	}
+	// items 有两种合法形态：单个 schema，或 draft-07 tuple 校验的 schema 数组。
+	switch items := schema["items"].(type) {
+	case map[string]interface{}:
+		visit(items)
+	case []interface{}:
+		for _, item := range items {
+			if sub, ok := item.(map[string]interface{}); ok {
+				visit(sub)
+			}
+		}
+	}
+}
+
 // stripUnsupportedSchemaKeys 递归删除 schema 中上游不支持的关键字
 func stripUnsupportedSchemaKeys(schema map[string]interface{}) {
 	for key := range unsupportedSchemaKeys {
@@ -2767,35 +2843,7 @@ func stripUnsupportedSchemaKeys(schema map[string]interface{}) {
 	if rawType, exists := schema["type"]; exists && rawType == nil {
 		delete(schema, "type")
 	}
-	if props, ok := schema["properties"].(map[string]interface{}); ok {
-		for _, v := range props {
-			if sub, ok := v.(map[string]interface{}); ok {
-				stripUnsupportedSchemaKeys(sub)
-			}
-		}
-	}
-	if items, ok := schema["items"].(map[string]interface{}); ok {
-		stripUnsupportedSchemaKeys(items)
-	}
-	for _, key := range []string{"allOf", "anyOf", "oneOf"} {
-		if arr, ok := schema[key].([]interface{}); ok {
-			for _, item := range arr {
-				if sub, ok := item.(map[string]interface{}); ok {
-					stripUnsupportedSchemaKeys(sub)
-				}
-			}
-		}
-	}
-	if addProps, ok := schema["additionalProperties"].(map[string]interface{}); ok {
-		stripUnsupportedSchemaKeys(addProps)
-	}
-	if defs, ok := schema["$defs"].(map[string]interface{}); ok {
-		for _, v := range defs {
-			if sub, ok := v.(map[string]interface{}); ok {
-				stripUnsupportedSchemaKeys(sub)
-			}
-		}
-	}
+	forEachSubSchema(schema, stripUnsupportedSchemaKeys)
 }
 
 func sanitizeSchemaForUpstream(schema map[string]interface{}) {
@@ -3056,6 +3104,8 @@ func normalizeResponsesAdditionalToolSchemas(body map[string]any) {
 		if !ok {
 			continue
 		}
+		tools, _ = normalizeFunctionToolsInArray(tools)
+		item["tools"] = tools
 		for _, rawTool := range tools {
 			normalizeResponsesToolSchema(rawTool, nil)
 		}
@@ -3107,35 +3157,7 @@ func normalizeSchemaRequiredFields(schema map[string]interface{}) {
 			}
 		}
 	}
-	if props, ok := schema["properties"].(map[string]interface{}); ok {
-		for _, v := range props {
-			if sub, ok := v.(map[string]interface{}); ok {
-				normalizeSchemaRequiredFields(sub)
-			}
-		}
-	}
-	if items, ok := schema["items"].(map[string]interface{}); ok {
-		normalizeSchemaRequiredFields(items)
-	}
-	for _, key := range []string{"allOf", "anyOf", "oneOf"} {
-		if arr, ok := schema[key].([]interface{}); ok {
-			for _, item := range arr {
-				if sub, ok := item.(map[string]interface{}); ok {
-					normalizeSchemaRequiredFields(sub)
-				}
-			}
-		}
-	}
-	if addProps, ok := schema["additionalProperties"].(map[string]interface{}); ok {
-		normalizeSchemaRequiredFields(addProps)
-	}
-	if defs, ok := schema["$defs"].(map[string]interface{}); ok {
-		for _, v := range defs {
-			if sub, ok := v.(map[string]interface{}); ok {
-				normalizeSchemaRequiredFields(sub)
-			}
-		}
-	}
+	forEachSubSchema(schema, normalizeSchemaRequiredFields)
 }
 
 // ensureArrayItems 递归为缺失 items 的数组 schema 补上空 schema，
@@ -3146,70 +3168,14 @@ func ensureArrayItems(schema map[string]interface{}) {
 			schema["items"] = map[string]interface{}{}
 		}
 	}
-	if props, ok := schema["properties"].(map[string]interface{}); ok {
-		for _, v := range props {
-			if sub, ok := v.(map[string]interface{}); ok {
-				ensureArrayItems(sub)
-			}
-		}
-	}
-	if items, ok := schema["items"].(map[string]interface{}); ok {
-		ensureArrayItems(items)
-	}
-	for _, key := range []string{"allOf", "anyOf", "oneOf"} {
-		if arr, ok := schema[key].([]interface{}); ok {
-			for _, item := range arr {
-				if sub, ok := item.(map[string]interface{}); ok {
-					ensureArrayItems(sub)
-				}
-			}
-		}
-	}
-	if addProps, ok := schema["additionalProperties"].(map[string]interface{}); ok {
-		ensureArrayItems(addProps)
-	}
-	if defs, ok := schema["$defs"].(map[string]interface{}); ok {
-		for _, v := range defs {
-			if sub, ok := v.(map[string]interface{}); ok {
-				ensureArrayItems(sub)
-			}
-		}
-	}
+	forEachSubSchema(schema, ensureArrayItems)
 }
 
 func ensureObjectAdditionalPropertiesFalse(schema map[string]interface{}) {
 	if schemaDeclaresObject(schema) {
 		schema["additionalProperties"] = false
 	}
-	if props, ok := schema["properties"].(map[string]interface{}); ok {
-		for _, v := range props {
-			if sub, ok := v.(map[string]interface{}); ok {
-				ensureObjectAdditionalPropertiesFalse(sub)
-			}
-		}
-	}
-	if items, ok := schema["items"].(map[string]interface{}); ok {
-		ensureObjectAdditionalPropertiesFalse(items)
-	}
-	for _, key := range []string{"allOf", "anyOf", "oneOf"} {
-		if arr, ok := schema[key].([]interface{}); ok {
-			for _, item := range arr {
-				if sub, ok := item.(map[string]interface{}); ok {
-					ensureObjectAdditionalPropertiesFalse(sub)
-				}
-			}
-		}
-	}
-	if addProps, ok := schema["additionalProperties"].(map[string]interface{}); ok {
-		ensureObjectAdditionalPropertiesFalse(addProps)
-	}
-	if defs, ok := schema["$defs"].(map[string]interface{}); ok {
-		for _, v := range defs {
-			if sub, ok := v.(map[string]interface{}); ok {
-				ensureObjectAdditionalPropertiesFalse(sub)
-			}
-		}
-	}
+	forEachSubSchema(schema, ensureObjectAdditionalPropertiesFalse)
 }
 
 // alignRequiredWithProperties 让每个带 properties 的对象节点满足上游严格模式的
@@ -3248,34 +3214,8 @@ func alignRequiredWithProperties(schema map[string]interface{}) {
 		} else {
 			schema["required"] = required
 		}
-		for _, v := range props {
-			if sub, ok := v.(map[string]interface{}); ok {
-				alignRequiredWithProperties(sub)
-			}
-		}
 	}
-	if items, ok := schema["items"].(map[string]interface{}); ok {
-		alignRequiredWithProperties(items)
-	}
-	for _, key := range []string{"allOf", "anyOf", "oneOf"} {
-		if arr, ok := schema[key].([]interface{}); ok {
-			for _, item := range arr {
-				if sub, ok := item.(map[string]interface{}); ok {
-					alignRequiredWithProperties(sub)
-				}
-			}
-		}
-	}
-	if addProps, ok := schema["additionalProperties"].(map[string]interface{}); ok {
-		alignRequiredWithProperties(addProps)
-	}
-	if defs, ok := schema["$defs"].(map[string]interface{}); ok {
-		for _, v := range defs {
-			if sub, ok := v.(map[string]interface{}); ok {
-				alignRequiredWithProperties(sub)
-			}
-		}
-	}
+	forEachSubSchema(schema, alignRequiredWithProperties)
 }
 
 func schemaDeclaresArray(schema map[string]interface{}) bool {

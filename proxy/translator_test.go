@@ -570,6 +570,153 @@ func TestPrepareResponsesBodyLeavesReservedToolsUntouched(t *testing.T) {
 	}
 }
 
+// additional_tools 里的工具常按 OpenAI SDK 惯例省掉顶层 type。补 type 的前置处理
+// 过去只跑在顶层 tools[]，于是这里的工具被判成非 function，parameters 只被摘掉
+// null 而拿不到 object 兜底，上游照旧回 `got 'type: "None"'`。
+func TestPrepareResponsesBodyNormalizesAdditionalToolsMissingType(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"additional_tools","tools":[
+				{"name":"automation_update","parameters":{"type":null,"properties":{}}}
+			]}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	var checked bool
+	for _, item := range gjson.GetBytes(got, "input").Array() {
+		if item.Get("type").String() != "additional_tools" {
+			continue
+		}
+		tool := item.Get(`tools.#(name=="automation_update")`)
+		if tool.Get("type").String() != "function" {
+			t.Fatalf("missing tool type was not filled in; tool=%s", tool.Raw)
+		}
+		if typ := tool.Get("parameters.type").String(); typ != "object" {
+			t.Fatalf("parameters.type = %q, want object; tool=%s", typ, tool.Raw)
+		}
+		checked = true
+	}
+	if !checked {
+		t.Fatalf("additional_tools carrier missing from output; body=%s", got)
+	}
+}
+
+// additional_tools 里的 Chat 形态嵌套 function 子对象过去完全不摊平，坏 schema
+// 连同 function 子对象一起原样送到上游。
+func TestPrepareResponsesBodyFlattensAdditionalToolsNestedFunction(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"additional_tools","tools":[
+				{"type":"function","function":{"name":"automation_update","parameters":{"type":null,"properties":{}}}}
+			]}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	if strings.Contains(string(got), `"type":null`) {
+		t.Fatalf("null type survived inside additional_tools nested function; body=%s", got)
+	}
+	if strings.Contains(string(got), `"function":{`) {
+		t.Fatalf("nested function object was not flattened; body=%s", got)
+	}
+}
+
+// definitions 是 draft-07 的定义容器（pydantic v1、旧版 zod-to-json-schema 都生成
+// 它而不是 $defs）。递归下钻过去只认 $defs，藏在这里的坏 schema 全部放行。
+func TestSanitizeSchemaRecursesIntoDefinitions(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{"type":"function","name":"f","parameters":{
+			"type":"object",
+			"properties":{"a":{"$ref":"#/definitions/A"}},
+			"definitions":{"A":{"type":null,"pattern":"^x$"}}
+		}}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	if strings.Contains(string(got), `"type":null`) {
+		t.Fatalf("null type survived inside definitions; body=%s", got)
+	}
+	if strings.Contains(string(got), `"pattern"`) {
+		t.Fatalf("unsupported key survived inside definitions; body=%s", got)
+	}
+}
+
+// Chat Completions 路径共用同一套 sanitizer，definitions 缺口在那里同样存在。
+func TestTranslateRequestRecursesIntoDefinitions(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{"type":"function","function":{"name":"f","parameters":{
+			"type":"object",
+			"properties":{"a":{"$ref":"#/definitions/A"}},
+			"definitions":{"A":{"type":null,"minLength":3}}
+		}}}]
+	}`)
+
+	got, err := TranslateRequest(raw)
+	if err != nil {
+		t.Fatalf("TranslateRequest: %v", err)
+	}
+	if strings.Contains(string(got), `"type":null`) {
+		t.Fatalf("null type survived inside definitions on chat path; body=%s", got)
+	}
+	if strings.Contains(string(got), `"minLength"`) {
+		t.Fatalf("unsupported key survived inside definitions on chat path; body=%s", got)
+	}
+}
+
+// draft-07 的 tuple 校验把 items 写成数组，旧的下钻只对 map 形态生效。
+func TestSanitizeSchemaRecursesIntoTupleItems(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{"type":"function","name":"f","parameters":{
+			"type":"object",
+			"properties":{"a":{"type":"array","items":[{"type":null},{"type":"string","pattern":"^x$"}]}}
+		}}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	if strings.Contains(string(got), `"type":null`) {
+		t.Fatalf("null type survived inside tuple items; body=%s", got)
+	}
+	if strings.Contains(string(got), `"pattern"`) {
+		t.Fatalf("unsupported key survived inside tuple items; body=%s", got)
+	}
+}
+
+// 组合类关键字下的子 schema 同样要清洗，否则坏 schema 换个位置就能绕过。
+func TestSanitizeSchemaRecursesIntoCompositionKeywords(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{"type":"function","name":"f","parameters":{
+			"type":"object",
+			"properties":{
+				"a":{"type":"array","prefixItems":[{"type":null}]},
+				"b":{"type":"object","patternProperties":{"^x":{"type":null}}},
+				"c":{"not":{"type":null}},
+				"d":{"if":{"type":null},"then":{"type":null},"else":{"type":null}},
+				"e":{"type":"object","propertyNames":{"type":null}},
+				"f":{"type":"array","contains":{"type":null}},
+				"g":{"type":"object","dependentSchemas":{"x":{"type":null}}}
+			}
+		}}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	if strings.Contains(string(got), `"type":null`) {
+		t.Fatalf("null type survived under a composition keyword; body=%s", got)
+	}
+}
+
 func TestPrepareResponsesBody_FillsMissingArrayItemsInToolSchema(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
