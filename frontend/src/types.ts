@@ -2290,16 +2290,6 @@ export interface ModelSyncResponse {
   items: ModelInfo[]
   last_synced_at: string
   source_url: string
-	grok?: {
-		total: number
-		updated: number
-		unchanged: number
-		failed: number
-		models: string[]
-		errors?: Array<{ account_id: number; error: string }>
-	}
-	official_pricing?: OfficialPricingSyncResult
-	pricing_error?: string
 }
 
 export interface CPAExportEntry {

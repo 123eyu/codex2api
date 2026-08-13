@@ -1143,12 +1143,7 @@ export const api = {
   dismissPromptIntelligenceCandidate: (id: number) =>
     request<import('./types').PromptIntelligenceCandidate>(`/prompt-filter/intelligence/candidates/${id}/dismiss`, { method: 'POST' }),
   getModels: () => request<ModelsResponse>('/models'),
-  syncModels: (options?: { sync_grok?: boolean; sync_official_pricing?: boolean }) =>
-		request<ModelSyncResponse>('/models/sync', {
-			method: 'POST',
-			body: JSON.stringify(options ?? {}),
-			timeoutMs: 95000,
-		}),
+  syncModels: () => request<ModelSyncResponse>('/models/sync', { method: 'POST' }),
   syncCodexCLIVersion: () =>
     request<{
       fetched_version: string
