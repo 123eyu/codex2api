@@ -1333,12 +1333,35 @@ func prepareRoutedGrokProtocolBody(route GrokUpstreamRoute, inbound GrokProtocol
 	inbound = auth.NormalizeGrokProtocol(string(inbound))
 	// A same-protocol route receives the original downstream object even when
 	// it was selected from catalog apiBackend rather than a fresh capability
-	// probe. This preserves unknown standard fields, stream=false and provider
-	// extensions. Only the already-resolved account mapping may change model;
-	// auth/session headers and the protocol-specific Grok preflight remain owned
-	// by ExecuteGrokProtocolRequest.
+	// probe. This preserves unknown standard fields and provider extensions.
+	// Only the already-resolved account mapping may change model; auth/session
+	// headers and the protocol-specific Grok preflight remain owned by
+	// ExecuteGrokProtocolRequest.
 	if route.Protocol == inbound && inbound != "" && len(inboundBody) > 0 {
-		return rewriteGrokProtocolModel(inboundBody, route.Model)
+		body, err := rewriteGrokProtocolModel(inboundBody, route.Model)
+		if err != nil || route.Native {
+			// 仅 native 路由按线格式直通返回(forwardGrokNativeResponse),
+			// 可以完整保留 stream=false。
+			return body, err
+		}
+		// 非 native 的同协议路由不会直通:响应必须经 adaptGrokProtocolResponse
+		// 投影成规范 Responses SSE 再交给下游翻译器,而该投影只处理 SSE。
+		// 客户端 stream=false 时必须强制上游流式,否则非流式 JSON 进入 SSE
+		// 消费管线,请求确定性失败且账号被误判惩罚。非流式聚合由 handler 完成。
+		if !grokProtocolBodyStream(body) {
+			forced, forceErr := sjson.SetBytes(body, "stream", true)
+			if forceErr != nil {
+				return nil, forceErr
+			}
+			if route.Protocol == GrokProtocolChatCompletions {
+				// Chat 的 usage 只随 include_usage 的独立 chunk 下发。
+				if withUsage, usageErr := sjson.SetBytes(forced, "stream_options.include_usage", true); usageErr == nil {
+					forced = withUsage
+				}
+			}
+			body = forced
+		}
+		return body, nil
 	}
 	return prepareGrokProtocolBody(route.Protocol, inbound, inboundBody, responsesBody)
 }

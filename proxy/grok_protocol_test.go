@@ -242,10 +242,31 @@ func TestPrepareRoutedGrokCatalogSameProtocolPreservesUnknownFields(t *testing.T
 			if gjson.GetBytes(got, "model").String() != "mapped-grok" || !gjson.GetBytes(got, tc.path).Bool() {
 				t.Fatalf("catalog same-protocol body was not transparent: %s", got)
 			}
-			if stream := gjson.GetBytes(got, "stream"); !stream.Exists() || stream.Bool() {
-				t.Fatalf("explicit stream=false was not preserved: %s", got)
+			// 非 native 路由的响应必须经 SSE 投影管线消费,客户端的 stream=false
+			// 必须被强制为流式,否则非流式 JSON 形状进管线会确定性失败。
+			if !gjson.GetBytes(got, "stream").Bool() {
+				t.Fatalf("non-native same-protocol route must force upstream streaming: %s", got)
+			}
+			if tc.protocol == GrokProtocolChatCompletions && !gjson.GetBytes(got, "stream_options.include_usage").Bool() {
+				t.Fatalf("forced chat streaming must request the usage chunk: %s", got)
 			}
 		})
+	}
+}
+
+func TestPrepareRoutedGrokNativeSameProtocolPreservesClientStreamFalse(t *testing.T) {
+	// native 直通路由按线格式原样转发响应,stream=false 必须原样保留。
+	route := GrokUpstreamRoute{Model: "mapped-grok", Protocol: GrokProtocolChatCompletions, Native: true}
+	inbound := []byte(`{"model":"client-alias","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	got, err := prepareRoutedGrokProtocolBody(route, GrokProtocolChatCompletions, inbound, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream := gjson.GetBytes(got, "stream"); !stream.Exists() || stream.Bool() {
+		t.Fatalf("native passthrough must preserve explicit stream=false: %s", got)
+	}
+	if gjson.GetBytes(got, "stream_options").Exists() {
+		t.Fatalf("native passthrough must not inject stream_options: %s", got)
 	}
 }
 
