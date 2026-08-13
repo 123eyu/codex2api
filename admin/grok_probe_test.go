@@ -53,6 +53,30 @@ func TestGrokPersistedStateNeedsRefresh(t *testing.T) {
 	}
 }
 
+func TestGrokCapabilityFailureTTLPreventsRecurringAutomaticProbe(t *testing.T) {
+	now := time.Now()
+	account := &auth.Account{UpstreamType: auth.UpstreamGrok, APIKey: "xai-test", CredentialGeneration: 1}
+	origin := normalizeGrokProbeOrigin(auth.GrokDefaultAPIBaseURL)
+	state := &database.GrokAccountState{
+		CredentialGeneration: 1,
+		Catalogs: []database.GrokModelCatalog{{Snapshot: database.GrokModelCatalogSnapshot{
+			Origin: origin, CredentialGeneration: 1, Status: "ok", ExpiresAt: now.Add(time.Hour),
+		}, Items: []database.GrokModelCatalogItem{{ModelID: "grok-test", CredentialGeneration: 1}}}},
+	}
+	for _, protocol := range []proxy.GrokProtocol{proxy.GrokProtocolResponses, proxy.GrokProtocolChatCompletions, proxy.GrokProtocolMessages} {
+		state.Capabilities = append(state.Capabilities, database.GrokModelCapability{
+			ModelID: "grok-test", Origin: origin, Protocol: string(protocol), CredentialGeneration: 1,
+			Status: "unsupported", ObservedAt: now, ExpiresAt: now.Add(grokCapabilityFailureTTL),
+		})
+	}
+	if grokGenerationNeedsCapabilityProbe(account, state, 1, now.Add(10*time.Minute)) {
+		t.Fatal("negative capability observations should suppress automatic reprobe for 24 hours")
+	}
+	if !grokGenerationNeedsCapabilityProbe(account, state, 1, now.Add(25*time.Hour)) {
+		t.Fatal("expired capability observations should become probe candidates")
+	}
+}
+
 func TestRefreshStaleGrokControlPlaneSelectsOnlyExpiredBillingWhenProbeDisabled(t *testing.T) {
 	var callsMu sync.Mutex
 	calls := map[string]int{}

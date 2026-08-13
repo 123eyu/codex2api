@@ -638,9 +638,22 @@ func (db *DB) ensureUsageStatsRollup(ctx context.Context) error {
 	)`); err != nil {
 		return err
 	}
-	var initialized int
-	err := db.conn.QueryRowContext(ctx, `SELECT initialized FROM usage_stats_rollup_state WHERE id=1`).Scan(&initialized)
-	if err == nil && initialized == 1 {
+	if db.isSQLite() {
+		columns, err := db.sqliteTableColumns(ctx, "usage_stats_rollup_state")
+		if err != nil {
+			return err
+		}
+		if _, ok := columns["aggregation_version"]; !ok {
+			if _, err := db.conn.ExecContext(ctx, `ALTER TABLE usage_stats_rollup_state ADD COLUMN aggregation_version INTEGER NOT NULL DEFAULT 1`); err != nil {
+				return err
+			}
+		}
+	} else if _, err := db.conn.ExecContext(ctx, `ALTER TABLE usage_stats_rollup_state ADD COLUMN IF NOT EXISTS aggregation_version INTEGER NOT NULL DEFAULT 1`); err != nil {
+		return err
+	}
+	var initialized, aggregationVersion int
+	err := db.conn.QueryRowContext(ctx, `SELECT initialized, aggregation_version FROM usage_stats_rollup_state WHERE id=1`).Scan(&initialized, &aggregationVersion)
+	if err == nil && initialized == 1 && aggregationVersion >= 2 {
 		return nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -668,7 +681,8 @@ func (db *DB) rebuildUsageStatsRollup(ctx context.Context) error {
 		b.first_token_ms_sum + COALESCE(SUM(CASE WHEN u.first_token_ms > 0 THEN u.first_token_ms ELSE 0 END), 0),
 		b.first_token_samples + COALESCE(SUM(CASE WHEN u.first_token_ms > 0 THEN 1 ELSE 0 END), 0),
 		b.account_billed + COALESCE(SUM(u.account_billed), 0), b.user_billed + COALESCE(SUM(u.user_billed), 0)
-	FROM usage_stats_baseline b LEFT JOIN usage_logs u ON u.status_code <> 499 WHERE b.id=1
+	FROM usage_stats_baseline b LEFT JOIN usage_logs u ON u.status_code <> 499
+		AND TRIM(COALESCE(u.internal_reason, '')) = '' WHERE b.id=1
 	GROUP BY b.total_requests, b.total_tokens, b.prompt_tokens, b.completion_tokens, b.cached_tokens,
 		b.cache_hit_requests, b.first_token_ms_sum, b.first_token_samples, b.account_billed, b.user_billed`); err != nil {
 		return err
@@ -682,12 +696,14 @@ func (db *DB) rebuildUsageStatsRollup(ctx context.Context) error {
 		COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(account_billed), 0), COALESCE(SUM(user_billed), 0)
-	FROM usage_logs WHERE status_code <> 499 AND TRIM(COALESCE(channel, '')) <> '' GROUP BY TRIM(COALESCE(channel, ''))`); err != nil {
+	FROM usage_logs WHERE status_code <> 499 AND TRIM(COALESCE(internal_reason, '')) = ''
+		AND TRIM(COALESCE(channel, '')) <> '' GROUP BY TRIM(COALESCE(channel, ''))`); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO usage_stats_rollup_state (id, initialized, last_log_id, updated_at)
-		VALUES (1, 1, COALESCE((SELECT MAX(id) FROM usage_logs), 0), CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET initialized=1, last_log_id=excluded.last_log_id, updated_at=CURRENT_TIMESTAMP`); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO usage_stats_rollup_state (id, initialized, last_log_id, aggregation_version, updated_at)
+		VALUES (1, 1, COALESCE((SELECT MAX(id) FROM usage_logs), 0), 2, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET initialized=1, last_log_id=excluded.last_log_id,
+			aggregation_version=excluded.aggregation_version, updated_at=CURRENT_TIMESTAMP`); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -751,7 +767,7 @@ func applyUsageStatsRollupWithExec(ctx context.Context, execer sqlExecer, batch 
 		item.TotalUserBilled += entry.UserBilled
 	}
 	for _, entry := range batch {
-		if !entry.StoreUsageLog || entry.StatusCode == 499 {
+		if !entry.StoreUsageLog || entry.StatusCode == 499 || strings.TrimSpace(entry.InternalReason) != "" {
 			continue
 		}
 		add("", entry)
@@ -4231,6 +4247,7 @@ func (db *DB) getUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time,
 	FROM usage_logs
 	WHERE created_at >= $1` + endClause + `
 	  AND status_code <> 499
+	  AND TRIM(COALESCE(internal_reason, '')) = ''
 	`
 
 	var todayErrors int64
@@ -4304,6 +4321,7 @@ func (db *DB) CountTodayRequestsByChannel(ctx context.Context) (map[string]int64
 		SELECT COALESCE(channel, ''), COUNT(*)
 		FROM usage_logs
 		WHERE created_at >= $1 AND status_code <> 499
+		  AND TRIM(COALESCE(internal_reason, '')) = ''
 		GROUP BY 1`, db.timeArg(todayStart))
 	if err != nil {
 		return nil, err
@@ -4358,6 +4376,7 @@ func (db *DB) getUsageModelStats(ctx context.Context, limit int, rangeStart, ran
 			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count
 		FROM usage_logs
 		WHERE `+timeWhere+` AND status_code <> 499
+		  AND TRIM(COALESCE(internal_reason, '')) = ''
 		GROUP BY 1
 		ORDER BY user_billed DESC, requests DESC, model_name ASC
 		LIMIT `+limitPlaceholder+`
@@ -4414,6 +4433,7 @@ func (db *DB) populateUsageBreakdownStats(ctx context.Context, stats *UsageStats
 			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests
 		FROM usage_logs
 		WHERE `+timeWhere+` AND status_code <> 499
+		  AND TRIM(COALESCE(internal_reason, '')) = ''
 	`, args...).Scan(
 		&stats.FeatureStats.StreamRequests,
 		&stats.FeatureStats.SyncRequests,
@@ -4456,6 +4476,7 @@ func (db *DB) getUsageEndpointStats(ctx context.Context, limit int, rangeStart, 
 			COALESCE(SUM(user_billed), 0) AS user_billed
 		FROM usage_logs
 		WHERE `+timeWhere+` AND status_code <> 499
+		  AND TRIM(COALESCE(internal_reason, '')) = ''
 		GROUP BY 1
 		ORDER BY requests DESC, endpoint_name ASC
 		LIMIT `+limitPlaceholder+`
@@ -4499,6 +4520,7 @@ func (db *DB) getUsageAPIKeyStats(ctx context.Context, limit int, rangeStart, ra
 			COALESCE(SUM(user_billed), 0) AS user_billed
 		FROM usage_logs
 		WHERE `+timeWhere+` AND status_code <> 499
+		  AND TRIM(COALESCE(internal_reason, '')) = ''
 		GROUP BY 1, 2
 		ORDER BY requests DESC, api_key_label ASC
 		LIMIT `+limitPlaceholder+`
@@ -4540,6 +4562,7 @@ func (db *DB) GetTrafficSnapshot(ctx context.Context) (*TrafficSnapshot, error) 
 			COALESCE(SUM(total_tokens), 0)::float8 AS token_count
 		FROM usage_logs
 		WHERE created_at >= NOW() - INTERVAL '5 minutes'
+		  AND TRIM(COALESCE(internal_reason, '')) = ''
 		GROUP BY 1
 	),
 	current_window AS (
@@ -4753,7 +4776,8 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 			duration_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, status_code
 		FROM usage_logs
 		WHERE created_at >= $1 AND created_at < $2
-		  AND status_code <> 499` + channelClause + `
+		  AND status_code <> 499
+		  AND TRIM(COALESCE(internal_reason, '')) = ''` + channelClause + `
 	)
 	SELECT
 		CASE WHEN GROUPING(bucket) = 0 THEN 'timeline' ELSE 'model' END AS row_kind,
@@ -4858,7 +4882,8 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 		COALESCE(first_token_ms, 0), status_code, COALESCE(is_retry_attempt, false),
 		COALESCE(attempt_index, 0), COALESCE(stream, false), COALESCE(compact, false)
 	FROM usage_logs
-	WHERE account_id = $1 AND `+timeWhere+` AND status_code <> 499`, queryArgs...)
+	WHERE account_id = $1 AND `+timeWhere+` AND status_code <> 499
+	  AND TRIM(COALESCE(internal_reason, '')) = ''`, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -5507,6 +5532,13 @@ func (db *DB) nonRetryUsageLogPredicate() string {
 	return "COALESCE(is_retry_attempt, false) = false"
 }
 
+// endUserUsageLogPredicate excludes maintenance/probe traffic from account
+// request, token, and billing aggregates. Internal rows remain queryable in the
+// raw usage log for diagnostics.
+func (db *DB) endUserUsageLogPredicate() string {
+	return "TRIM(COALESCE(internal_reason, '')) = ''"
+}
+
 // currentAccountUsageGenerationPredicate keeps generation-scoped internal
 // traffic (currently Grok capability probes) attached to the credential
 // identity that issued it. Legacy and ordinary request rows use generation 0
@@ -5533,9 +5565,9 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 		COALESCE(SUM(CASE WHEN status_code >= 400 AND %s THEN 1 ELSE 0 END), 0) AS retry_error_count,
 		COALESCE(SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END), 0) AS rate_limit_attempt_count
 	FROM usage_logs
-	WHERE created_at >= $1
+	WHERE created_at >= $1 AND %s
 	GROUP BY account_id
-	`, retryFalse, retryFalse, retryTrue)
+	`, retryFalse, retryFalse, retryTrue, db.endUserUsageLogPredicate())
 	rows, err := db.conn.QueryContext(ctx, query, db.timeArg(since))
 	if err != nil {
 		return nil, err
@@ -5562,9 +5594,9 @@ func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (ma
 		COALESCE(SUM(account_billed), 0) AS account_billed,
 		COALESCE(SUM(user_billed), 0) AS user_billed
 	FROM usage_logs
-	WHERE created_at >= $1 AND status_code <> 499 AND %s AND %s
+	WHERE created_at >= $1 AND status_code <> 499 AND %s AND %s AND %s
 	GROUP BY account_id
-	`, db.nonRetryUsageLogPredicate(), db.currentAccountUsageGenerationPredicate())
+	`, db.nonRetryUsageLogPredicate(), db.currentAccountUsageGenerationPredicate(), db.endUserUsageLogPredicate())
 	rows, err := db.conn.QueryContext(ctx, query, db.timeArg(since))
 	if err != nil {
 		return nil, err
@@ -5595,8 +5627,8 @@ func (db *DB) GetAccountUsageWindows(ctx context.Context, shortSince, longSince 
 		COALESCE(SUM(CASE WHEN created_at >= $1 THEN user_billed ELSE 0 END), 0),
 		COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(account_billed), 0), COALESCE(SUM(user_billed), 0)
 	FROM usage_logs
-	WHERE created_at >= $2 AND status_code <> 499 AND %s AND %s
-	GROUP BY account_id`, db.nonRetryUsageLogPredicate(), db.currentAccountUsageGenerationPredicate())
+	WHERE created_at >= $2 AND status_code <> 499 AND %s AND %s AND %s
+	GROUP BY account_id`, db.nonRetryUsageLogPredicate(), db.currentAccountUsageGenerationPredicate(), db.endUserUsageLogPredicate())
 	rows, err := db.conn.QueryContext(ctx, query, db.timeArg(shortSince), db.timeArg(longSince))
 	if err != nil {
 		return nil, nil, err
@@ -5625,7 +5657,8 @@ func (db *DB) GetAccountUsageWindows(ctx context.Context, shortSince, longSince 
 func (db *DB) GetAccountBilledSince(ctx context.Context, accountID int64, since time.Time) (float64, error) {
 	var billed float64
 	err := db.conn.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(account_billed), 0) FROM usage_logs WHERE account_id = $1 AND created_at >= $2 AND status_code <> 499`,
+		`SELECT COALESCE(SUM(account_billed), 0) FROM usage_logs WHERE account_id = $1 AND created_at >= $2
+		 AND status_code <> 499 AND TRIM(COALESCE(internal_reason, '')) = ''`,
 		accountID, db.timeArg(since)).Scan(&billed)
 	return billed, err
 }
@@ -5691,6 +5724,7 @@ func (db *DB) getAccountsBilledSinceChunk(ctx context.Context, ids []int64, wind
 		ON usage_logs.account_id = billing_windows.account_id
 		AND usage_logs.created_at >= billing_windows.since_at
 		AND usage_logs.status_code <> 499
+		AND TRIM(COALESCE(usage_logs.internal_reason, '')) = ''
 	GROUP BY billing_windows.account_id
 	`, strings.Join(values, ","))
 

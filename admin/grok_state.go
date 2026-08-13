@@ -23,11 +23,15 @@ import (
 )
 
 const (
-	grokFactFreshness          = 5 * time.Minute
-	grokUserUpgradeFreshness   = 60 * time.Second
-	grokBillingHotFreshness    = 30 * time.Second
-	grokCapabilityOKTTL        = 24 * time.Hour
-	grokCapabilityFailureTTL   = 5 * time.Minute
+	grokFactFreshness        = 5 * time.Minute
+	grokUserUpgradeFreshness = 60 * time.Second
+	grokBillingHotFreshness  = 30 * time.Second
+	grokCapabilityOKTTL      = 24 * time.Hour
+	// Automatic capability rebuilds are maintenance, not health checks. Cache
+	// negative/rate-limited observations for a day so the 30-second freshness
+	// scanner cannot turn an unsupported protocol into recurring generation
+	// traffic. Operators can still bypass this TTL with the explicit force probe.
+	grokCapabilityFailureTTL   = 24 * time.Hour
 	grokCapabilityProbeTimeout = 45 * time.Second
 )
 
@@ -969,9 +973,6 @@ func (h *Handler) runGrokCapabilityProbe(ctx context.Context, id int64, force bo
 			ttl := grokCapabilityFailureTTL
 			if observation.status == "ok" {
 				ttl = grokCapabilityOKTTL
-			}
-			if observation.status == "rate_limited" || observation.status == "version_required" {
-				ttl = time.Minute
 			}
 			capability := database.GrokModelCapability{
 				AccountID: id, ModelID: target.model, Origin: target.origin, Protocol: string(protocol),

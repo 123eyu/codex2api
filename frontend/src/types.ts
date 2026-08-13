@@ -276,6 +276,10 @@ export interface AccountPageStatsResponse {
   stats: Record<string, AccountPageStatsItem>
 }
 
+export interface AccountLiveStateResponse {
+  accounts: Record<string, { active_requests: number }>
+}
+
 export interface AccountsPageParams {
   channel?: 'codex' | 'grok'
   page: number
