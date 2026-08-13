@@ -1249,6 +1249,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_before_expiry_min INT DEFAULT 60;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS utls_shutdown_timeout_minutes INT DEFAULT 30;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_fingerprint_default_mode VARCHAR(20) DEFAULT 'off';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_local_max_bytes BIGINT NOT NULL DEFAULT 67108864;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_local_max_entry_bytes BIGINT NOT NULL DEFAULT 8388608;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_reconstruct_max_bytes BIGINT NOT NULL DEFAULT 67108864;
@@ -2041,16 +2042,19 @@ type SystemSettings struct {
 	CodexContinueThinkingEnabled        bool // 检测到上游截断思考时自动续想并折叠成单响应，默认 false
 	CodexContinueMaxRounds              int  // 单次请求最大续想轮数（含首轮），默认 8
 	UTLSShutdownTimeoutMinutes          int  // uTLS 连接被摘出池后等待在途 stream 收尾的上限（分钟，默认 30，范围 1-240，issue #446）
-	AutoPause5hThreshold                float64
-	AutoPause7dThreshold                float64
-	AutoPause5hGuardBandPercent         float64
-	AutoPause5hGuardConcurrency         int
-	SmartPacingEnabled                  bool   // issue #312 智能配速总开关
-	SmartPacingMinConcurrency           int    // 配速并发下限
-	SmartPacingWindows                  string // "5h,7d" / "5h" / "7d"
-	IgnoreUsageLimitStatus              bool   // 用量窗口仅作参考，以 Responses 成功/usage_limit_reached 判定可用性
-	RetryIntervalMS                     int    // 重试间隔毫秒（0 = 立即重试，保持旧行为）
-	TransportRetryPolicy                string // 传输错误重试策略: rotate（换号，旧行为）/ sticky（同号延迟重试）
+	// CodexFingerprintDefaultMode 是新导入/新建 Codex 账号默认盖上的指纹收敛档位
+	// （off/device/session/full，默认 off）。只影响导入之后新建的账号，已有账号不变。
+	CodexFingerprintDefaultMode string
+	AutoPause5hThreshold        float64
+	AutoPause7dThreshold        float64
+	AutoPause5hGuardBandPercent float64
+	AutoPause5hGuardConcurrency int
+	SmartPacingEnabled          bool   // issue #312 智能配速总开关
+	SmartPacingMinConcurrency   int    // 配速并发下限
+	SmartPacingWindows          string // "5h,7d" / "5h" / "7d"
+	IgnoreUsageLimitStatus      bool   // 用量窗口仅作参考，以 Responses 成功/usage_limit_reached 判定可用性
+	RetryIntervalMS             int    // 重试间隔毫秒（0 = 立即重试，保持旧行为）
+	TransportRetryPolicy        string // 传输错误重试策略: rotate（换号，旧行为）/ sticky（同号延迟重试）
 	// CodexSyncedCLIVersion 是从 openai/codex releases 同步到的最新 Codex CLI 版本缓存，
 	// 用于抬升出站 UA / manifest 的模拟版本（绝不低于内置常量），空表示尚未同步。
 	CodexSyncedCLIVersion string
@@ -2248,7 +2252,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			       COALESCE(first_token_excludes_ws_acquire, false),
 			       COALESCE(codex_preflight_sse_passthrough_enabled, false),
 			       COALESCE(utls_shutdown_timeout_minutes, 30),
-			       COALESCE(codex_ws_weak_network_mode, false)
+			       COALESCE(codex_ws_weak_network_mode, false),
+			       COALESCE(NULLIF(TRIM(codex_fingerprint_default_mode), ''), 'off')
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -2314,6 +2319,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.CodexPreflightSSEPassthroughEnabled,
 		&s.UTLSShutdownTimeoutMinutes,
 		&s.CodexWSWeakNetworkMode,
+		&s.CodexFingerprintDefaultMode,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -2339,7 +2345,24 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	s.FirstTokenMode = normalizeFirstTokenMode(s.FirstTokenMode)
 	s.BillingTierPolicy = normalizeBillingTierPolicy(s.BillingTierPolicy)
 	s.AutoResetCreditsBeforeExpiryMin = NormalizeAutoResetCreditsBeforeExpiryMinutes(s.AutoResetCreditsBeforeExpiryMin)
+	s.CodexFingerprintDefaultMode = NormalizeCodexFingerprintDefaultMode(s.CodexFingerprintDefaultMode)
 	return s, err
+}
+
+// NormalizeCodexFingerprintDefaultMode 把新账号默认指纹收敛档位归一到四个已知
+// 取值之一；空值和非法值回落 off（与 auth.NormalizeCodexFingerprintMode 语义一致，
+// database 包不能反向依赖 auth，故此处独立实现）。
+func NormalizeCodexFingerprintDefaultMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "device":
+		return "device"
+	case "session":
+		return "session"
+	case "full":
+		return "full"
+	default:
+		return "off"
+	}
 }
 
 // UpdateSystemSettings 更新全局设置（upsert：无行时自动插入）。
@@ -2428,9 +2451,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					first_token_excludes_ws_acquire,
 					codex_preflight_sse_passthrough_enabled,
 					utls_shutdown_timeout_minutes,
-					codex_ws_weak_network_mode
+					codex_ws_weak_network_mode,
+					codex_fingerprint_default_mode
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -2470,10 +2494,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				prompt_filter_log_matches = EXCLUDED.prompt_filter_log_matches,
 				prompt_filter_max_text_length = EXCLUDED.prompt_filter_max_text_length,
 				prompt_filter_sensitive_words = EXCLUDED.prompt_filter_sensitive_words,
-				prompt_filter_custom_patterns = CASE WHEN $106 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
+				prompt_filter_custom_patterns = CASE WHEN $107 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
 				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns,
 				prompt_filter_review_enabled = EXCLUDED.prompt_filter_review_enabled,
-				prompt_filter_review_api_key = CASE WHEN $107 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
+				prompt_filter_review_api_key = CASE WHEN $108 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
 				prompt_filter_review_base_url = EXCLUDED.prompt_filter_review_base_url,
 				prompt_filter_review_model = EXCLUDED.prompt_filter_review_model,
 				prompt_filter_review_timeout_seconds = EXCLUDED.prompt_filter_review_timeout_seconds,
@@ -2533,7 +2557,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					first_token_excludes_ws_acquire = EXCLUDED.first_token_excludes_ws_acquire,
 					codex_preflight_sse_passthrough_enabled = EXCLUDED.codex_preflight_sse_passthrough_enabled,
 					utls_shutdown_timeout_minutes = EXCLUDED.utls_shutdown_timeout_minutes,
-					codex_ws_weak_network_mode = EXCLUDED.codex_ws_weak_network_mode
+					codex_ws_weak_network_mode = EXCLUDED.codex_ws_weak_network_mode,
+					codex_fingerprint_default_mode = EXCLUDED.codex_fingerprint_default_mode
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -2569,6 +2594,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.CodexPreflightSSEPassthroughEnabled,
 		NormalizeUTLSShutdownTimeoutMinutes(s.UTLSShutdownTimeoutMinutes),
 		s.CodexWSWeakNetworkMode,
+		NormalizeCodexFingerprintDefaultMode(s.CodexFingerprintDefaultMode),
 		s.PreservePromptFilterCustomPatterns,
 		s.PreservePromptFilterReviewAPIKey)
 	return err

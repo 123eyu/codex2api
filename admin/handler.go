@@ -2697,7 +2697,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 			continue
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("批量添加账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -2709,7 +2709,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 		h.db.InsertAccountEventAsync(id, "added", "manual")
 
 		// 热加载：直接加入内存池
-		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
+		newAcc := h.newCodexAccountFromSeed(id, req.ProxyURL, seed)
 		h.store.AddAccount(newAcc)
 
 		if newAcc.GetAccessToken() != "" {
@@ -2787,7 +2787,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 			continue
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("批量添加账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -2802,7 +2802,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 		createdIDs.add(id)
 		h.db.InsertAccountEventAsync(id, "added", "manual")
 
-		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
+		newAcc := h.newCodexAccountFromSeed(id, req.ProxyURL, seed)
 		h.store.AddAccount(newAcc)
 
 		if newAcc.GetAccessToken() != "" {
@@ -2981,7 +2981,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			seenATRoutes[routeKey] = true
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -2994,7 +2994,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 
 		// 热加载到内存池（AT-only，无 RT）。codex_at 不走 JWT 解码，
 		// 身份信息后续由 wham 用量查询补齐。
-		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
+		newAcc := h.newCodexAccountFromSeed(id, req.ProxyURL, seed)
 		h.store.AddAccount(newAcc)
 
 		// 触发 wham 用量探针：codex_at 的身份此刻未知，探针补齐身份后会回查
@@ -3105,7 +3105,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 			seenATRoutes[routeKey] = true
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -3116,7 +3116,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 		successCount++
 		createdIDs.add(id)
 		h.db.InsertAccountEventAsync(id, "added", "manual_at")
-		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
+		newAcc := h.newCodexAccountFromSeed(id, req.ProxyURL, seed)
 		h.store.AddAccount(newAcc)
 		// 与非流式路径一致：探针补齐 codex_at 身份后回查合并同身份的已有账号。
 		h.triggerImportedAccountUsageProbe(id, "manual_at")
@@ -4676,7 +4676,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, tokenCredentialMap(seed), proxyURL)
+				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(seed), proxyURL)
 				insertCancel()
 
 				if err != nil {
@@ -4691,7 +4691,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				atomic.AddInt64(&current, 1)
 				h.db.InsertAccountEventAsync(id, "added", "import_at")
 
-				newAcc := accountFromCredentialSeed(id, proxyURL, seed)
+				newAcc := h.newCodexAccountFromSeed(id, proxyURL, seed)
 				h.store.AddAccount(newAcc)
 				h.applyImportedAccountUsageState(newAcc, "import_at")
 				if newAcc.GetAccessToken() != "" {
@@ -4704,7 +4704,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, tokenCredentialMap(seed), proxyURL)
+				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(seed), proxyURL)
 				insertCancel()
 
 				if err != nil {
@@ -4719,7 +4719,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				atomic.AddInt64(&current, 1)
 				h.db.InsertAccountEventAsync(id, "added", "import")
 
-				newAcc := accountFromCredentialSeed(id, proxyURL, seed)
+				newAcc := h.newCodexAccountFromSeed(id, proxyURL, seed)
 				h.store.AddAccount(newAcc)
 				h.applyImportedAccountUsageState(newAcc, "import")
 
@@ -7674,6 +7674,7 @@ type settingsResponse struct {
 	MaxRateLimitRetries                int                              `json:"max_rate_limit_retries"`
 	RetryIntervalMS                    int                              `json:"retry_interval_ms"`
 	TransportRetryPolicy               string                           `json:"transport_retry_policy"`
+	CodexFingerprintDefaultMode        string                           `json:"codex_fingerprint_default_mode"`
 	AllowRemoteMigration               bool                             `json:"allow_remote_migration"`
 	DatabaseDriver                     string                           `json:"database_driver"`
 	DatabaseLabel                      string                           `json:"database_label"`
@@ -7813,6 +7814,7 @@ type updateSettingsReq struct {
 	MaxRateLimitRetries                 *int     `json:"max_rate_limit_retries"`
 	RetryIntervalMS                     *int     `json:"retry_interval_ms"`
 	TransportRetryPolicy                *string  `json:"transport_retry_policy"`
+	CodexFingerprintDefaultMode         *string  `json:"codex_fingerprint_default_mode"`
 	AllowRemoteMigration                *bool    `json:"allow_remote_migration"`
 	ModelMapping                        *string  `json:"model_mapping"`
 	CodexModelMapping                   *string  `json:"codex_model_mapping"`
@@ -8537,6 +8539,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		MaxRateLimitRetries:                 h.store.GetMaxRateLimitRetries(),
 		RetryIntervalMS:                     h.store.GetRetryIntervalMS(),
 		TransportRetryPolicy:                h.store.GetTransportRetryPolicy(),
+		CodexFingerprintDefaultMode:         h.store.GetCodexFingerprintDefaultMode(),
 		AllowRemoteMigration:                h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
 		DatabaseDriver:                      h.databaseDriver,
 		DatabaseLabel:                       h.databaseLabel,
@@ -9353,6 +9356,16 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: transport_retry_policy = %s", v)
 	}
 
+	if req.CodexFingerprintDefaultMode != nil {
+		if err := validateCodexFingerprintMode(*req.CodexFingerprintDefaultMode); err != nil {
+			writeError(c, http.StatusBadRequest, "codex_fingerprint_default_mode "+err.Error())
+			return
+		}
+		v := auth.NormalizeCodexFingerprintMode(*req.CodexFingerprintDefaultMode)
+		h.store.SetCodexFingerprintDefaultMode(v)
+		log.Printf("设置已更新: codex_fingerprint_default_mode = %s", v)
+	}
+
 	if req.AllowRemoteMigration != nil {
 		if *req.AllowRemoteMigration && !hasAdminSecret {
 			writeError(c, http.StatusBadRequest, "请先设置管理密钥，再启用远程迁移")
@@ -9775,6 +9788,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		MaxRateLimitRetries:                 h.store.GetMaxRateLimitRetries(),
 		RetryIntervalMS:                     h.store.GetRetryIntervalMS(),
 		TransportRetryPolicy:                h.store.GetTransportRetryPolicy(),
+		CodexFingerprintDefaultMode:         h.store.GetCodexFingerprintDefaultMode(),
 		AllowRemoteMigration:                h.store.GetAllowRemoteMigration() && hasAdminSecret,
 		ModelMapping:                        h.store.GetModelMapping(),
 		CodexModelMapping:                   h.store.GetCodexModelMapping(),
@@ -10015,6 +10029,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		MaxRateLimitRetries:                 h.store.GetMaxRateLimitRetries(),
 		RetryIntervalMS:                     h.store.GetRetryIntervalMS(),
 		TransportRetryPolicy:                h.store.GetTransportRetryPolicy(),
+		CodexFingerprintDefaultMode:         h.store.GetCodexFingerprintDefaultMode(),
 		AllowRemoteMigration:                h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
 		DatabaseDriver:                      h.databaseDriver,
 		DatabaseLabel:                       h.databaseLabel,

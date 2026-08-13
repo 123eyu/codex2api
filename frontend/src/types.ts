@@ -1229,6 +1229,8 @@ export interface SystemSettings {
   max_rate_limit_retries: number
   retry_interval_ms: number
   transport_retry_policy: string
+  /** 新导入/新建 Codex 账号默认盖上的设备指纹收敛档位（off/device/session/full）。 */
+  codex_fingerprint_default_mode: string
   allow_remote_migration: boolean
   database_driver: string
   database_label: string

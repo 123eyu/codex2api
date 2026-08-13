@@ -1205,6 +1205,12 @@ export default function Settings() {
     { label: t('settings.transportRetryPolicyRotate'), value: 'rotate' },
     { label: t('settings.transportRetryPolicySticky'), value: 'sticky' },
   ]
+  const codexFingerprintDefaultModeOptions = [
+    { label: t('accounts.codexFingerprintModeOff'), value: 'off' },
+    { label: t('accounts.codexFingerprintModeDevice'), value: 'device' },
+    { label: t('accounts.codexFingerprintModeSession'), value: 'session' },
+    { label: t('accounts.codexFingerprintModeFull'), value: 'full' },
+  ]
   const modelCooldownModeOptions = [
     { label: t('settings.modelCooldownModeOff'), value: 'off' },
     { label: t('settings.modelCooldownModeFixed'), value: 'fixed' },
@@ -1322,6 +1328,7 @@ export default function Settings() {
     max_rate_limit_retries: 1,
     retry_interval_ms: 0,
     transport_retry_policy: 'rotate',
+    codex_fingerprint_default_mode: 'off',
     allow_remote_migration: false,
     database_driver: 'postgres',
     database_label: 'PostgreSQL',
@@ -3066,6 +3073,13 @@ export default function Settings() {
                       {t('settings.unit.min')}
                     </span>
                   </div>
+                </SettingField>
+                <SettingField label={t('settings.codexFingerprintDefaultMode')} description={t('settings.codexFingerprintDefaultModeDesc')}>
+                  <Select
+                    value={settingsForm.codex_fingerprint_default_mode || 'off'}
+                    onValueChange={(value) => autoSaveStringField('codex_fingerprint_default_mode', value)}
+                    options={codexFingerprintDefaultModeOptions}
+                  />
                 </SettingField>
                 <SettingField className="sm:col-span-2 xl:col-span-3" label={t('settings.codexUserAgentRaw')} description={t('settings.codexUserAgentRawDesc')}>
                   <Input
