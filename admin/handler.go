@@ -639,6 +639,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/grok/oauth/auth-url", h.GenerateGrokAuthURL)        // 兼容旧客户端
 	api.POST("/accounts/grok/oauth/exchange-code", h.ExchangeGrokOAuthCode) // 兼容旧客户端
 	api.PATCH("/accounts/:id/grok", h.UpdateGrokAccount)
+	api.GET("/accounts/:id/grok/state", h.GetGrokAccountState)
+	api.POST("/accounts/:id/grok/sync", h.SyncGrokAccountState)
+	api.POST("/accounts/:id/grok/capabilities/probe", h.ProbeGrokAccountCapabilities)
 	api.POST("/accounts/:id/oauth/exchange-code", h.UpdateOAuthAccountCode)
 	api.POST("/accounts/import", h.ImportAccounts)
 	api.POST("/accounts/sub2api/preview", h.PreviewSub2APIAccounts)
@@ -3577,15 +3580,18 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 		return
 	}
 	if account.IsGrokAPI() {
-		// Grok 账号：用自身凭据拉取 Grok 上游模型目录
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+		// Grok 账号同步完整富目录并持久化；响应保留 legacy models 字段。
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 110*time.Second)
 		defer cancel()
-		models, err := proxy.FetchGrokModelIDs(ctx, account, h.store.ResolveProxyForAccount(account))
+		result, err := h.syncGrokAccountState(ctx, id)
 		if err != nil {
 			writeError(c, http.StatusBadGateway, fmt.Sprintf("拉取 Grok 上游模型目录失败: %s", err.Error()))
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"models": models})
+		if result.capabilityGeneration > 0 {
+			h.triggerGrokCapabilityProbeForGeneration(id, result.capabilityGeneration)
+		}
+		c.JSON(http.StatusOK, gin.H{"models": result.Models, "state": result.State, "errors": result.Errors})
 		return
 	}
 	if account.IsOpenAIResponsesAPI() {
@@ -7449,6 +7455,12 @@ func sanitizeImageGenerationPolicy(in database.APIKeyLimits) string {
 // Key 永远选不到账号。
 var knownAPIKeyPlanFilters = map[string]struct{}{
 	"free": {}, "plus": {}, "pro": {}, "prolite": {}, "team": {}, "k12": {}, "go": {},
+	// Grok live /user.subscriptionTier values. These labels are authorization
+	// inputs only when auth.Store has a fresh live fact; JWT/archive labels never
+	// satisfy plan_allow. "api" is the explicit xAI API-key channel plan.
+	"api": {}, "supergrok": {}, "x_basic": {}, "x_premium": {},
+	"x_premium_plus": {}, "supergrok_heavy": {}, "supergrok_lite": {},
+	"supergrok_plus": {},
 }
 
 // cleanPlanAllow 归一账号套餐白名单:小写去空白、丢弃未知值并去重。

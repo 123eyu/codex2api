@@ -20,13 +20,23 @@ import (
 
 // openAIRequest 表示 OpenAI Chat Completions 请求（仅解析翻译所需字段）
 type openAIRequest struct {
-	Model           string            `json:"model"`
-	Messages        []openAIMessage   `json:"messages"`
-	Tools           []json.RawMessage `json:"tools"`
-	ResponseFormat  json.RawMessage   `json:"response_format,omitempty"`
-	ReasoningEffort string            `json:"reasoning_effort"`
-	ServiceTier     string            `json:"service_tier"`
-	ServiceTierAlt  string            `json:"serviceTier"` // 兼容驼峰命名
+	Model               string            `json:"model"`
+	Messages            []openAIMessage   `json:"messages"`
+	Tools               []json.RawMessage `json:"tools"`
+	ResponseFormat      json.RawMessage   `json:"response_format,omitempty"`
+	ReasoningEffort     string            `json:"reasoning_effort"`
+	ServiceTier         string            `json:"service_tier"`
+	ServiceTierAlt      string            `json:"serviceTier"` // 兼容驼峰命名
+	Temperature         json.RawMessage   `json:"temperature,omitempty"`
+	TopP                json.RawMessage   `json:"top_p,omitempty"`
+	MaxTokens           json.RawMessage   `json:"max_tokens,omitempty"`
+	MaxCompletionTokens json.RawMessage   `json:"max_completion_tokens,omitempty"`
+	Stop                json.RawMessage   `json:"stop,omitempty"`
+	Seed                json.RawMessage   `json:"seed,omitempty"`
+	PresencePenalty     json.RawMessage   `json:"presence_penalty,omitempty"`
+	FrequencyPenalty    json.RawMessage   `json:"frequency_penalty,omitempty"`
+	ParallelToolCalls   json.RawMessage   `json:"parallel_tool_calls,omitempty"`
+	ToolChoice          json.RawMessage   `json:"tool_choice,omitempty"`
 }
 
 // openAIMessage 表示一条 OpenAI 消息
@@ -1557,7 +1567,38 @@ func TranslateRequest(rawJSON []byte) ([]byte, error) {
 	if err := validateChatCompletionFunctionNames(req); err != nil {
 		return nil, err
 	}
+	out := buildChatResponsesRequest(req)
+	return json.Marshal(out)
+}
 
+// TranslateChatToResponsesForGrok converts a Chat Completions request into a
+// canonical Responses request for Grok routing. Unlike TranslateRequest, which
+// remains Codex-safe, this entry point retains request controls that a real
+// Responses backend can express (sampling, output limit, stop, penalties and
+// tool selection). Keeping the two entry points separate prevents those fields
+// from reaching the Codex backend, where they are unsupported.
+func TranslateChatToResponsesForGrok(rawJSON []byte) ([]byte, error) {
+	req := cachedOrParse(rawJSON)
+	if err := validateChatCompletionFunctionNames(req); err != nil {
+		return nil, err
+	}
+	out := buildChatResponsesRequest(req)
+	// Rebuild tools and structured output without Codex-only schema cleanup.
+	if len(req.Tools) > 0 {
+		if tools := convertChatToolsToResponsesForGrok(req.Tools); len(tools) > 0 {
+			out["tools"] = tools
+		}
+	}
+	if format := chatResponseFormatToResponses(req.ResponseFormat); format != nil {
+		out["text"] = map[string]any{"format": format}
+	}
+	if err := copyChatResponsesControls(out, req); err != nil {
+		return nil, err
+	}
+	return json.Marshal(out)
+}
+
+func buildChatResponsesRequest(req openAIRequest) map[string]any {
 	// 构建输出 map（只包含 Codex 需要的字段）
 	out := map[string]any{
 		"model":   req.Model,
@@ -1613,7 +1654,109 @@ func TranslateRequest(rawJSON []byte) ([]byte, error) {
 		}
 	}
 
-	return json.Marshal(out)
+	return out
+}
+
+func copyRawJSONField(out map[string]any, name string, raw json.RawMessage) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return
+	}
+	var value any
+	if json.Unmarshal(raw, &value) == nil {
+		out[name] = value
+	}
+}
+
+func copyChatResponsesControls(out map[string]any, req openAIRequest) error {
+	copyRawJSONField(out, "temperature", req.Temperature)
+	copyRawJSONField(out, "top_p", req.TopP)
+	copyRawJSONField(out, "stop", req.Stop)
+	copyRawJSONField(out, "seed", req.Seed)
+	copyRawJSONField(out, "presence_penalty", req.PresencePenalty)
+	copyRawJSONField(out, "frequency_penalty", req.FrequencyPenalty)
+	copyRawJSONField(out, "parallel_tool_calls", req.ParallelToolCalls)
+
+	// max_completion_tokens is the newer Chat spelling and therefore wins when
+	// both aliases are supplied.
+	maxOutputTokens := req.MaxTokens
+	if len(req.MaxCompletionTokens) > 0 && strings.TrimSpace(string(req.MaxCompletionTokens)) != "null" {
+		maxOutputTokens = req.MaxCompletionTokens
+	}
+	copyRawJSONField(out, "max_output_tokens", maxOutputTokens)
+
+	if len(req.ToolChoice) == 0 || strings.TrimSpace(string(req.ToolChoice)) == "null" {
+		return nil
+	}
+	var choice any
+	if json.Unmarshal(req.ToolChoice, &choice) != nil {
+		return fmt.Errorf("tool_choice must be a valid Chat Completions tool selection")
+	}
+	// Chat names a selected function under tool_choice.function.name whereas
+	// Responses expects {type:"function",name:"..."}.
+	switch typed := choice.(type) {
+	case string:
+		switch strings.TrimSpace(typed) {
+		case "auto", "none", "required":
+			out["tool_choice"] = typed
+			return nil
+		default:
+			return fmt.Errorf("Chat Completions tool_choice %q cannot be represented by Responses", typed)
+		}
+	case map[string]any:
+		if strings.TrimSpace(firstNonEmptyAnyString(typed["type"])) != "function" {
+			return fmt.Errorf("Chat Completions tool_choice type %q cannot be represented by Responses", firstNonEmptyAnyString(typed["type"]))
+		}
+		name := strings.TrimSpace(firstNonEmptyAnyString(typed["name"]))
+		if function, ok := typed["function"].(map[string]any); ok && name == "" {
+			name = strings.TrimSpace(firstNonEmptyAnyString(function["name"]))
+		}
+		if name == "" {
+			return fmt.Errorf("Chat Completions function tool_choice requires function.name")
+		}
+		out["tool_choice"] = map[string]any{"type": "function", "name": name}
+		return nil
+	default:
+		return fmt.Errorf("Chat Completions tool_choice cannot be represented by Responses")
+	}
+}
+
+func convertChatToolsToResponsesForGrok(rawTools []json.RawMessage) []any {
+	tools := make([]any, 0, len(rawTools))
+	for _, raw := range rawTools {
+		var source map[string]any
+		if json.Unmarshal(raw, &source) != nil || source == nil {
+			continue
+		}
+		function, isFunction := source["function"].(map[string]any)
+		toolType := strings.TrimSpace(firstNonEmptyAnyString(source["type"]))
+		if function != nil && (toolType == "" || toolType == "function") {
+			item := map[string]any{"type": "function"}
+			for _, field := range []string{"name", "description", "parameters", "strict"} {
+				if value, ok := function[field]; ok {
+					item[field] = value
+				}
+			}
+			tools = append(tools, item)
+			continue
+		}
+		// A provider extension already using a Responses-shaped tool object can
+		// be carried into the canonical request without reinterpretation.
+		tools = append(tools, source)
+		_ = isFunction
+	}
+	return tools
+}
+
+func chatResponseFormatToResponses(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return nil
+	}
+	var responseFormat map[string]any
+	if json.Unmarshal(raw, &responseFormat) != nil || responseFormat == nil {
+		return nil
+	}
+	return responsesTextFormatFromResponseFormat(responseFormat)
 }
 
 func invalidFunctionNameError(path string) error {
@@ -1621,10 +1764,23 @@ func invalidFunctionNameError(path string) error {
 }
 
 func validateChatCompletionFunctionNames(req openAIRequest) error {
+	knownCalls := make(map[string]struct{})
 	for msgIdx, msg := range req.Messages {
+		if msg.Role == "tool" {
+			callID := strings.TrimSpace(msg.ToolCallID)
+			if callID == "" {
+				return fmt.Errorf("messages[%d] orphan tool message without tool_call_id", msgIdx)
+			}
+			if _, ok := knownCalls[callID]; !ok {
+				return fmt.Errorf("messages[%d] orphan tool message for unknown tool_call_id %q", msgIdx, callID)
+			}
+		}
 		for callIdx, toolCall := range msg.ToolCalls {
 			if strings.TrimSpace(toolCall.Function.Name) == "" {
 				return invalidFunctionNameError(fmt.Sprintf("messages[%d].tool_calls[%d].function.name", msgIdx, callIdx))
+			}
+			if callID := strings.TrimSpace(toolCall.ID); msg.Role == "assistant" && callID != "" {
+				knownCalls[callID] = struct{}{}
 			}
 		}
 	}
@@ -3250,6 +3406,34 @@ func newErrorResponse(message string, details ...json.RawMessage) []byte {
 	return b
 }
 
+// ChatStreamTranslation keeps terminal success and terminal failure distinct.
+// Both end the upstream Responses stream, but only a successful completion may
+// be followed by Chat Completions' [DONE] sentinel. Treating a response.failed
+// as the old undifferentiated done=true result makes a failed generation look
+// like a cleanly completed Chat stream to downstream clients.
+type ChatStreamTranslation struct {
+	Chunk    []byte
+	Terminal bool
+	Failed   bool
+}
+
+func newChatStreamTranslation(eventType string, chunk []byte, terminal bool) ChatStreamTranslation {
+	return ChatStreamTranslation{
+		Chunk:    chunk,
+		Terminal: terminal,
+		Failed:   terminal && eventType == "response.failed",
+	}
+}
+
+// TranslateStreamChunkResult is the terminal-aware form of
+// TranslateStreamChunk. Existing callers that only need the historical
+// (chunk, done) pair can keep using TranslateStreamChunk.
+func TranslateStreamChunkResult(eventData []byte, model string, chunkID string, created int64) ChatStreamTranslation {
+	eventType := gjson.GetBytes(eventData, "type").String()
+	chunk, terminal := TranslateStreamChunk(eventData, model, chunkID, created)
+	return newChatStreamTranslation(eventType, chunk, terminal)
+}
+
 // TranslateStreamChunk 将 Codex SSE 数据块翻译为 OpenAI Chat Completions 流式格式（无状态）
 func TranslateStreamChunk(eventData []byte, model string, chunkID string, created int64) ([]byte, bool) {
 	eventType := gjson.GetBytes(eventData, "type").String()
@@ -3329,6 +3513,14 @@ func NewStreamTranslator(chunkID, model string, created int64) *StreamTranslator
 // Translate 将单个 Codex SSE 事件翻译为 OpenAI Chat Completions 流式格式
 func (st *StreamTranslator) Translate(eventData []byte) ([]byte, bool) {
 	return st.TranslateParsed(gjson.ParseBytes(eventData))
+}
+
+// TranslateParsedResult exposes whether a terminal translation represents a
+// successful completion or a failure. This lets the HTTP handler terminate a
+// failed stream without appending the success-only [DONE] sentinel.
+func (st *StreamTranslator) TranslateParsedResult(parsed gjson.Result) ChatStreamTranslation {
+	chunk, terminal := st.TranslateParsed(parsed)
+	return newChatStreamTranslation(parsed.Get("type").String(), chunk, terminal)
 }
 
 // TranslateParsed 将已解析的 Codex SSE 事件翻译为 OpenAI Chat Completions 流式格式。

@@ -110,6 +110,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS usage_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			account_id INTEGER DEFAULT 0,
+			credential_generation INTEGER NOT NULL DEFAULT 0,
 			client_ip TEXT DEFAULT '',
 			client_user_agent TEXT DEFAULT '',
 			upstream_user_agent TEXT DEFAULT '',
@@ -471,6 +472,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "attempt_index", "INTEGER DEFAULT 0"},
 		{"usage_logs", "upstream_error_kind", "TEXT DEFAULT ''"},
 		{"usage_logs", "error_message", "TEXT DEFAULT ''"},
+		{"usage_logs", "credential_generation", "INTEGER NOT NULL DEFAULT 0"},
 		{"api_keys", "quota_limit", "REAL DEFAULT 0"},
 		{"api_keys", "quota_used", "REAL DEFAULT 0"},
 		{"api_keys", "total_used", "REAL DEFAULT 0"},
@@ -658,6 +660,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_created_at ON usage_logs(created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_account_id ON usage_logs(account_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_account_created_at ON usage_logs(account_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_logs_account_generation_created_at ON usage_logs(account_id, credential_generation, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_created_status ON usage_logs(created_at, status_code);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_account_status ON usage_logs(account_id, status_code);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_api_key_created_at ON usage_logs(api_key_id, created_at);`,
