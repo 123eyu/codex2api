@@ -1448,6 +1448,13 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
+	if s.db != nil {
+		// CAS 已把上一代目录/能力/事实随代盖章,重新投影回内存,避免刷新后
+		// 路由退化为保守默认集并等 30 秒扫描兜底。失败不致命。
+		if reloadErr := s.ReloadGrokPersistentState(ctx, dbID); reloadErr != nil {
+			log.Printf("[账号 %d] 刷新后重载 Grok 持久状态失败: %v", dbID, reloadErr)
+		}
+	}
 	if s.tokenCache != nil {
 		if ttl := time.Until(td.ExpiresAt) - 5*time.Minute; ttl > 0 {
 			_ = s.tokenCache.SetAccessToken(ctx, dbID, td.AccessToken, ttl)
