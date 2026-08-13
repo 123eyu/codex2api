@@ -67,7 +67,7 @@ import { CompactStat } from "../components/CompactStat";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
-import { useAccountLiveState } from "../hooks/useAccountLiveState";
+import { mergeAccountLiveState, useAccountLiveState } from "../hooks/useAccountLiveState";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -640,10 +640,7 @@ function GrokAccounts({
     [accounts],
   );
   const applyAccountLiveState = useCallback((response: AccountLiveStateResponse) => {
-    setAccounts((current) => current.map((account) => ({
-      ...account,
-      active_requests: response.accounts[String(account.id)]?.active_requests ?? 0,
-    })));
+    setAccounts((current) => mergeAccountLiveState(current, response));
   }, []);
   useAccountLiveState(visibleAccountIDs, applyAccountLiveState);
   const loadAccountDetail = useCallback(

@@ -2,6 +2,23 @@ import { useEffect, useMemo } from 'react'
 import { api } from '../api'
 import type { AccountLiveStateResponse } from '../types'
 
+// Merge a live poll response into an account list. Rows whose active_requests
+// did not change keep their object identity, and a no-op poll returns the
+// original array, so the 1s polling cadence cannot defeat row-level memoization.
+export function mergeAccountLiveState<T extends { id: number; active_requests?: number }>(
+  current: T[],
+  response: AccountLiveStateResponse,
+): T[] {
+  let changed = false
+  const next = current.map((account) => {
+    const activeRequests = response.accounts[String(account.id)]?.active_requests ?? 0
+    if ((account.active_requests ?? 0) === activeRequests) return account
+    changed = true
+    return { ...account, active_requests: activeRequests }
+  })
+  return changed ? next : current
+}
+
 export function useAccountLiveState(
   ids: number[],
   apply: (response: AccountLiveStateResponse) => void,

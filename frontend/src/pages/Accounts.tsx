@@ -11,7 +11,7 @@ import ModelLogo from "../components/ModelLogo";
 import OperationResultsModal from "../components/OperationResultsModal";
 import { cn } from "@/lib/utils";
 import GrokAccounts from "./GrokAccounts";
-import { useAccountLiveState } from "../hooks/useAccountLiveState";
+import { mergeAccountLiveState, useAccountLiveState } from "../hooks/useAccountLiveState";
 import PageHeader from "../components/PageHeader";
 import { CompactStat } from "../components/CompactStat";
 import Pagination from "../components/Pagination";
@@ -2437,13 +2437,10 @@ export default function Accounts() {
     [data.accounts],
   );
   const applyAccountLiveState = useCallback((response: AccountLiveStateResponse) => {
-    setData((current) => ({
-      ...current,
-      accounts: current.accounts.map((account) => ({
-        ...account,
-        active_requests: response.accounts[String(account.id)]?.active_requests ?? 0,
-      })),
-    }));
+    setData((current) => {
+      const accounts = mergeAccountLiveState(current.accounts, response);
+      return accounts === current.accounts ? current : { ...current, accounts };
+    });
   }, [setData]);
   useAccountLiveState(visibleAccountIDs, applyAccountLiveState, providerView === "codex");
   const loadAccountDetail = useCallback(
