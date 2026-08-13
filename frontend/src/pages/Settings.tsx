@@ -2010,8 +2010,8 @@ export default function Settings() {
         {/* 顶部分段导航 + 自动保存状态：视口顶部居中固定 */}
         <div
           className={cn(
-            'fixed left-1/2 top-[max(0.625rem,env(safe-area-inset-top,0px))] z-50 flex -translate-x-1/2 items-center gap-2',
-            'max-w-[min(72rem,calc(100vw-1.25rem))]',
+            'fixed left-1/2 top-[max(0.625rem,env(safe-area-inset-top,0px))] z-50 flex w-full -translate-x-1/2 items-center gap-2',
+            'max-w-[min(72rem,calc(100vw-1.25rem))] px-1',
           )}
         >
           <nav

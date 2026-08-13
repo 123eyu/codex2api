@@ -1355,6 +1355,7 @@ const AccountCardItem = memo(function AccountCardItem({
   refreshing,
   authJsonExporting,
   variant,
+  visibleColumns,
   t,
   actions,
 }: {
@@ -1369,6 +1370,7 @@ const AccountCardItem = memo(function AccountCardItem({
   refreshing: boolean;
   authJsonExporting: boolean;
   variant: "mobile" | "personal";
+  visibleColumns?: Record<AccountTableColumn, boolean>;
   t: ReturnType<typeof useTranslation>["t"];
   actions: AccountRowActions;
 }) {
@@ -1385,6 +1387,7 @@ const AccountCardItem = memo(function AccountCardItem({
       refreshing={refreshing}
       authJsonExporting={authJsonExporting}
       variant={variant}
+      visibleColumns={visibleColumns}
       t={t}
       onToggleSelect={() => actions.toggleSelect(account.id)}
       onOpenDetail={() => actions.openDetail(account)}
@@ -5854,7 +5857,7 @@ export default function Accounts() {
           ) : null}
 
           <div className="toolbar-surface mb-3 flex flex-col gap-2.5">
-            <div className="flex items-center gap-1.5 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <div className="flex items-center gap-1.5 overflow-x-auto [-mx-3] [px-3] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               <span className="shrink-0 whitespace-nowrap text-[12px] font-semibold text-foreground">
                 {t("accounts.filter")}
               </span>
@@ -5924,7 +5927,7 @@ export default function Accounts() {
             </div>
 
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-              <div className="relative w-full shrink-0 sm:w-64">
+              <div className="relative w-full min-w-0 shrink-0 sm:w-64">
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <AccountSearchInput
                   className="h-9 rounded-lg pl-9 text-[13px] sm:h-8"
@@ -6008,7 +6011,7 @@ export default function Accounts() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  className="min-w-0"
+                  className="w-full min-w-0 px-2 sm:w-auto"
                   aria-pressed={sortKey === "group"}
                   title={t("accounts.groupSortHint")}
                   onClick={() => {
@@ -6023,12 +6026,12 @@ export default function Accounts() {
                     setPage(1);
                   }}
                 >
-                  <Layers className="size-3.5" />
+                  <Layers className="size-3.5 shrink-0" />
                   <span className="truncate">
                     {t("accounts.groupSort")}
                   </span>
                   {sortKey === "group" ? (
-                    <span aria-hidden="true">
+                    <span aria-hidden="true" className="shrink-0">
                       {sortDir === "desc" ? "↓" : "↑"}
                     </span>
                   ) : null}
@@ -6037,7 +6040,7 @@ export default function Accounts() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  className="min-w-0"
+                  className="w-full min-w-0 px-2 sm:w-auto"
                   aria-pressed={sortKey === "schedulerPriority"}
                   title={t("accounts.schedulerPrioritySortHint")}
                   onClick={() => {
@@ -6052,12 +6055,12 @@ export default function Accounts() {
                     setPage(1);
                   }}
                 >
-                  <SlidersHorizontal className="size-3.5" />
+                  <SlidersHorizontal className="size-3.5 shrink-0" />
                   <span className="truncate">
                     {t("accounts.schedulerPrioritySort")}
                   </span>
                   {sortKey === "schedulerPriority" ? (
-                    <span aria-hidden="true">
+                    <span aria-hidden="true" className="shrink-0">
                       {sortDir === "desc" ? "↓" : "↑"}
                     </span>
                   ) : null}
@@ -6065,9 +6068,9 @@ export default function Accounts() {
                 {/* 卡片布局(自用模式/网格/移动端)没有可排序表头,这里补一个
                     紧凑排序入口,避免升级后"排序功能消失"(issue #493)。 */}
                 {!shouldRenderDesktopTable && (
-                  <>
+                  <div className="col-span-2 flex items-center gap-1.5 sm:col-span-1 sm:w-auto">
                     <Select
-                      className="w-32"
+                      className="w-full min-w-0 sm:w-32"
                       compact
                       value={
                         sortKey === "requests" || sortKey === "usage" || sortKey === "importTime"
@@ -6095,7 +6098,7 @@ export default function Accounts() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        className="min-w-0"
+                        className="shrink-0 px-2.5"
                         aria-label={t("accounts.cardSortDirection")}
                         onClick={() => {
                           setSortDir((current) => (current === "desc" ? "asc" : "desc"));
@@ -6105,20 +6108,20 @@ export default function Accounts() {
                         <span aria-hidden="true">{sortDir === "desc" ? "↓" : "↑"}</span>
                       </Button>
                     )}
-                  </>
+                  </div>
                 )}
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  className="min-w-0"
+                  className="w-full min-w-0 px-2 sm:w-auto"
                   aria-pressed={showEmailDomainTags}
                   onClick={() => setShowEmailDomainTags((visible) => !visible)}
                 >
                   {showEmailDomainTags ? (
-                    <EyeOff className="size-3.5" />
+                    <EyeOff className="size-3.5 shrink-0" />
                   ) : (
-                    <Eye className="size-3.5" />
+                    <Eye className="size-3.5 shrink-0" />
                   )}
                   <span className="truncate">
                     {showEmailDomainTags
@@ -6130,10 +6133,10 @@ export default function Accounts() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  className="min-w-0"
+                  className="w-full min-w-0 px-2 sm:w-auto"
                   onClick={() => setShowGroupManager(true)}
                 >
-                  <FolderOpen className="size-3.5" />
+                  <FolderOpen className="size-3.5 shrink-0" />
                   <span className="truncate">{t("accounts.groupManage")}</span>
                 </Button>
               </div>
@@ -6478,6 +6481,7 @@ export default function Accounts() {
                         refreshing={refreshingIds.has(account.id)}
                         authJsonExporting={authJsonExportingIds.has(account.id)}
                         variant={isPersonalMode ? "personal" : "mobile"}
+                        visibleColumns={visibleColumns}
                         t={t}
                         actions={rowActions}
                       />
@@ -12560,7 +12564,7 @@ function ColumnSettingsMenu({
         {title}
       </Button>
       {open ? (
-        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-50 w-48 overflow-hidden rounded-lg border border-border bg-popover p-1.5 shadow-lg">
+        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-50 w-48 max-w-[calc(100vw-2.5rem)] overflow-hidden rounded-lg border border-border bg-popover p-1.5 shadow-lg">
           <button
             type="button"
             className="mb-1 flex w-full items-center justify-center rounded-md px-2.5 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-accent/70"
@@ -12603,6 +12607,7 @@ function AccountMobileCard({
   refreshing,
   authJsonExporting,
   variant = "mobile",
+  visibleColumns,
   t,
   onToggleSelect,
   onOpenDetail,
@@ -12632,6 +12637,7 @@ function AccountMobileCard({
   refreshing: boolean;
   authJsonExporting: boolean;
   variant?: "mobile" | "personal";
+  visibleColumns?: Record<AccountTableColumn, boolean>;
   t: ReturnType<typeof useTranslation>["t"];
   onToggleSelect: () => void;
   onOpenDetail: () => void;
@@ -13035,11 +13041,17 @@ function AccountMobileCard({
           <div className="flex min-w-0 items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                  <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-mono font-semibold text-muted-foreground">
-                    #{sequence}
-                  </span>
-                  <PlanBadge planType={account.plan_type} />
-                  <SchedulerPriorityBadge account={account} />
+                  {(!visibleColumns || visibleColumns.sequence) && (
+                    <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-mono font-semibold text-muted-foreground">
+                      #{sequence}
+                    </span>
+                  )}
+                  {(!visibleColumns || visibleColumns.plan) && (
+                    <PlanBadge planType={account.plan_type} />
+                  )}
+                  {(!visibleColumns || visibleColumns.priority) && (
+                    <SchedulerPriorityBadge account={account} />
+                  )}
                   <ExpiryBadge
                     expiresAt={account.subscription_expires_at}
                     planType={account.plan_type}
@@ -13068,17 +13080,19 @@ function AccountMobileCard({
                   </div>
                 )}
               </div>
-              <div className="flex min-w-[112px] shrink-0 flex-col items-end">
-                <StatusBadge
-                  status={account.status}
-                  detail={getAccountRateLimitWindow(account) ?? undefined}
-                  errorMessage={account.error_message}
-                />
-                <div className="mt-1 flex min-h-6 flex-wrap items-center justify-end gap-1.5">
-                  <UsingCreditsBadge account={account} />
-                  <AccountStatusCountdown account={account} />
+              {(!visibleColumns || visibleColumns.status) && (
+                <div className="flex min-w-[112px] shrink-0 flex-col items-end">
+                  <StatusBadge
+                    status={account.status}
+                    detail={getAccountRateLimitWindow(account) ?? undefined}
+                    errorMessage={account.error_message}
+                  />
+                  <div className="mt-1 flex min-h-6 flex-wrap items-center justify-end gap-1.5">
+                    <UsingCreditsBadge account={account} />
+                    <AccountStatusCountdown account={account} />
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
           <div className="mt-2 flex min-h-6 min-w-0 flex-wrap items-center gap-1.5">
@@ -13129,16 +13143,18 @@ function AccountMobileCard({
                 : ""}
             </div>
           )}
-          <div
-            className="mt-1.5"
-            title={t("accounts.healthSummary", {
-              health: formatHealthTier(account.health_tier, t),
-              score: Math.round(getDispatchScore(account)),
-              concurrency: account.dynamic_concurrency_limit ?? "-",
-            })}
-          >
-            <AccountHealthBar buckets={healthBuckets} />
-          </div>
+          {(!visibleColumns || visibleColumns.usage) && (
+            <div
+              className="mt-1.5"
+              title={t("accounts.healthSummary", {
+                health: formatHealthTier(account.health_tier, t),
+                score: Math.round(getDispatchScore(account)),
+                concurrency: account.dynamic_concurrency_limit ?? "-",
+              })}
+            >
+              <AccountHealthBar buckets={healthBuckets} />
+            </div>
+          )}
           {(account.active_requests ?? 0) > 0 && (
             <div className="mt-1">
               <span
@@ -13161,75 +13177,89 @@ function AccountMobileCard({
       <div
         className="mt-3 grid min-w-0 grid-cols-2 gap-2 max-[380px]:grid-cols-1"
       >
-        <AccountMobileMetric label={t("accounts.requests")} className="min-h-[84px]">
-          <div className="flex items-center gap-2 text-[13px]">
-            <span className="font-medium text-emerald-600">
-              {account.success_requests ?? 0}
-            </span>
-            <span className="text-muted-foreground">/</span>
-            <span className="font-medium text-red-500">
-              {account.error_requests ?? 0}
-            </span>
-          </div>
-          {((account.retry_error_requests ?? 0) > 0 ||
-            (account.rate_limit_attempts ?? 0) > 0) && (
-            <div className="mt-0.5 text-[11px] text-muted-foreground">
-              retry {account.retry_error_requests ?? 0} · 429{" "}
-              {account.rate_limit_attempts ?? 0}
+        {(!visibleColumns || visibleColumns.requests) && (
+          <AccountMobileMetric label={t("accounts.requests")} className="min-h-[84px]">
+            <div className="flex items-center gap-2 text-[13px]">
+              <span className="font-medium text-emerald-600">
+                {account.success_requests ?? 0}
+              </span>
+              <span className="text-muted-foreground">/</span>
+              <span className="font-medium text-red-500">
+                {account.error_requests ?? 0}
+              </span>
             </div>
-          )}
-        </AccountMobileMetric>
-        <AccountMobileMetric label={t("accounts.billed")} className="min-h-[84px]">
-          <BilledCell
-                  account={account}
-                  onOpenOfficial={onOpenOfficialUsage ? () => onOpenOfficialUsage() : undefined}
-                />
-        </AccountMobileMetric>
-        <AccountMobileMetric label={t("accounts.updatedAt")} className="min-h-[84px]">
-          {lazyMode ? (
-            <div className="space-y-0.5">
-              <div>
-                <span className="mr-1 text-muted-foreground/70">
-                  {t("accounts.recordUpdatedAtShort")}
-                </span>
-                {formatRelativeTime(account.updated_at)}
+            {((account.retry_error_requests ?? 0) > 0 ||
+              (account.rate_limit_attempts ?? 0) > 0) && (
+              <div className="mt-0.5 text-[11px] text-muted-foreground">
+                retry {account.retry_error_requests ?? 0} · 429{" "}
+                {account.rate_limit_attempts ?? 0}
               </div>
-              <div>
-                <span className="mr-1 text-muted-foreground/70">
-                  {t("accounts.usageUpdatedAtShort")}
-                </span>
-                {account.codex_usage_updated_at
-                  ? formatRelativeTime(account.codex_usage_updated_at)
-                  : t("accounts.noUsageUpdatedAt")}
+            )}
+          </AccountMobileMetric>
+        )}
+        {(!visibleColumns || visibleColumns.billed) && (
+          <AccountMobileMetric label={t("accounts.billed")} className="min-h-[84px]">
+            <BilledCell
+              account={account}
+              onOpenOfficial={onOpenOfficialUsage ? () => onOpenOfficialUsage() : undefined}
+            />
+          </AccountMobileMetric>
+        )}
+        {(!visibleColumns || visibleColumns.updatedAt) && (
+          <AccountMobileMetric label={t("accounts.updatedAt")} className="min-h-[84px]">
+            {lazyMode ? (
+              <div className="space-y-0.5">
+                <div>
+                  <span className="mr-1 text-muted-foreground/70">
+                    {t("accounts.recordUpdatedAtShort")}
+                  </span>
+                  {formatRelativeTime(account.updated_at)}
+                </div>
+                <div>
+                  <span className="mr-1 text-muted-foreground/70">
+                    {t("accounts.usageUpdatedAtShort")}
+                  </span>
+                  {account.codex_usage_updated_at
+                    ? formatRelativeTime(account.codex_usage_updated_at)
+                    : t("accounts.noUsageUpdatedAt")}
+                </div>
               </div>
-            </div>
-          ) : (
-            formatRelativeTime(account.updated_at)
-          )}
-        </AccountMobileMetric>
-        <AccountMobileMetric label={t("accounts.importTime")} className="min-h-[84px]">
-          {formatBeijingTime(account.created_at)}
-        </AccountMobileMetric>
-        <AccountMobileMetric
-          label={t("accounts.usage")}
-          className="col-span-2 min-h-[116px] max-[380px]:col-span-1"
-        >
-          <UsageCell account={account} onRefreshed={onUsageRefreshed} />
-        </AccountMobileMetric>
+            ) : (
+              formatRelativeTime(account.updated_at)
+            )}
+          </AccountMobileMetric>
+        )}
+        {(!visibleColumns || visibleColumns.importTime) && (
+          <AccountMobileMetric label={t("accounts.importTime")} className="min-h-[84px]">
+            {formatBeijingTime(account.created_at)}
+          </AccountMobileMetric>
+        )}
+        {(!visibleColumns || visibleColumns.usage) && (
+          <AccountMobileMetric
+            label={t("accounts.usage")}
+            className="col-span-2 min-h-[116px] max-[380px]:col-span-1"
+          >
+            <UsageCell account={account} onRefreshed={onUsageRefreshed} />
+          </AccountMobileMetric>
+        )}
       </div>
 
       <div className="mt-3 space-y-1.5 border-t border-border pt-2">
-        <ChipList items={account.tags ?? []} tone="purple" />
+        {(!visibleColumns || visibleColumns.tags) && (
+          <ChipList items={account.tags ?? []} tone="purple" />
+        )}
         {!isPersonal && showEmailDomainTags && getAccountEmailDomain(account) && (
           <div className="mt-1.5 flex flex-wrap gap-1">
             <EmailDomainBadge domain={getAccountEmailDomain(account)} t={t} />
           </div>
         )}
-        <GroupChipList
-          groups={groups}
-          onClick={onEditGroups}
-          emptyLabel={t("accounts.groupQuickEdit")}
-        />
+        {(!visibleColumns || visibleColumns.groups) && (
+          <GroupChipList
+            groups={groups}
+            onClick={onEditGroups}
+            emptyLabel={t("accounts.groupQuickEdit")}
+          />
+        )}
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5">

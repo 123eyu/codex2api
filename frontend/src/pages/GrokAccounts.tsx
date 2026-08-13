@@ -1954,7 +1954,7 @@ function GrokAccounts({
         </div>
 
         <div className="toolbar-surface mb-3 flex flex-col gap-2.5">
-          <div className="flex items-center gap-1.5 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div className="flex items-center gap-1.5 overflow-x-auto [-mx-3] [px-3] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <span className="shrink-0 whitespace-nowrap text-[12px] font-semibold text-foreground">
               {t("accounts.filter")}
             </span>
