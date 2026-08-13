@@ -1257,9 +1257,6 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 	oidcIssuer := acc.GrokOIDCIssuer
 	principalType := acc.GrokPrincipalType
 	principalID := acc.GrokPrincipalID
-	cooldownUntil := acc.CooldownUtil
-	cooldownReason := acc.CooldownReason
-	activeCooldown := acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)
 	generation := acc.CredentialGeneration
 	familyID := acc.CredentialFamilyID
 	acc.mu.RUnlock()
@@ -1306,7 +1303,7 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 			// A forced caller that waited for an already-completed rotation belongs
 			// to the same refresh batch. Reusing the freshly committed AT prevents a
 			// second forced call from immediately consuming the newly rotated RT.
-			s.finishReloadedOAuthRefresh(ctx, acc, activeCooldown, false, cooldownUntil, cooldownReason)
+			s.finishReloadedOAuthRefresh(ctx, acc)
 			return nil
 		}
 		acc.mu.RLock()
@@ -1345,7 +1342,8 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 				} else {
 					acc.ExpiresAt = time.Now().Add(30 * time.Minute)
 				}
-				if !activeCooldown {
+				// 以当前状态判定冷却,不用入口快照:等待期间可能新设了冷却。
+				if !(acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)) {
 					acc.Status = StatusReady
 				}
 				acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
@@ -1362,6 +1360,13 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 		}
 	}
 
+	// 从这里起进入 RT 消费临界区:上游一旦完成 RT 轮换,调用方取消(浏览器断开、
+	// 管理端短超时)会让新 RT 在"响应未读完/CAS 未提交"窗口内永久丢失,账号被
+	// 错误打成 error 且只能人工重导。切换到不随调用方取消、仅受 lease hold
+	// 期限约束的 ctx,保证交换与落库原子完成。
+	if refreshLocks != nil {
+		ctx = refreshLocks.CriticalContext()
+	}
 	td, err := RefreshGrokAccessToken(ctx, GrokRefreshParams{
 		RefreshToken:  rt,
 		ClientID:      clientID,
@@ -1430,11 +1435,9 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 	}
 	acc.ExpiresAt = td.ExpiresAt
 	acc.ErrorMsg = ""
-	if activeCooldown {
-		acc.Status = StatusCooldown
-		acc.CooldownUtil = cooldownUntil
-		acc.CooldownReason = cooldownReason
-	} else {
+	// 冷却判定基于当前内存状态:入口快照到这里可能隔了近 10 分钟(等 lease +
+	// HTTP 刷新),期间设置/延长的冷却是更新的事实,AT 续期成功不代表限流解除。
+	if !(acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)) {
 		acc.Status = StatusReady
 		acc.CooldownUtil = time.Time{}
 		acc.CooldownReason = ""
