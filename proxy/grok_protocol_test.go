@@ -466,6 +466,46 @@ func TestChatAdapterPropagatesErrorAndSparseTool(t *testing.T) {
 	}
 }
 
+func TestChatAdapterCapturesUsageOnlyChunkAfterFinish(t *testing.T) {
+	// include_usage 流:usage 在 finish chunk 之后以 choices 为空的独立 chunk 下发,
+	// 终态必须携带这份 usage 而不是提前发出零值。
+	source := io.NopCloser(bytes.NewBufferString(
+		"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n" +
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"total_tokens\":9,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n\n" +
+			"data: [DONE]\n\n"))
+	stream, err := io.ReadAll(newChatToResponsesReader(source, "grok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := completedGrokResponseEvent(t, stream)
+	usage := gjson.GetBytes(completed, "response.usage")
+	if usage.Get("input_tokens").Int() != 7 || usage.Get("output_tokens").Int() != 2 || usage.Get("total_tokens").Int() != 9 {
+		t.Fatalf("usage-only chunk lost: %s", completed)
+	}
+	if usage.Get("input_tokens_details.cached_tokens").Int() != 3 {
+		t.Fatalf("cached tokens lost: %s", completed)
+	}
+	if count := bytes.Count(stream, []byte(`"type":"response.completed"`)); count != 1 {
+		t.Fatalf("terminal emitted %d times, want 1: %s", count, stream)
+	}
+}
+
+func TestChatAdapterFinishWithoutUsageChunkStillCompletesAtEOF(t *testing.T) {
+	// 上游承诺 include_usage 但实际没发 usage chunk 也没发 [DONE]:EOF 时应按
+	// 挂起的 finish_reason 正常收尾,而不是误判为断流。
+	source := io.NopCloser(bytes.NewBufferString(
+		"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+	stream, err := io.ReadAll(newChatToResponsesReader(source, "grok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(stream, []byte(`"type":"response.completed"`)) || bytes.Contains(stream, []byte(`"type":"response.failed"`)) {
+		t.Fatalf("pending finish was not completed at EOF: %s", stream)
+	}
+}
+
 func completedGrokResponseEvent(t *testing.T, stream []byte) []byte {
 	t.Helper()
 	for _, frame := range bytes.Split(stream, []byte("\n\n")) {
