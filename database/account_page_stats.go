@@ -35,8 +35,8 @@ func (db *DB) GetAccountRequestCountsByIDs(ctx context.Context, ids []int64) (ma
 			COALESCE(SUM(CASE WHEN status_code >= 400 AND %s THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END), 0)
 		FROM usage_logs
-		WHERE created_at >= $1 AND account_id IN (%s)
-		GROUP BY account_id`, retryFalse, retryFalse, retryTrue, strings.Join(placeholders, ","))
+		WHERE created_at >= $1 AND %s AND account_id IN (%s)
+		GROUP BY account_id`, retryFalse, retryFalse, retryTrue, db.endUserUsageLogPredicate(), strings.Join(placeholders, ","))
 	rows, err := db.conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -77,8 +77,8 @@ func (db *DB) GetAccountUsageWindowsByIDs(ctx context.Context, ids []int64, shor
 		COALESCE(SUM(CASE WHEN created_at >= $1 THEN user_billed ELSE 0 END), 0),
 		COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(account_billed), 0), COALESCE(SUM(user_billed), 0)
 		FROM usage_logs
-		WHERE created_at >= $2 AND status_code <> 499 AND %s AND %s AND account_id IN (%s)
-		GROUP BY account_id`, db.nonRetryUsageLogPredicate(), db.currentAccountUsageGenerationPredicate(), strings.Join(placeholders, ","))
+		WHERE created_at >= $2 AND status_code <> 499 AND %s AND %s AND %s AND account_id IN (%s)
+		GROUP BY account_id`, db.nonRetryUsageLogPredicate(), db.currentAccountUsageGenerationPredicate(), db.endUserUsageLogPredicate(), strings.Join(placeholders, ","))
 	rows, err := db.conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, nil, err

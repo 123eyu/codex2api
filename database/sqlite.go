@@ -747,6 +747,7 @@ func (db *DB) getTrafficSnapshotSQLite(ctx context.Context) (*TrafficSnapshot, e
 		SELECT created_at, total_tokens
 		FROM usage_logs
 		WHERE created_at >= $1
+		  AND TRIM(COALESCE(internal_reason, '')) = ''
 	`, db.timeArg(time.Now().Add(-5*time.Minute)))
 	if err != nil {
 		return nil, err
@@ -817,6 +818,7 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 		FROM usage_logs
 		WHERE created_at >= $1 AND created_at < $2
 		  AND status_code <> 499
+		  AND TRIM(COALESCE(internal_reason, '')) = ''
 	`
 	args := []interface{}{startArg, endArg, bucketMinutes}
 	if channel != "" {
@@ -849,7 +851,8 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 	}
 
 	modelQuery := `SELECT COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown'), COUNT(*)
-		FROM usage_logs WHERE created_at >= $1 AND created_at < $2 AND status_code <> 499`
+		FROM usage_logs WHERE created_at >= $1 AND created_at < $2 AND status_code <> 499
+		  AND TRIM(COALESCE(internal_reason, '')) = ''`
 	modelArgs := []interface{}{startArg, endArg}
 	if channel != "" {
 		modelQuery += " AND channel = $3"
@@ -971,7 +974,8 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN created_at >= $2 THEN total_tokens ELSE 0 END), 0)
-	FROM usage_logs WHERE created_at >= $1 AND status_code <> 499`
+	FROM usage_logs WHERE created_at >= $1 AND status_code <> 499
+	  AND TRIM(COALESCE(internal_reason, '')) = ''`
 	args := []interface{}{db.timeArg(rangeStart), db.timeArg(minuteAgo)}
 	if !rangeEnd.IsZero() {
 		query += fmt.Sprintf(" AND created_at < $%d", len(args)+1)

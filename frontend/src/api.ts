@@ -36,6 +36,7 @@ import type {
   AccountsPageParams,
   AccountsPageResponse,
   AccountPageStatsResponse,
+  AccountLiveStateResponse,
   ChartAggregation,
   CreateAccountResponse,
   CreateAPIKeyResponse,
@@ -568,6 +569,10 @@ export const api = {
   getAccountPageStats: (ids: number[], signal?: AbortSignal) => {
     const query = new URLSearchParams({ ids: ids.join(',') })
     return request<AccountPageStatsResponse>(`/accounts/page-stats?${query}`, { signal })
+  },
+  getAccountLiveState: (ids: number[], signal?: AbortSignal) => {
+    const query = new URLSearchParams({ ids: ids.join(',') })
+    return request<AccountLiveStateResponse>(`/accounts/live?${query}`, { signal })
   },
   addAccount: (data: AddAccountRequest) =>
     request<CreateAccountResponse>('/accounts', { method: 'POST', body: JSON.stringify(data) }),

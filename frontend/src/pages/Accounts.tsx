@@ -11,6 +11,7 @@ import ModelLogo from "../components/ModelLogo";
 import OperationResultsModal from "../components/OperationResultsModal";
 import { cn } from "@/lib/utils";
 import GrokAccounts from "./GrokAccounts";
+import { useAccountLiveState } from "../hooks/useAccountLiveState";
 import PageHeader from "../components/PageHeader";
 import { CompactStat } from "../components/CompactStat";
 import Pagination from "../components/Pagination";
@@ -45,6 +46,7 @@ import type {
   AccountEmailDomainFacet,
   AccountOperationSelector,
   AccountPageStatsItem,
+  AccountLiveStateResponse,
 } from "../types";
 import { getErrorMessage } from "../utils/error";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
@@ -1165,7 +1167,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                     <AccountStatusCountdown account={account} />
                                     {(account.active_requests ?? 0) > 0 && (
                                       <span
-                                        className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 dark:text-blue-400"
+                                        className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20"
                                         title={t("accounts.activeRequestsTooltip", {
                                           count: account.active_requests ?? 0,
                                         })}
@@ -2430,6 +2432,20 @@ export default function Accounts() {
     }));
     return account;
   }, [setData]);
+  const visibleAccountIDs = useMemo(
+    () => data.accounts.map((account) => account.id),
+    [data.accounts],
+  );
+  const applyAccountLiveState = useCallback((response: AccountLiveStateResponse) => {
+    setData((current) => ({
+      ...current,
+      accounts: current.accounts.map((account) => ({
+        ...account,
+        active_requests: response.accounts[String(account.id)]?.active_requests ?? 0,
+      })),
+    }));
+  }, [setData]);
+  useAccountLiveState(visibleAccountIDs, applyAccountLiveState, providerView === "codex");
   const loadAccountDetail = useCallback(
     (account: AccountRow) =>
       account.detail_loaded ? Promise.resolve(account) : api.getAccount(account.id),
@@ -12763,11 +12779,27 @@ function AccountMobileCard({
                 </div>
               </div>
               <div className="shrink-0">
-                <StatusBadge
-                  status={account.status}
-                  detail={getAccountRateLimitWindow(account) ?? undefined}
-                  errorMessage={account.error_message}
-                />
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  <StatusBadge
+                    status={account.status}
+                    detail={getAccountRateLimitWindow(account) ?? undefined}
+                    errorMessage={account.error_message}
+                  />
+                  {(account.active_requests ?? 0) > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20"
+                      title={t("accounts.activeRequestsTooltip", {
+                        count: account.active_requests ?? 0,
+                      })}
+                    >
+                      <span
+                        className="size-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400"
+                        aria-hidden
+                      />
+                      {account.active_requests}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -13109,6 +13141,22 @@ function AccountMobileCard({
           >
             <AccountHealthBar buckets={healthBuckets} />
           </div>
+          {(account.active_requests ?? 0) > 0 && (
+            <div className="mt-1">
+              <span
+                className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20"
+                title={t("accounts.activeRequestsTooltip", {
+                  count: account.active_requests ?? 0,
+                })}
+              >
+                <span
+                  className="size-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400"
+                  aria-hidden
+                />
+                {account.active_requests}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 

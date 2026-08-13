@@ -45,6 +45,7 @@ import type {
   GrokAccountState,
   GrokModelCatalogItem,
   GrokProtocol,
+  AccountLiveStateResponse,
 } from "../types";
 import AccountDetailSheet from "../components/AccountDetailSheet";
 import AccountGroupFilterSelect, {
@@ -66,6 +67,7 @@ import { CompactStat } from "../components/CompactStat";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
+import { useAccountLiveState } from "../hooks/useAccountLiveState";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -633,6 +635,17 @@ function GrokAccounts({
     setDetailAccountData((current) => current?.id === id ? account : current);
     return account;
   }, []);
+  const visibleAccountIDs = useMemo(
+    () => accounts.map((account) => account.id),
+    [accounts],
+  );
+  const applyAccountLiveState = useCallback((response: AccountLiveStateResponse) => {
+    setAccounts((current) => current.map((account) => ({
+      ...account,
+      active_requests: response.accounts[String(account.id)]?.active_requests ?? 0,
+    })));
+  }, []);
+  useAccountLiveState(visibleAccountIDs, applyAccountLiveState);
   const loadAccountDetail = useCallback(
     (account: AccountRow) =>
       account.detail_loaded ? Promise.resolve(account) : api.getAccount(account.id),
@@ -3582,6 +3595,15 @@ function GrokAccountCard({
                 status={disabled ? "paused" : (account.status ?? "unknown")}
                 errorMessage={account.error_message}
               />
+              {(account.active_requests ?? 0) > 0 && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20"
+                  title={t("accounts.activeRequestsTooltip", { count: account.active_requests ?? 0 })}
+                >
+                  <span className="size-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400" aria-hidden />
+                  {account.active_requests}
+                </span>
+              )}
             </div>
             <h3
               className="mt-1.5 break-all text-[15px] font-semibold leading-snug tracking-tight text-foreground transition-colors hover:text-primary sm:text-base"
@@ -3953,6 +3975,15 @@ function GrokAccountTableRow({
             status={disabled ? "paused" : (account.status ?? "unknown")}
             errorMessage={account.error_message}
           />
+          {(account.active_requests ?? 0) > 0 && (
+            <span
+              className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20"
+              title={t("accounts.activeRequestsTooltip", { count: account.active_requests ?? 0 })}
+            >
+              <span className="size-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400" aria-hidden />
+              {account.active_requests}
+            </span>
+          )}
           <AccountHealthBar buckets={healthBuckets} />
         </div>
       </TableCell>
