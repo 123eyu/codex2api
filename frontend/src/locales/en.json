@@ -589,6 +589,7 @@
     "billedOfficialOpen": "Click to open the official usage breakdown",
     "billedOfficialHint": "Billed by OpenAI over the last 7 days, including usage from official clients outside this gateway",
     "billedOfficialPending": "Fetching official 7-day billed cost",
+    "billedOfficialNoData": "No official settlement data yet — official stats can lag; the gateway re-syncs periodically",
     "billedGatewayHint": "Cost derived from this gateway's own request logs",
     "usageOfficialTitle": "Official billed usage",
     "usageOfficialSource": "Source:",

@@ -190,6 +190,9 @@ export interface AccountRow {
   // 官方结算口径的近 7 天成本(美元)。来自 account_daily_usage 快照,与
   // billed_7d(本地日志算的网关成本)是两套账,列表里并排展示。
   official_usd_7d?: number
+  // 官方快照已成功同步过但上游窗口内没有数据(官方统计有滞后)。
+  // 有这个标记时不再重拉 page-stats,胶囊显示静态"暂无数据"而非转圈。
+  official_usage_synced?: boolean
   cooldown_until?: ISODateString
   cooldown_reason?: string
   model_cooldowns?: Array<{
@@ -270,6 +273,7 @@ export interface AccountPageStatsItem {
   billed_5h?: number
   billed_7d?: number
   official_usd_7d?: number
+  official_usage_synced?: boolean
 }
 
 export interface AccountPageStatsResponse {

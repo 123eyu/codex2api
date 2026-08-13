@@ -2472,6 +2472,7 @@ export default function Accounts() {
         if (merged.billed_5h == null && stats.billed_5h != null) merged.billed_5h = stats.billed_5h;
         if (merged.billed_7d == null && stats.billed_7d != null) merged.billed_7d = stats.billed_7d;
         if (merged.official_usd_7d == null && stats.official_usd_7d != null) merged.official_usd_7d = stats.official_usd_7d;
+        if (merged.official_usage_synced == null && stats.official_usage_synced != null) merged.official_usage_synced = stats.official_usage_synced;
         if (!merged.usage_5h_detail && stats.usage_5h_detail) merged.usage_5h_detail = stats.usage_5h_detail;
         if (!merged.usage_7d_detail && stats.usage_7d_detail) merged.usage_7d_detail = stats.usage_7d_detail;
         if (!merged.usage_today_detail && stats.usage_today_detail) merged.usage_today_detail = stats.usage_today_detail;
@@ -14244,6 +14245,11 @@ function UsageCell({
   return <span className="text-[13px] text-muted-foreground">-</span>;
 }
 
+// 官方胶囊转圈的兜底超时:页面级重拉最多 6 次退避(累计约 95 秒)就会停,
+// 超过这个时间还没有数据说明上游拉不到(鉴权失败/官方统计滞后),
+// 再转下去只会让用户以为一直在加载。
+const OFFICIAL_PENDING_SPIN_TIMEOUT_MS = 100_000;
+
 // 成本列并排两套账,颜色区分口径:
 // 上行(石板色)是网关自己的日志算出来的,只含经由本网关转发的请求;
 // 下行(琥珀色)是 OpenAI 官方结算数,还包含用户直接用官方客户端的消耗。
@@ -14257,27 +14263,44 @@ function BilledCell({
   onOpenOfficial?: (account: AccountRow) => void;
 }) {
   const { t } = useTranslation();
+  const official =
+    typeof account.official_usd_7d === "number" ? account.official_usd_7d : null;
+  const showOfficial = isCodexOfficialAccount(account);
+  // synced 表示后端已成功同步过但上游没有数据(官方统计有滞后):
+  // 这是确定的"暂无数据",不是"还在加载",不该转圈。
+  const officialSynced = account.official_usage_synced === true;
+  const officialPending = showOfficial && official === null && !officialSynced;
+  const [officialSpinTimedOut, setOfficialSpinTimedOut] = useState(false);
+  useEffect(() => {
+    if (!officialPending) return undefined;
+    const timer = window.setTimeout(
+      () => setOfficialSpinTimedOut(true),
+      OFFICIAL_PENDING_SPIN_TIMEOUT_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [officialPending]);
+  const officialSpinning = officialPending && !officialSpinTimedOut;
+
   const h5 = typeof account.billed_5h === "number" ? account.billed_5h.toFixed(2) : null;
   const d7 = typeof account.billed_7d === "number" ? account.billed_7d.toFixed(2) : null;
   const has5hWindow =
     (account.usage_percent_5h !== null && account.usage_percent_5h !== undefined) ||
     !!account.reset_5h_at;
   const visibleH5 = has5hWindow ? h5 : null;
-  const official =
-    typeof account.official_usd_7d === "number" ? account.official_usd_7d : null;
-  const showOfficial = isCodexOfficialAccount(account);
   if (visibleH5 === null && d7 === null && !showOfficial) {
     return <span className="text-[12px] text-muted-foreground">-</span>;
   }
   const longLabel = formatLongUsageWindowLabel(account);
   const officialLabel =
     official !== null ? formatOfficialUSD(official) : "—";
-  const officialPending = showOfficial && official === null;
-  const officialClassName = officialPending
+  const officialEmpty = showOfficial && official === null;
+  const officialClassName = officialEmpty
     ? "inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-amber-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-amber-700/70 ring-1 ring-inset ring-amber-500/20 dark:text-amber-400/70"
     : "inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-amber-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-400";
-  const officialTitle = officialPending
-    ? t("accounts.billedOfficialPending")
+  const officialTitle = officialEmpty
+    ? officialSpinning
+      ? t("accounts.billedOfficialPending")
+      : `${t("accounts.billedOfficialNoData")}\n${t("accounts.billedOfficialOpen")}`
     : `${t("accounts.billedOfficialHint")}\n${t("accounts.billedOfficialOpen")}`;
   return (
     <div className="flex flex-col items-start gap-1">
@@ -14304,7 +14327,7 @@ function BilledCell({
             className={`${officialClassName} cursor-pointer transition-colors hover:bg-amber-500/20 hover:ring-amber-500/40`}
             title={officialTitle}
           >
-            {officialPending ? (
+            {officialSpinning ? (
               <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />
             ) : (
               <Banknote className="size-3 shrink-0" aria-hidden />
@@ -14313,7 +14336,7 @@ function BilledCell({
           </button>
         ) : (
           <span className={officialClassName} title={officialTitle}>
-            {officialPending ? (
+            {officialSpinning ? (
               <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />
             ) : (
               <Banknote className="size-3 shrink-0" aria-hidden />

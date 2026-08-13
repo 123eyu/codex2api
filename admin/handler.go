@@ -58,10 +58,14 @@ type Handler struct {
 	consumeResetCredit     func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error)
 	queryWhamDailyUsage    func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyUsageResponse, *http.Response, error)
 	// 列表 page-stats 发现当前页缺少官方结算快照时，按账号做即时回补；
-	// last/in-flight 避免翻页或前端重试把同一号打爆上游。
+	// last/in-flight 避免翻页或前端重试把同一号打爆上游，failedAt 给持续
+	// 失败的账号更长的冷却，syncedOnce 记录「成功同步过但上游没有数据」
+	// （官方统计有滞后），让 page-stats 下发显式空态而不是无限触发回补。
 	whamDailyBackfillMu       sync.Mutex
 	whamDailyBackfillLast     map[int64]time.Time
 	whamDailyBackfillInFlight map[int64]struct{}
+	whamDailyBackfillFailedAt map[int64]time.Time
+	whamDailySyncedOnce       map[int64]struct{}
 	recordAccountEvent        func(int64, string, string)
 	proxyProbe                func(context.Context, string, string) proxyProbeResult
 	reloadProxyPoolFn         func() error
@@ -560,6 +564,8 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 	handler.queryWhamDailyUsage = proxy.QueryWhamDailyUsage
 	handler.whamDailyBackfillLast = make(map[int64]time.Time)
 	handler.whamDailyBackfillInFlight = make(map[int64]struct{})
+	handler.whamDailyBackfillFailedAt = make(map[int64]time.Time)
+	handler.whamDailySyncedOnce = make(map[int64]struct{})
 	handler.autoResetCreditsWake = make(chan struct{}, 1)
 	if db != nil {
 		handler.recordAccountEvent = db.InsertAccountEventAsync

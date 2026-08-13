@@ -24,6 +24,10 @@ type accountPageStatsItem struct {
 	// Billed7d 是两套账：网关只看得到自己转发的请求，官方账单还含用户直接
 	// 用官方客户端的消耗。读的是快照表，不打上游。
 	OfficialUSD7d *float64 `json:"official_usd_7d,omitempty"`
+	// OfficialUsageSynced 表示官方快照已成功同步过、但上游窗口内没有数据
+	//（官方统计有滞后，或账号没有官方客户端消耗）。前端据此显示静态占位
+	// 并停止重拉，而不是把「暂无数据」当成「还在加载」无限转圈。
+	OfficialUsageSynced bool `json:"official_usage_synced,omitempty"`
 }
 
 // GetAccountPageStats loads log-derived usage and billing values after the
@@ -112,10 +116,13 @@ func (h *Handler) GetAccountPageStats(c *gin.Context) {
 			item.Billed7d = &value
 		}
 		// 没有快照的账号不下发这个字段，前端显示占位而不是 $0；
-		// 当前页缺快照时异步回补，不挡本次响应。
+		// 当前页缺快照时异步回补，不挡本次响应。已经成功同步过但
+		// 上游没有数据的账号下发显式空态，不再反复回补。
 		if total, ok := officialTotals[id]; ok {
 			usd := total.Credits / proxy.WhamCreditsPerUSD
 			item.OfficialUSD7d = &usd
+		} else if h.whamDailySyncedOnceFor(id) {
+			item.OfficialUsageSynced = true
 		} else {
 			missingOfficial = append(missingOfficial, id)
 		}

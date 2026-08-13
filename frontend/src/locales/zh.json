@@ -589,6 +589,7 @@
     "billedOfficialOpen": "点击查看官方用量明细",
     "billedOfficialHint": "OpenAI 官方近 7 天结算成本，含用户直接使用官方客户端、未经本网关的消耗",
     "billedOfficialPending": "正在拉取官方近 7 天结算成本",
+    "billedOfficialNoData": "官方结算暂无数据：官方统计存在滞后，后台会定期自动同步",
     "billedGatewayHint": "按本网关自身的请求日志统计的成本",
     "usageOfficialTitle": "官方结算用量",
     "usageOfficialSource": "该数据统计来源于",
