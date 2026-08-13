@@ -177,6 +177,8 @@ export interface AccountRow {
   dispatch_count_limited?: boolean
   usage_5h_detail?: AccountUsageWindow
   usage_7d_detail?: AccountUsageWindow
+  // 今日(服务器时区当天 0 点起)网关侧聚合,由 page-stats 补齐。
+  usage_today_detail?: AccountUsageWindow
   reset_5h_at?: ISODateString
   reset_7d_at?: ISODateString
   // 长窗口(7d 槽)真实类型: "monthly"(free/team 月窗)/"weekly"/未知。
@@ -264,6 +266,7 @@ export interface AccountsPageResponse extends AccountsResponse {
 export interface AccountPageStatsItem {
   usage_5h_detail?: AccountUsageWindow
   usage_7d_detail?: AccountUsageWindow
+  usage_today_detail?: AccountUsageWindow
   billed_5h?: number
   billed_7d?: number
   official_usd_7d?: number

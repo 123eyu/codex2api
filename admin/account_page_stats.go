@@ -14,8 +14,12 @@ import (
 type accountPageStatsItem struct {
 	Usage5hDetail *accountUsageWindow `json:"usage_5h_detail,omitempty"`
 	Usage7dDetail *accountUsageWindow `json:"usage_7d_detail,omitempty"`
-	Billed5h      *float64            `json:"billed_5h,omitempty"`
-	Billed7d      *float64            `json:"billed_7d,omitempty"`
+	// UsageTodayDetail 是"今日"(服务器时区当天 0 点起)的网关侧聚合。
+	// 与 5h/7d 不同,这个字段对每个请求到的账号都必下发:零值代表
+	// "今天没跑过",缺字段才代表"还没加载",前端据此区分 0 和占位。
+	UsageTodayDetail *accountUsageWindow `json:"usage_today_detail,omitempty"`
+	Billed5h         *float64            `json:"billed_5h,omitempty"`
+	Billed7d         *float64            `json:"billed_7d,omitempty"`
 	// OfficialUSD7d 是官方结算口径的近 7 天成本，与上面按本地日志算的
 	// Billed7d 是两套账：网关只看得到自己转发的请求，官方账单还含用户直接
 	// 用官方客户端的消耗。读的是快照表，不打上游。
@@ -47,6 +51,13 @@ func (h *Handler) GetAccountPageStats(c *gin.Context) {
 	if err != nil {
 		writeInternalError(c, err)
 		return
+	}
+
+	// 今日口径与全局统计一致:服务器时区(TZ 配置,默认宿主时区)当天 0 点起。
+	// 失败时整列不下发,让前端保持占位,避免把"查询失败"显示成 0。
+	usageToday, todayErr := h.db.GetAccountUsageSinceByIDs(ctx, ids, database.StartOfDay(now))
+	if todayErr != nil {
+		log.Printf("获取当前页账号今日用量失败: %v", todayErr)
 	}
 
 	billing5hWindows, billing7dWindows := h.accountBillingWindows(ids)
@@ -83,6 +94,16 @@ func (h *Handler) GetAccountPageStats(c *gin.Context) {
 				Requests: value.Requests, Tokens: value.Tokens,
 				AccountBilled: value.AccountBilled, UserBilled: value.UserBilled,
 			}
+		}
+		if todayErr == nil {
+			todayWindow := &accountUsageWindow{}
+			if value := usageToday[id]; value != nil {
+				todayWindow.Requests = value.Requests
+				todayWindow.Tokens = value.Tokens
+				todayWindow.AccountBilled = value.AccountBilled
+				todayWindow.UserBilled = value.UserBilled
+			}
+			item.UsageTodayDetail = todayWindow
 		}
 		if value, ok := billed5h[id]; ok {
 			item.Billed5h = &value

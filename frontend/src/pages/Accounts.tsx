@@ -181,6 +181,7 @@ const ACCOUNT_TABLE_COLUMNS = [
   "priority",
   "plan",
   "status",
+  "today",
   "requests",
   "usage",
   "billed",
@@ -1181,6 +1182,11 @@ const AccountTableRow = memo(function AccountTableRow({
                                     buckets={healthBuckets}
                                   />
                                 </div>
+                              </TableCell>
+                            )}
+                            {visibleColumns.today && (
+                              <TableCell>
+                                <TodayStatsCell account={account} />
                               </TableCell>
                             )}
                             {visibleColumns.requests && (
@@ -2455,6 +2461,7 @@ export default function Accounts() {
         if (merged.official_usd_7d == null && stats.official_usd_7d != null) merged.official_usd_7d = stats.official_usd_7d;
         if (!merged.usage_5h_detail && stats.usage_5h_detail) merged.usage_5h_detail = stats.usage_5h_detail;
         if (!merged.usage_7d_detail && stats.usage_7d_detail) merged.usage_7d_detail = stats.usage_7d_detail;
+        if (!merged.usage_today_detail && stats.usage_today_detail) merged.usage_today_detail = stats.usage_today_detail;
         return merged;
       }),
     [data.accounts, accountPageStats],
@@ -6171,6 +6178,7 @@ export default function Accounts() {
                       groups: t("accounts.groupsLabel"),
                       priority: t("accounts.schedulerPriorityColumn"),
                       status: t("accounts.status"),
+                      today: t("accounts.todayStats"),
                       requests: t("accounts.requests"),
                       usage: t("accounts.usage"),
                       billed: t("accounts.billed"),
@@ -6550,6 +6558,14 @@ export default function Accounts() {
                         {visibleColumns.status && (
                           <TableHead className="text-[13px] font-semibold">
                             {t("accounts.status")}
+                          </TableHead>
+                        )}
+                        {visibleColumns.today && (
+                          <TableHead
+                            className="text-[13px] font-semibold"
+                            title={t("accounts.todayStatsHint")}
+                          >
+                            {t("accounts.todayStats")}
                           </TableHead>
                         )}
                         {visibleColumns.requests && (
@@ -13958,6 +13974,109 @@ function UsageWindowStat({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// 今日统计列:网关侧口径,服务器时区当天 0 点起(参考 sub2api 的今日统计列)。
+// page-stats 对本页每个账号必回该字段,零值是真实的"今天没跑";
+// 字段缺失说明 stats 还没到(加载中/失败),显示占位而不是 0。
+function TodayStatsCell({ account }: { account: AccountRow }) {
+  const { t } = useTranslation();
+  const detail = account.usage_today_detail;
+  if (!detail) {
+    return <span className="text-[12px] font-mono text-muted-foreground/40">-</span>;
+  }
+  const requests = detail.requests ?? 0;
+  const tokens = detail.tokens ?? 0;
+  const accountBilled =
+    typeof detail.account_billed === "number" ? detail.account_billed : 0;
+  const userBilled =
+    typeof detail.user_billed === "number" ? detail.user_billed : 0;
+
+  const tooltip = [
+    `${t("accounts.todayStats")}:`,
+    `Requests: ${requests.toLocaleString()} req`,
+    `Tokens: ${tokens.toLocaleString()} tok`,
+    `${t("accounts.accountBilledLabel")}: $${accountBilled.toFixed(4)}`,
+    userBilled > 0 ? `${t("accounts.userBilledLabel")}: $${userBilled.toFixed(4)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return (
+    <div
+      className="flex flex-col items-start gap-1 whitespace-nowrap text-[12px] tabular-nums cursor-default"
+      title={tooltip}
+    >
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            "inline-flex items-center gap-1",
+            requests > 0
+              ? "font-semibold text-foreground"
+              : "font-normal text-muted-foreground/50",
+          )}
+        >
+          <Activity
+            className={cn(
+              "size-3 shrink-0",
+              requests > 0 ? "text-sky-500" : "text-muted-foreground/40",
+            )}
+            aria-hidden
+          />
+          <span>{requests > 0 ? requests.toLocaleString() : 0}</span>
+          <span className="text-[11px] font-normal text-muted-foreground/60">req</span>
+        </span>
+
+        <span
+          className={cn(
+            "inline-flex items-center gap-1",
+            tokens > 0
+              ? "font-semibold text-foreground"
+              : "font-normal text-muted-foreground/50",
+          )}
+        >
+          <Sparkles
+            className={cn(
+              "size-3 shrink-0",
+              tokens > 0 ? "text-purple-500 dark:text-purple-400" : "text-muted-foreground/40",
+            )}
+            aria-hidden
+          />
+          <span>{formatCompactUsageNumber(tokens)}</span>
+          <span className="text-[11px] font-normal text-muted-foreground/60">tok</span>
+        </span>
+      </div>
+
+      <div className="flex items-center gap-1.5 text-[11px]">
+        {accountBilled > 0 ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[11px] font-medium tabular-nums text-emerald-700 ring-1 ring-inset ring-emerald-500/20 dark:text-emerald-400"
+            title={t("accounts.accountBilledLabel")}
+          >
+            <Coins className="size-3 shrink-0 text-emerald-500" aria-hidden />
+            ${accountBilled < 0.01 ? "<0.01" : accountBilled.toFixed(2)}
+          </span>
+        ) : (
+          <span
+            className="inline-flex items-center gap-1 rounded-md bg-slate-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-slate-500 dark:text-slate-400 ring-1 ring-inset ring-slate-500/20"
+            title={t("accounts.accountBilledLabel")}
+          >
+            <Coins className="size-3 shrink-0 opacity-50" aria-hidden />
+            $0.00
+          </span>
+        )}
+
+        {userBilled > 0 && Math.abs(userBilled - accountBilled) > 0.0001 && (
+          <span
+            className="inline-flex items-center gap-1 rounded-md bg-sky-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-sky-700 ring-1 ring-inset ring-sky-500/20 dark:text-sky-400"
+            title={`${t("accounts.userBilledLabel")}: $${userBilled.toFixed(4)}`}
+          >
+            U: ${userBilled < 0.01 ? "<0.01" : userBilled.toFixed(2)}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

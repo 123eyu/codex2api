@@ -101,6 +101,41 @@ func (db *DB) GetAccountUsageWindowsByIDs(ctx context.Context, ids []int64, shor
 	return shortWindow, longWindow, nil
 }
 
+// GetAccountUsageSinceByIDs aggregates requests/tokens/billing for the given
+// accounts since the provided instant. It powers the list-page "today" column
+// with the same filtering semantics as the 5h/7d usage windows.
+func (db *DB) GetAccountUsageSinceByIDs(ctx context.Context, ids []int64, since time.Time) (map[int64]*AccountTimeRangeUsage, error) {
+	result := make(map[int64]*AccountTimeRangeUsage, len(ids))
+	ids = positiveUniqueIDs(ids)
+	if len(ids) == 0 {
+		return result, nil
+	}
+	args := []interface{}{db.timeArg(since)}
+	placeholders := make([]string, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+	}
+	query := fmt.Sprintf(`SELECT account_id,
+		COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(account_billed), 0), COALESCE(SUM(user_billed), 0)
+		FROM usage_logs
+		WHERE created_at >= $1 AND status_code <> 499 AND %s AND %s AND account_id IN (%s)
+		GROUP BY account_id`, db.nonRetryUsageLogPredicate(), db.currentAccountUsageGenerationPredicate(), strings.Join(placeholders, ","))
+	rows, err := db.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		usage := &AccountTimeRangeUsage{}
+		if err := rows.Scan(&usage.AccountID, &usage.Requests, &usage.Tokens, &usage.AccountBilled, &usage.UserBilled); err != nil {
+			return nil, err
+		}
+		result[usage.AccountID] = usage
+	}
+	return result, rows.Err()
+}
+
 func positiveUniqueIDs(ids []int64) []int64 {
 	seen := make(map[int64]struct{}, len(ids))
 	result := make([]int64, 0, len(ids))
