@@ -125,13 +125,13 @@ func (h *Handler) shouldUseWebsocketForHTTP() bool {
 }
 
 func (h *Handler) resolveProxyForAttempt(account *auth.Account, stickyProxyURL string) string {
-	if proxyURL := strings.TrimSpace(stickyProxyURL); proxyURL != "" {
-		return proxyURL
+	if h != nil && h.store != nil {
+		if proxyURL := strings.TrimSpace(stickyProxyURL); proxyURL != "" && !h.store.ManagedProxyUnavailable(proxyURL) {
+			return proxyURL
+		}
+		return h.store.ResolveProxyForAccount(account)
 	}
-	if h == nil || h.store == nil {
-		return ""
-	}
-	return h.store.ResolveProxyForAccount(account)
+	return strings.TrimSpace(stickyProxyURL)
 }
 
 type usageLimitDetails struct {

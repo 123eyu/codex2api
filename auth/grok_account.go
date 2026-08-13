@@ -1367,6 +1367,10 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 	if refreshLocks != nil {
 		ctx = refreshLocks.CriticalContext()
 	}
+	proxyURL := s.ResolveProxyForAccount(acc)
+	if strings.TrimSpace(proxyURL) == "" && s.GetProxyPoolEnabled() {
+		return fmt.Errorf("账号 %d 代理池已启用但无可用代理，已拒绝直连刷新", dbID)
+	}
 	td, err := RefreshGrokAccessToken(ctx, GrokRefreshParams{
 		RefreshToken:  rt,
 		ClientID:      clientID,
@@ -1374,7 +1378,7 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 		OIDCIssuer:    oidcIssuer,
 		PrincipalType: principalType,
 		PrincipalID:   principalID,
-		ProxyURL:      s.ResolveProxyForAccount(acc),
+		ProxyURL:      proxyURL,
 	})
 	if err != nil {
 		if IsGrokRefreshPermanentError(err) {

@@ -10758,7 +10758,7 @@ func (h *Handler) AddProxies(c *gin.Context) {
 	})
 }
 
-// DeleteProxy 删除单个代理
+// DeleteProxy 删除单个代理，并立即解绑仍引用该 URL 的账号。
 func (h *Handler) DeleteProxy(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -10769,22 +10769,33 @@ func (h *Handler) DeleteProxy(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	if err := h.db.DeleteProxy(ctx, id); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(c, http.StatusNotFound, "代理不存在")
-			return
-		}
+	result, err := h.db.RetireProxiesByIDs(ctx, []int64{id})
+	if err != nil {
 		writeError(c, http.StatusInternalServerError, "删除代理失败")
 		return
 	}
-
-	if err := h.store.ReloadProxyPool(); err != nil {
-		log.Printf("代理已删除，但代理池刷新失败: %v", err)
+	if result.Deleted == 0 {
+		writeError(c, http.StatusNotFound, "代理不存在")
+		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "代理已删除"})
+
+	if err := h.applyRetiredProxiesToRuntime(result.DeletedProxyURLs, result.UnboundAccountIDs); err != nil {
+		log.Printf("代理已删除，但代理池刷新失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "代理已删除，但代理池刷新失败",
+			"deleted": result.Deleted,
+			"unbound": result.Unbound,
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"message": "代理已删除",
+		"deleted": result.Deleted,
+		"unbound": result.Unbound,
+	})
 }
 
-// UpdateProxy 更新代理（启用/禁用/改标签）
+// UpdateProxy 更新代理（启用/禁用/改标签/改 URL）
 func (h *Handler) UpdateProxy(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -10813,6 +10824,17 @@ func (h *Handler) UpdateProxy(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
+	existing, err := h.db.GetProxy(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(c, http.StatusNotFound, "代理不存在")
+			return
+		}
+		writeError(c, http.StatusInternalServerError, "获取代理信息失败")
+		return
+	}
+	oldURL := strings.TrimSpace(existing.URL)
+
 	if err := h.db.UpdateProxy(ctx, id, req.URL, req.Label, req.Enabled); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(c, http.StatusNotFound, "代理不存在")
@@ -10822,8 +10844,31 @@ func (h *Handler) UpdateProxy(c *gin.Context) {
 		return
 	}
 
-	if err := h.store.ReloadProxyPool(); err != nil {
+	newURL := oldURL
+	if req.URL != nil {
+		newURL = strings.TrimSpace(*req.URL)
+	}
+	if newURL != "" && newURL != oldURL {
+		reboundIDs, rebindErr := h.db.RebindAccountProxyURLs(ctx, oldURL, newURL)
+		if rebindErr != nil {
+			writeError(c, http.StatusInternalServerError, "更新代理绑定失败")
+			return
+		}
+		if h.store != nil {
+			for _, accountID := range reboundIDs {
+				h.store.ApplyAccountProxyURL(accountID, newURL)
+			}
+		}
+		h.removeProxyURLsFromRuntime([]string{oldURL})
+	}
+	if req.Enabled != nil && !*req.Enabled {
+		h.removeProxyURLsFromRuntime([]string{newURL})
+	}
+
+	if err := h.reloadProxyPool(); err != nil {
 		log.Printf("代理已更新，但代理池刷新失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "代理已更新，但代理池刷新失败"})
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "代理已更新"})
 }
@@ -10841,14 +10886,26 @@ func (h *Handler) BatchDeleteProxies(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
-	deleted, err := h.db.DeleteProxies(ctx, req.IDs)
+	result, err := h.db.RetireProxiesByIDs(ctx, req.IDs)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "批量删除失败")
 		return
 	}
 
-	_ = h.store.ReloadProxyPool()
-	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("已删除 %d 个代理", deleted), "deleted": deleted})
+	if err := h.applyRetiredProxiesToRuntime(result.DeletedProxyURLs, result.UnboundAccountIDs); err != nil {
+		log.Printf("代理已批量删除，但代理池刷新失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "代理已删除，但代理池刷新失败",
+			"deleted": result.Deleted,
+			"unbound": result.Unbound,
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("已删除 %d 个代理", result.Deleted),
+		"deleted": result.Deleted,
+		"unbound": result.Unbound,
+	})
 }
 
 // CleanErrorProxies 一键清理测试错误的代理，并解绑引用这些代理的账号。
@@ -10864,12 +10921,16 @@ func (h *Handler) CleanErrorProxies(c *gin.Context) {
 	}
 
 	if h.store != nil {
-		for _, accountID := range result.UnboundAccountIDs {
-			h.store.ClearAccountProxyURLIfMatches(accountID, result.DeletedProxyURLs)
+		if err := h.applyRetiredProxiesToRuntime(result.DeletedProxyURLs, result.UnboundAccountIDs); err != nil {
+			log.Printf("错误代理已清理，但代理池刷新失败: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "错误代理已清理，但代理池刷新失败",
+				"cleaned": result.Deleted,
+				"unbound": result.Unbound,
+			})
+			return
 		}
-		h.removeProxyURLsFromRuntime(result.DeletedProxyURLs)
-	}
-	if err := h.reloadProxyPool(); err != nil {
+	} else if err := h.reloadProxyPool(); err != nil {
 		log.Printf("错误代理已清理，但代理池刷新失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "错误代理已清理，但代理池刷新失败",

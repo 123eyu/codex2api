@@ -3372,6 +3372,161 @@ func (db *DB) CleanErrorProxies(ctx context.Context) (ProxyErrorCleanupResult, e
 	return result, nil
 }
 
+func scanUnboundAccountIDs(rows *sql.Rows) ([]int64, error) {
+	var ids []int64
+	for rows.Next() {
+		var accountID int64
+		if err := rows.Scan(&accountID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, accountID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func unbindAccountsFromProxyURLsTx(ctx context.Context, tx *sql.Tx, sqlite bool, proxyURLs []string) ([]int64, error) {
+	if len(proxyURLs) == 0 {
+		return nil, nil
+	}
+	args := make([]interface{}, len(proxyURLs))
+	for i, proxyURL := range proxyURLs {
+		args[i] = proxyURL
+	}
+	query := fmt.Sprintf(`
+		UPDATE accounts
+		SET proxy_url = '', updated_at = CURRENT_TIMESTAMP
+		WHERE TRIM(COALESCE(proxy_url, '')) IN (%s)
+		RETURNING id
+	`, strings.Join(dbPlaceholders(sqlite, 1, len(proxyURLs)), ","))
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanUnboundAccountIDs(rows)
+}
+
+// RetireProxiesByIDs 删除指定代理，并在同一事务中解绑仍引用这些 URL 的账号。
+// 用于单条/批量删除，避免删除后账号 proxy_url 继续把流量打到已不存在的出口(issue #517)。
+func (db *DB) RetireProxiesByIDs(ctx context.Context, ids []int64) (ProxyErrorCleanupResult, error) {
+	var result ProxyErrorCleanupResult
+	if len(ids) == 0 {
+		return result, nil
+	}
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		lockClause := ""
+		if !db.isSQLite() {
+			lockClause = " FOR UPDATE"
+		}
+		selectQuery := fmt.Sprintf(`
+			SELECT id, TRIM(url)
+			FROM proxies
+			WHERE id IN (%s)
+			ORDER BY id`+lockClause,
+			strings.Join(dbPlaceholders(db.isSQLite(), 1, len(ids)), ","),
+		)
+		rows, err := tx.QueryContext(ctx, selectQuery, argsFromInt64s(ids)...)
+		if err != nil {
+			return err
+		}
+		var proxyIDs []int64
+		var proxyURLs []string
+		for rows.Next() {
+			var id int64
+			var proxyURL string
+			if err := rows.Scan(&id, &proxyURL); err != nil {
+				rows.Close()
+				return err
+			}
+			proxyIDs = append(proxyIDs, id)
+			proxyURLs = append(proxyURLs, proxyURL)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(proxyIDs) == 0 {
+			return tx.Commit()
+		}
+
+		unboundIDs, err := unbindAccountsFromProxyURLsTx(ctx, tx, db.isSQLite(), proxyURLs)
+		if err != nil {
+			return err
+		}
+		result.UnboundAccountIDs = unboundIDs
+		result.Unbound = len(unboundIDs)
+
+		deleteQuery := fmt.Sprintf(
+			`DELETE FROM proxies WHERE id IN (%s) RETURNING id, TRIM(url)`,
+			strings.Join(dbPlaceholders(db.isSQLite(), 1, len(proxyIDs)), ","),
+		)
+		rows, err = tx.QueryContext(ctx, deleteQuery, argsFromInt64s(proxyIDs)...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var proxyID int64
+			var proxyURL string
+			if err := rows.Scan(&proxyID, &proxyURL); err != nil {
+				rows.Close()
+				return err
+			}
+			result.Deleted++
+			result.DeletedProxyURLs = append(result.DeletedProxyURLs, proxyURL)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return ProxyErrorCleanupResult{}, err
+	}
+	return result, nil
+}
+
+// RebindAccountProxyURLs 把仍指向 oldURL 的账号绑定改写为 newURL（代理行改 URL 时跟上）。
+func (db *DB) RebindAccountProxyURLs(ctx context.Context, oldURL, newURL string) ([]int64, error) {
+	oldURL = strings.TrimSpace(oldURL)
+	newURL = strings.TrimSpace(newURL)
+	if oldURL == "" || newURL == "" || oldURL == newURL {
+		return nil, nil
+	}
+	var ids []int64
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		rows, err := db.conn.QueryContext(ctx, `
+			UPDATE accounts
+			SET proxy_url = $1, updated_at = CURRENT_TIMESTAMP
+			WHERE TRIM(COALESCE(proxy_url, '')) = $2
+			RETURNING id
+		`, newURL, oldURL)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		ids, err = scanUnboundAccountIDs(rows)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // ==================== Usage Logs（批量写入） ====================
 
 // UsageLog 请求日志行

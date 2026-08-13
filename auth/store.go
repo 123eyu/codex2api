@@ -2963,12 +2963,14 @@ type Store struct {
 	wg                  sync.WaitGroup
 
 	// 代理池
-	proxyPoolReloadMu sync.Mutex
-	proxyPoolLoader   func(context.Context) ([]*database.ProxyRow, error)
-	proxyPool         []string // 已启用的代理 URL 列表
-	proxyPoolSet      map[string]struct{}
-	proxyPoolEnabled  bool   // 代理池是否开启
-	proxyRoundRobin   uint64 // 轮询计数器
+	proxyPoolReloadMu    sync.Mutex
+	proxyPoolLoader      func(context.Context) ([]*database.ProxyRow, error)
+	proxyInventoryLoader func(context.Context) ([]*database.ProxyRow, error)
+	proxyPool            []string // 已启用且测试未失败的代理 URL 列表
+	proxyPoolSet         map[string]struct{}
+	managedProxySet      map[string]struct{} // proxies 表中的全部 URL（含禁用/测挂）
+	proxyPoolEnabled     bool                // 代理池是否开启
+	proxyRoundRobin      uint64              // 轮询计数器
 
 	// Fast scheduler POC（默认关闭，通过环境变量启用）
 	fastScheduler        atomic.Pointer[FastScheduler]
@@ -3458,6 +3460,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	}
 	if db != nil {
 		s.proxyPoolLoader = db.ListEnabledProxies
+		s.proxyInventoryLoader = db.ListProxies
 	}
 	s.testModel.Store(settings.TestModel)
 	s.testContent.Store(NormalizeTestContent(settings.TestContent))
@@ -3559,18 +3562,10 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.smartPacingMinConcurrency = normalizeSmartPacingMinConcurrency(settings.SmartPacingMinConcurrency)
 	s.smartPacingWindows = normalizeSmartPacingWindows(settings.SmartPacingWindows)
 
-	// 加载代理池
-	if settings.ProxyPoolEnabled {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if proxies, err := db.ListEnabledProxies(ctx); err == nil {
-			urls := make([]string, 0, len(proxies))
-			for _, p := range proxies {
-				urls = append(urls, p.URL)
-			}
-			s.proxyPool = urls
-			s.proxyPoolSet = buildProxyPoolSet(urls)
-			log.Printf("代理池已加载: %d 个活跃代理", len(urls))
+	// 加载代理池（含全部托管 URL，供禁用后 fail-closed 识别）
+	if settings.ProxyPoolEnabled && s.proxyPoolLoader != nil {
+		if err := s.ReloadProxyPool(); err != nil {
+			log.Printf("代理池加载失败: %v", err)
 		}
 	}
 
@@ -4003,6 +3998,8 @@ func (s *Store) NextProxy() string {
 
 // ResolveProxyForAccount returns the effective proxy for account-bound internal calls.
 // Priority: account proxy > group proxy > sticky proxy pool > global proxy > direct.
+// A pin to a managed proxy that is disabled, test-failed, or deleted does not
+// fall through and does not go direct while the proxy pool is enabled (issue #517).
 func (s *Store) ResolveProxyForAccount(acc *Account) string {
 	if s == nil {
 		return ""
@@ -4014,6 +4011,9 @@ func (s *Store) ResolveProxyForAccount(acc *Account) string {
 		accountID = acc.DBID
 		if proxy := strings.TrimSpace(acc.ProxyURL); proxy != "" {
 			acc.mu.RUnlock()
+			if s.managedProxyUnavailable(proxy) {
+				return ""
+			}
 			return proxy
 		}
 		acc.mu.RUnlock()
@@ -4042,7 +4042,14 @@ func (s *Store) resolveGroupProxyForAccount(acc *Account) string {
 		if len(urls) == 0 {
 			continue
 		}
-		return urls[stickyProxyIndex(accountID, len(urls))]
+		start := stickyProxyIndex(accountID, len(urls))
+		for i := 0; i < len(urls); i++ {
+			proxy := strings.TrimSpace(urls[(start+i)%len(urls)])
+			if proxy == "" || s.managedProxyUnavailable(proxy) {
+				continue
+			}
+			return proxy
+		}
 	}
 	return ""
 }
@@ -4071,6 +4078,85 @@ func stickyProxyIndex(accountID int64, poolSize int) int {
 		return 0
 	}
 	return int((accountID - 1) % int64(poolSize))
+}
+
+func proxyRowURL(p *database.ProxyRow) string {
+	if p == nil {
+		return ""
+	}
+	return strings.TrimSpace(p.URL)
+}
+
+func collectProxyURLs(rows []*database.ProxyRow) []string {
+	urls := make([]string, 0, len(rows))
+	for _, p := range rows {
+		if url := proxyRowURL(p); url != "" {
+			urls = append(urls, url)
+		}
+	}
+	return urls
+}
+
+// managedProxyUnavailable reports that url is a proxies-table member that is
+// not currently in the enabled pool. Custom account/group proxy URLs that were
+// never added to the pool are not managed and stay usable.
+func (s *Store) managedProxyUnavailable(proxyURL string) bool {
+	if s == nil {
+		return false
+	}
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.proxyPoolEnabled {
+		return false
+	}
+	if _, managed := s.managedProxySet[proxyURL]; !managed {
+		return false
+	}
+	if _, enabled := s.proxyPoolSet[proxyURL]; enabled {
+		return false
+	}
+	return true
+}
+
+// ManagedProxyUnavailable is the exported form of managedProxyUnavailable.
+func (s *Store) ManagedProxyUnavailable(proxyURL string) bool {
+	return s.managedProxyUnavailable(proxyURL)
+}
+
+// AccountHasUsableEgress reports whether this account can reach upstream without
+// violating proxy-pool fail-closed: when the pool is on, an empty resolved
+// proxy would have meant direct/dirty-IP, so the account is skipped instead.
+func (s *Store) AccountHasUsableEgress(acc *Account) bool {
+	return s.accountHasUsableEgress(acc)
+}
+
+func (s *Store) accountHasUsableEgress(acc *Account) bool {
+	if s == nil || acc == nil {
+		return false
+	}
+	if strings.TrimSpace(s.ResolveProxyForAccount(acc)) != "" {
+		return true
+	}
+	s.mu.RLock()
+	enabled := s.proxyPoolEnabled
+	s.mu.RUnlock()
+	return !enabled
+}
+
+func (s *Store) withUsableEgressFilter(filter AccountFilter) AccountFilter {
+	return func(acc *Account) bool {
+		if !s.accountHasUsableEgress(acc) {
+			return false
+		}
+		if filter != nil && !filter(acc) {
+			return false
+		}
+		return true
+	}
 }
 
 // GetProxyPoolEnabled 获取代理池开关状态
@@ -4102,15 +4188,21 @@ func (s *Store) ReloadProxyPool() error {
 	if err != nil {
 		return err
 	}
-	urls := make([]string, 0, len(proxies))
-	for _, p := range proxies {
-		urls = append(urls, p.URL)
+	enabledURLs := collectProxyURLs(proxies)
+	managedURLs := enabledURLs
+	if inventory := s.proxyInventoryLoader; inventory != nil {
+		allProxies, invErr := inventory(ctx)
+		if invErr != nil {
+			return invErr
+		}
+		managedURLs = collectProxyURLs(allProxies)
 	}
 	s.mu.Lock()
-	s.proxyPool = urls
-	s.proxyPoolSet = buildProxyPoolSet(urls)
+	s.proxyPool = enabledURLs
+	s.proxyPoolSet = buildProxyPoolSet(enabledURLs)
+	s.managedProxySet = buildProxyPoolSet(managedURLs)
 	s.mu.Unlock()
-	log.Printf("代理池已重新加载: %d 个活跃代理", len(urls))
+	log.Printf("代理池已重新加载: %d 个活跃代理", len(enabledURLs))
 	return nil
 }
 
@@ -5002,6 +5094,7 @@ func (s *Store) tryAcquireAccount(acc *Account, limit int64, updateSchedulerOnLi
 
 // NextExcludingWithFilter 获取下一个可用账号，并应用请求级账号过滤器。
 func (s *Store) NextExcludingWithFilter(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
+	filter = s.withUsableEgressFilter(filter)
 	if s.GetLazyMode() {
 		return s.nextExcludingWithFilterLazy(apiKeyID, exclude, filter)
 	}
@@ -5515,6 +5608,7 @@ func (s *Store) nextAccountForFreshAffinity(key string, apiKeyID int64, exclude 
 	if !s.GetSessionAffinitySpread() || strings.TrimSpace(key) == "" {
 		return s.NextExcludingWithFilter(apiKeyID, exclude, filter)
 	}
+	filter = s.withUsableEgressFilter(filter)
 
 	type affinityCandidate struct {
 		acc               *Account
@@ -5626,6 +5720,9 @@ func (s *Store) affinityProxyStillValid(accountID int64, proxyURL string) bool {
 	}
 
 	if accountProxy := account.GetProxyURL(); accountProxy != "" {
+		if s.managedProxyUnavailable(accountProxy) {
+			return false
+		}
 		return proxyURL == accountProxy
 	}
 	// 组代理变更(改列表/移组/删组)时,粘住旧代理的会话在此判失效并重绑。
@@ -5634,6 +5731,9 @@ func (s *Store) affinityProxyStillValid(accountID int64, proxyURL string) bool {
 	}
 	if poolEnabled && poolHasEntries {
 		return poolContainsProxy
+	}
+	if poolEnabled {
+		return false
 	}
 	return proxyURL == globalProxy
 }
@@ -5720,6 +5820,7 @@ func (s *Store) takeByIDExcluding(id int64, apiKeyID int64, exclude map[int64]bo
 	if !s.accountAllowedForAPIKey(target, apiKeyID) {
 		return nil
 	}
+	filter = s.withUsableEgressFilter(filter)
 	if filter != nil && !filter(target) {
 		return nil
 	}
@@ -5758,6 +5859,7 @@ func (s *Store) hasDispatchCandidateWithFilter(apiKeyID int64, exclude map[int64
 	if s == nil {
 		return false
 	}
+	filter = s.withUsableEgressFilter(filter)
 
 	maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
 	s.mu.RLock()
@@ -9213,6 +9315,9 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	// 3. 执行 RT 刷新（Resin 启用时传入 DBID 用于粘性代理）
 	resinID := fmt.Sprintf("%d", dbID)
 	proxy := s.ResolveProxyForAccount(acc)
+	if strings.TrimSpace(proxy) == "" && s.GetProxyPoolEnabled() {
+		return fmt.Errorf("账号 %d 代理池已启用但无可用代理，已拒绝直连刷新", dbID)
+	}
 	var td *TokenData
 	var info *AccountInfo
 	if rt != "" {
