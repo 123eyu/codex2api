@@ -1916,6 +1916,26 @@ func TestUsageLogAndClientErrorsOmitUnstructuredUpstreamBodies(t *testing.T) {
 	}
 }
 
+func TestUsageLogFailureMessageKeepsGatewayDiagnostics(t *testing.T) {
+	// 断流类诊断是网关自产纯文本，必须保留原文而不是退化成裸状态码（issue #524）。
+	diag := "上游流读取失败: stream error: stream ID 277; INTERNAL_ERROR; received from peer [上游帧 147, 下游写阻塞 0ms, 距上游末帧 52484ms]"
+	got := usageLogFailureMessage(logStatusUpstreamStreamBreak, diag)
+	if !strings.Contains(got, "INTERNAL_ERROR") || !strings.Contains(got, "stream ID 277") {
+		t.Fatalf("usageLogFailureMessage() dropped diagnostics: %q", got)
+	}
+
+	// 诊断文本包含上游 JSON 错误帧时仍走结构化提取。
+	jsonDiag := `{"error":{"code":"rate_limit_exceeded","message":"Too many requests"}}`
+	if got := usageLogFailureMessage(http.StatusTooManyRequests, jsonDiag); got != "rate_limit_exceeded · Too many requests" {
+		t.Fatalf("usageLogFailureMessage() json path = %q", got)
+	}
+
+	// 空文本仍回落裸状态码。
+	if got := usageLogFailureMessage(http.StatusBadGateway, "  "); got != "HTTP 502" {
+		t.Fatalf("usageLogFailureMessage() empty = %q", got)
+	}
+}
+
 func TestResponsesEndpointsAllowCompactionInputType(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

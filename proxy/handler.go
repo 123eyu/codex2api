@@ -509,6 +509,18 @@ func noAvailableAccountError(model string) gin.H {
 }
 
 func usageLogErrorMessage(statusCode int, body []byte) string {
+	return usageLogErrorMessageImpl(statusCode, body, false)
+}
+
+// usageLogFailureMessage 记录网关自产的失败诊断（传输错误、断流原因、重试上下文等）。
+// 与上游任意响应体不同，这些文本由网关代码拼装，脱敏截断后保留原文；否则断流类
+// 错误在用量页只剩裸状态码，根因全靠翻容器日志（issue #524）。仍先尝试 JSON 提取，
+// 因为部分诊断原样包含上游错误帧。
+func usageLogFailureMessage(statusCode int, message string) string {
+	return usageLogErrorMessageImpl(statusCode, []byte(message), true)
+}
+
+func usageLogErrorMessageImpl(statusCode int, body []byte, trustedText bool) string {
 	if statusCode < 400 {
 		return ""
 	}
@@ -559,8 +571,16 @@ func usageLogErrorMessage(statusCode int, body []byte) string {
 	if message == "" {
 		// HTML and plain-text provider pages routinely contain request IDs,
 		// internal routing details or echoed credentials. They are not an API
-		// contract, so persist only the transport status instead of the body.
-		return fmt.Sprintf("HTTP %d", statusCode)
+		// contract, so persist only the transport status instead of the body —
+		// unless the caller marked the text as gateway-generated (trustedText).
+		if !trustedText {
+			return fmt.Sprintf("HTTP %d", statusCode)
+		}
+		raw := strings.TrimSpace(string(body))
+		if raw == "" {
+			return fmt.Sprintf("HTTP %d", statusCode)
+		}
+		message = raw
 	}
 
 	parts := make([]string, 0, 3)
@@ -1233,7 +1253,7 @@ func (h *Handler) logContinueThinkingRounds(c *gin.Context, res continueFoldResu
 			// 否则会污染重试统计并与外层 attempt 编号混淆。
 		}
 		if round.ErrMessage != "" {
-			logInput.ErrorMessage = usageLogErrorMessage(statusCode, []byte(round.ErrMessage))
+			logInput.ErrorMessage = usageLogFailureMessage(statusCode, round.ErrMessage)
 			logInput.UpstreamErrorKind = "continue_thinking_error"
 		}
 		if round.Usage != nil {
@@ -3162,7 +3182,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				if outcome.logStatusCode != http.StatusOK {
 					logInput.UpstreamErrorKind = outcome.failureKind
-					logInput.ErrorMessage = usageLogErrorMessage(outcome.logStatusCode, []byte(outcome.failureMessage))
+					logInput.ErrorMessage = usageLogFailureMessage(outcome.logStatusCode, outcome.failureMessage)
 				}
 				h.logUsageForRequest(c, logInput)
 				if outcome.penalize {
@@ -3353,7 +3373,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					StatusCode: outcome.logStatusCode, DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
 					InboundEndpoint: "/v1/responses", UpstreamEndpoint: upstreamEndpoint, Stream: isStream, ViaWebsocket: useWebsocket,
 					AttemptIndex: attempt + 1, UpstreamErrorKind: outcome.failureKind,
-					ErrorMessage: usageLogErrorMessage(outcome.logStatusCode, []byte(outcome.failureMessage)),
+					ErrorMessage: usageLogFailureMessage(outcome.logStatusCode, outcome.failureMessage),
 				}, promptPolicyIncidentID)
 				log.Printf("OpenAI Responses 上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 				recyclePooledClient(account, proxyURL)
@@ -3432,7 +3452,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				AttemptIndex:           attempt + 1,
 			}
 			if outcome.logStatusCode != http.StatusOK {
-				logInput.ErrorMessage = usageLogErrorMessage(outcome.logStatusCode, []byte(outcome.failureMessage))
+				logInput.ErrorMessage = usageLogFailureMessage(outcome.logStatusCode, outcome.failureMessage)
 				logInput.UpstreamErrorKind = outcome.failureKind
 			}
 			if usage != nil {
@@ -4011,7 +4031,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				StatusCode: outcome.logStatusCode, DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
 				InboundEndpoint: "/v1/responses", UpstreamEndpoint: "/v1/responses", Stream: isStream, ViaWebsocket: useWebsocket,
 				AttemptIndex: attempt + 1, UpstreamErrorKind: outcome.failureKind,
-				ErrorMessage: usageLogErrorMessage(outcome.logStatusCode, []byte(outcome.failureMessage)),
+				ErrorMessage: usageLogFailureMessage(outcome.logStatusCode, outcome.failureMessage),
 			}, promptPolicyIncidentID)
 			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/responses): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClient(account, proxyURL)
@@ -4120,7 +4140,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			AttemptIndex:           attempt + 1,
 		}
 		if logStatusCode != http.StatusOK {
-			logInput.ErrorMessage = usageLogErrorMessage(logStatusCode, []byte(outcome.failureMessage))
+			logInput.ErrorMessage = usageLogFailureMessage(logStatusCode, outcome.failureMessage)
 			logInput.UpstreamErrorKind = outcome.failureKind
 		}
 		if usage != nil {
@@ -5190,7 +5210,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			}
 			if outcome.logStatusCode != http.StatusOK {
 				logInput.UpstreamErrorKind = outcome.failureKind
-				logInput.ErrorMessage = usageLogErrorMessage(outcome.logStatusCode, []byte(outcome.failureMessage))
+				logInput.ErrorMessage = usageLogFailureMessage(outcome.logStatusCode, outcome.failureMessage)
 			}
 			h.logUsageForRequest(c, logInput)
 			if outcome.penalize {
@@ -5462,7 +5482,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				StatusCode: outcome.logStatusCode, DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
 				InboundEndpoint: "/v1/chat/completions", UpstreamEndpoint: upstreamEndpoint, Stream: isStream, ViaWebsocket: useWebsocket,
 				AttemptIndex: attempt + 1, UpstreamErrorKind: outcome.failureKind,
-				ErrorMessage: usageLogErrorMessage(outcome.logStatusCode, []byte(outcome.failureMessage)),
+				ErrorMessage: usageLogFailureMessage(outcome.logStatusCode, outcome.failureMessage),
 			}, promptPolicyIncidentID)
 			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/chat/completions): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClient(account, proxyURL)
@@ -5552,7 +5572,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			AttemptIndex:           attempt + 1,
 		}
 		if logStatusCode != http.StatusOK {
-			logInput.ErrorMessage = usageLogErrorMessage(logStatusCode, []byte(outcome.failureMessage))
+			logInput.ErrorMessage = usageLogFailureMessage(logStatusCode, outcome.failureMessage)
 			logInput.UpstreamErrorKind = outcome.failureKind
 		}
 		if usage != nil {

@@ -448,7 +448,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 			if outcome.logStatusCode != http.StatusOK {
 				logInput.UpstreamErrorKind = outcome.failureKind
-				logInput.ErrorMessage = usageLogErrorMessage(outcome.logStatusCode, []byte(outcome.failureMessage))
+				logInput.ErrorMessage = usageLogFailureMessage(outcome.logStatusCode, outcome.failureMessage)
 			}
 			h.logUsageForRequest(c, logInput)
 			if outcome.penalize {
@@ -715,7 +715,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				StatusCode: outcome.logStatusCode, DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
 				InboundEndpoint: "/v1/messages", UpstreamEndpoint: upstreamEndpoint, Stream: isStream, ViaWebsocket: useWebsocket,
 				AttemptIndex: attempt + 1, UpstreamErrorKind: outcome.failureKind,
-				ErrorMessage: usageLogErrorMessage(outcome.logStatusCode, []byte(outcome.failureMessage)),
+				ErrorMessage: usageLogFailureMessage(outcome.logStatusCode, outcome.failureMessage),
 			}, promptPolicyIncidentID)
 			log.Printf("上游流在首包前断开，重试 (attempt %d/%d, account %d, /v1/messages): %s",
 				attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
@@ -794,7 +794,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			AttemptIndex:           attempt + 1,
 		}
 		if logStatusCode != http.StatusOK {
-			logInput.ErrorMessage = usageLogErrorMessage(logStatusCode, []byte(outcome.failureMessage))
+			logInput.ErrorMessage = usageLogFailureMessage(logStatusCode, outcome.failureMessage)
 			logInput.UpstreamErrorKind = outcome.failureKind
 		}
 		if usage != nil {

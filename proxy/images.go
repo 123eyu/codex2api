@@ -1665,7 +1665,7 @@ func buildImageErrorUsageLog(account *auth.Account, inboundEndpoint, logModel, l
 		Stream:           stream,
 		IsRetryAttempt:   willRetry,
 		AttemptIndex:     attempt + 1,
-		ErrorMessage:     usageLogErrorMessage(http.StatusBadGateway, []byte(readErr.Error())),
+		ErrorMessage:     usageLogFailureMessage(http.StatusBadGateway, readErr.Error()),
 	}
 	if usage != nil {
 		logInput.PromptTokens = usage.PromptTokens
