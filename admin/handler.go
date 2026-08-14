@@ -5752,6 +5752,29 @@ func (h *Handler) ToggleAccountLock(c *gin.Context) {
 	}
 }
 
+func accountIsOverloadPaused(acc *auth.Account) bool {
+	if acc == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(acc.GetCooldownReason()), "overload_paused") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(acc.RuntimeStatus()), "overload_paused")
+}
+
+// resetAccountRuntimeStatus 清冷却/模型冷却。过载暂停只恢复调度，不能清用量快照，
+// 否则 free 账号（只有 30d 窗、没有 5h）列表额度条会先变成 "-"，要等下次探针才回来。
+func (h *Handler) resetAccountRuntimeStatus(ctx context.Context, acc *auth.Account) {
+	keepUsage := accountIsOverloadPaused(acc)
+	h.store.ClearCooldown(acc)
+	h.store.ClearAllModelCooldowns(acc)
+	if keepUsage {
+		return
+	}
+	acc.ClearUsageCache()
+	h.syncAccountPlanAfterReset(ctx, acc)
+}
+
 // ResetAccountStatus 重置单个账号状态为正常
 func (h *Handler) ResetAccountStatus(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -5766,10 +5789,7 @@ func (h *Handler) ResetAccountStatus(c *gin.Context) {
 		return
 	}
 
-	h.store.ClearCooldown(acc)
-	h.store.ClearAllModelCooldowns(acc)
-	acc.ClearUsageCache()
-	h.syncAccountPlanAfterReset(c.Request.Context(), acc)
+	h.resetAccountRuntimeStatus(c.Request.Context(), acc)
 	writeMessage(c, http.StatusOK, "账号状态已重置")
 }
 
@@ -5791,10 +5811,7 @@ func (h *Handler) BatchResetStatus(c *gin.Context) {
 			fail++
 			continue
 		}
-		h.store.ClearCooldown(acc)
-		h.store.ClearAllModelCooldowns(acc)
-		acc.ClearUsageCache()
-		h.syncAccountPlanAfterReset(c.Request.Context(), acc)
+		h.resetAccountRuntimeStatus(c.Request.Context(), acc)
 		success++
 	}
 
@@ -7674,6 +7691,10 @@ type settingsResponse struct {
 	CodexWSStatelessSlots               int    `json:"codex_ws_stateless_slots"`
 	GithubTokenConfigured               bool   `json:"github_token_configured"`
 	GithubProxyURL                      string `json:"github_proxy_url"`
+	CodexOverloadPauseEnabled           bool   `json:"codex_overload_pause_enabled"`
+	CodexOverloadThresholdPercent       int    `json:"codex_overload_threshold_percent"`
+	CodexOverloadPauseMinutes           int    `json:"codex_overload_pause_minutes"`
+	CodexOverloadWindowMinutes          int    `json:"codex_overload_window_minutes"`
 	OverflowAutoCompactEnabled          bool   `json:"overflow_auto_compact_enabled"`
 	CompactViaResponsesEnabled          bool   `json:"compact_via_responses_enabled"`
 	CodexPreflightSSEPassthroughEnabled bool   `json:"codex_preflight_sse_passthrough_enabled"`
@@ -7823,6 +7844,10 @@ type updateSettingsReq struct {
 	CodexWSStatelessSlots               *int     `json:"codex_ws_stateless_slots"`
 	GithubToken                         *string  `json:"github_token"`
 	GithubProxyURL                      *string  `json:"github_proxy_url"`
+	CodexOverloadPauseEnabled           *bool    `json:"codex_overload_pause_enabled"`
+	CodexOverloadThresholdPercent       *int     `json:"codex_overload_threshold_percent"`
+	CodexOverloadPauseMinutes           *int     `json:"codex_overload_pause_minutes"`
+	CodexOverloadWindowMinutes          *int     `json:"codex_overload_window_minutes"`
 	OverflowAutoCompactEnabled          *bool    `json:"overflow_auto_compact_enabled"`
 	CompactViaResponsesEnabled          *bool    `json:"compact_via_responses_enabled"`
 	CodexPreflightSSEPassthroughEnabled *bool    `json:"codex_preflight_sse_passthrough_enabled"`
@@ -8549,6 +8574,10 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexWSStatelessSlots:               h.store.CodexWSStatelessSlots(),
 		GithubTokenConfigured:               h.store.GithubToken() != "",
 		GithubProxyURL:                      h.store.GithubProxyURL(),
+		CodexOverloadPauseEnabled:           runtimeCfg.CodexOverloadPauseEnabled,
+		CodexOverloadThresholdPercent:       runtimeCfg.CodexOverloadThresholdPercent,
+		CodexOverloadPauseMinutes:           runtimeCfg.CodexOverloadPauseMinutes,
+		CodexOverloadWindowMinutes:          runtimeCfg.CodexOverloadWindowMinutes,
 		OverflowAutoCompactEnabled:          h.store.OverflowAutoCompactEnabled(),
 		CompactViaResponsesEnabled:          h.store.CompactViaResponsesEnabled(),
 		CodexPreflightSSEPassthroughEnabled: h.store.CodexPreflightSSEPassthroughEnabled(),
@@ -9263,6 +9292,27 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: github_proxy_url = %s", v)
 	}
 
+	// Codex 过载熔断（配置只存 RuntimeSettings，热更新生效）
+	if req.CodexOverloadPauseEnabled != nil {
+		runtimeCfg.CodexOverloadPauseEnabled = *req.CodexOverloadPauseEnabled
+		log.Printf("设置已更新: codex_overload_pause_enabled = %t", *req.CodexOverloadPauseEnabled)
+	}
+	if req.CodexOverloadThresholdPercent != nil {
+		v := database.NormalizeCodexOverloadThresholdPercent(*req.CodexOverloadThresholdPercent)
+		runtimeCfg.CodexOverloadThresholdPercent = v
+		log.Printf("设置已更新: codex_overload_threshold_percent = %d", v)
+	}
+	if req.CodexOverloadPauseMinutes != nil {
+		v := database.NormalizeCodexOverloadPauseMinutes(*req.CodexOverloadPauseMinutes)
+		runtimeCfg.CodexOverloadPauseMinutes = v
+		log.Printf("设置已更新: codex_overload_pause_minutes = %d", v)
+	}
+	if req.CodexOverloadWindowMinutes != nil {
+		v := database.NormalizeCodexOverloadWindowMinutes(*req.CodexOverloadWindowMinutes)
+		runtimeCfg.CodexOverloadWindowMinutes = v
+		log.Printf("设置已更新: codex_overload_window_minutes = %d", v)
+	}
+
 	if req.OverflowAutoCompactEnabled != nil {
 		h.store.SetOverflowAutoCompactEnabled(*req.OverflowAutoCompactEnabled)
 		runtimeCfg.OverflowAutoCompact = *req.OverflowAutoCompactEnabled
@@ -9836,6 +9886,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSStatelessSlots:               h.store.CodexWSStatelessSlots(),
 		GithubToken:                         h.store.GithubToken(),
 		GithubProxyURL:                      h.store.GithubProxyURL(),
+		CodexOverloadPauseEnabled:           runtimeCfg.CodexOverloadPauseEnabled,
+		CodexOverloadThresholdPercent:       runtimeCfg.CodexOverloadThresholdPercent,
+		CodexOverloadPauseMinutes:           runtimeCfg.CodexOverloadPauseMinutes,
+		CodexOverloadWindowMinutes:          runtimeCfg.CodexOverloadWindowMinutes,
 		OverflowAutoCompactEnabled:          h.store.OverflowAutoCompactEnabled(),
 		CompactViaResponsesEnabled:          h.store.CompactViaResponsesEnabled(),
 		CodexPreflightSSEPassthroughEnabled: h.store.CodexPreflightSSEPassthroughEnabled(),
@@ -10077,6 +10131,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSStatelessSlots:               h.store.CodexWSStatelessSlots(),
 		GithubTokenConfigured:               h.store.GithubToken() != "",
 		GithubProxyURL:                      h.store.GithubProxyURL(),
+		CodexOverloadPauseEnabled:           runtimeCfg.CodexOverloadPauseEnabled,
+		CodexOverloadThresholdPercent:       runtimeCfg.CodexOverloadThresholdPercent,
+		CodexOverloadPauseMinutes:           runtimeCfg.CodexOverloadPauseMinutes,
+		CodexOverloadWindowMinutes:          runtimeCfg.CodexOverloadWindowMinutes,
 		OverflowAutoCompactEnabled:          h.store.OverflowAutoCompactEnabled(),
 		CompactViaResponsesEnabled:          h.store.CompactViaResponsesEnabled(),
 		CodexPreflightSSEPassthroughEnabled: h.store.CodexPreflightSSEPassthroughEnabled(),

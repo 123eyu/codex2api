@@ -1157,6 +1157,8 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 			}
 		}
 	}
+	// 过载熔断统计（仅 Codex 渠道，需在渠道固化之后）。
+	h.noteOverloadOutcome(input)
 	_ = h.db.InsertUsageLog(context.Background(), input)
 }
 

@@ -1,4 +1,4 @@
-import type { ChangeEvent, DragEvent, ReactNode } from "react";
+import type { ChangeEvent, DragEvent, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -855,11 +855,252 @@ interface AccountRowActions {
   generateAuthJson: (account: AccountRow) => void;
   toggleEnabled: (account: AccountRow) => void;
   toggleLock: (account: AccountRow) => void;
-  resetStatus: (account: AccountRow) => void;
+  resetStatus: (account: AccountRow) => void | Promise<void>;
   resetCredits: (account: AccountRow) => void;
   openModelsEditor: (account: AccountRow) => void;
   remove: (account: AccountRow) => void;
   usageRefreshed: () => void;
+}
+
+type AccountOverlayKind = "disabled" | "overload";
+
+function resolveAccountOverlayKind(
+  account: AccountRow,
+): AccountOverlayKind | null {
+  if (account.enabled === false) return "disabled";
+  if (account.status === "overload_paused") return "overload";
+  return null;
+}
+
+function accountStateSurfaceClass(
+  account: AccountRow,
+  extraWhenActive = "",
+): string {
+  return resolveAccountOverlayKind(account)
+    ? ` account-state-surface${extraWhenActive}`
+    : "";
+}
+
+function formatCountdownRemaining(untilMs: number, nowMs: number): string {
+  const diff = Math.max(0, untilMs - nowMs);
+  if (diff <= 0) return "";
+  const hours = Math.floor(diff / 3600000);
+  const minutes = Math.floor((diff % 3600000) / 60000);
+  const seconds = Math.floor((diff % 60000) / 1000);
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${seconds}s`;
+}
+
+function useCountdownRemaining(until?: string): string {
+  const [remaining, setRemaining] = useState("");
+
+  useEffect(() => {
+    if (!until) {
+      setRemaining("");
+      return;
+    }
+    const target = new Date(until).getTime();
+    const update = () => {
+      setRemaining(formatCountdownRemaining(target, Date.now()));
+    };
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [until]);
+
+  return remaining;
+}
+
+function AccountStateOverlay({
+  kind,
+  label,
+  compact = false,
+  countdownUntil,
+  resumingLabel,
+  recoverLabel,
+  recoveringLabel,
+  onRecover,
+}: {
+  kind: AccountOverlayKind;
+  label: string;
+  compact?: boolean;
+  countdownUntil?: string;
+  resumingLabel?: string;
+  recoverLabel?: string;
+  recoveringLabel?: string;
+  onRecover?: () => void | Promise<void>;
+}) {
+  const remaining = useCountdownRemaining(countdownUntil);
+  const [busy, setBusy] = useState(false);
+  const isOverload = kind === "overload";
+  const countdownText = remaining || (isOverload ? resumingLabel : undefined);
+
+  const handleRecover = async (event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!onRecover || busy) return;
+    setBusy(true);
+    try {
+      await onRecover();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className={cn(
+        "account-state-overlay pointer-events-none absolute inset-0 z-10 overflow-hidden rounded-[inherit]",
+        isOverload
+          ? "account-state-overlay--overload"
+          : "account-state-overlay--disabled",
+      )}
+      aria-hidden={!isOverload}
+    >
+      <div className="account-state-overlay__scrim absolute inset-0" />
+      <div className="account-state-overlay__mark absolute inset-0 flex items-center justify-center px-3">
+        {isOverload && !compact ? (
+          <div className="flex min-w-[188px] flex-col items-center gap-2 rounded-2xl border border-orange-300/60 bg-card/95 px-4 py-3 text-orange-800 shadow-[0_1px_2px_hsl(24_80%_20%/0.06),0_10px_28px_hsl(24_80%_20%/0.08)] backdrop-blur-md dark:border-orange-400/25 dark:text-orange-100 dark:shadow-[0_1px_2px_rgb(0_0_0/0.24),0_10px_28px_rgb(0_0_0/0.2)]">
+            <div className="flex items-center gap-1.5">
+              <span className="flex size-5 items-center justify-center rounded-full bg-orange-500/15 text-orange-600 dark:text-orange-300">
+                <ShieldAlert className="size-3" />
+              </span>
+              <span className="text-xs font-medium tracking-[0.04em]">
+                {label}
+              </span>
+            </div>
+            {countdownText ? (
+              <span
+                className="font-mono text-lg font-semibold leading-none tabular-nums tracking-wide"
+                title={countdownUntil ? formatBeijingTime(countdownUntil) : undefined}
+              >
+                {countdownText}
+              </span>
+            ) : null}
+            {onRecover ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={(event) => void handleRecover(event)}
+                className="pointer-events-auto inline-flex items-center gap-1 rounded-full bg-orange-600 px-2.5 py-1 text-[11px] font-medium text-white shadow-sm transition-colors hover:bg-orange-500 disabled:cursor-wait disabled:opacity-70 dark:bg-orange-500 dark:hover:bg-orange-400"
+              >
+                {busy ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <RotateCcw className="size-3" />
+                )}
+                {busy ? recoveringLabel : recoverLabel}
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <span
+            className={cn(
+              "inline-flex items-center rounded-full border bg-card/95 shadow-[0_1px_2px_hsl(222_40%_11%/0.06),0_8px_24px_hsl(222_40%_11%/0.06)] backdrop-blur-md dark:shadow-[0_1px_2px_rgb(0_0_0/0.24),0_8px_24px_rgb(0_0_0/0.18)]",
+              compact && isOverload
+                ? "gap-2 py-1.5 pl-2 pr-2.5"
+                : compact
+                  ? "gap-1 py-0.5 pl-1 pr-1.5"
+                  : "gap-1.5 py-1 pl-1.5 pr-2.5",
+              isOverload
+                ? "border-orange-300/70 text-orange-800 dark:border-orange-400/25 dark:text-orange-100"
+                : "border-border/60 text-muted-foreground",
+            )}
+          >
+            <span
+              className={cn(
+                "flex items-center justify-center rounded-full",
+                compact && isOverload ? "size-6" : compact ? "size-4" : "size-5",
+                isOverload
+                  ? "bg-orange-500/15 text-orange-600 dark:text-orange-300"
+                  : "bg-muted/80 text-muted-foreground",
+              )}
+            >
+              {isOverload ? (
+                <ShieldAlert className={compact ? "size-3.5" : "size-3"} />
+              ) : (
+                <PowerOff className={compact ? "size-2.5" : "size-3"} />
+              )}
+            </span>
+            <span
+              className={cn(
+                "font-medium tracking-[0.04em]",
+                compact && isOverload ? "text-sm" : compact ? "text-[11px]" : "text-xs",
+              )}
+            >
+              {label}
+            </span>
+            {countdownText ? (
+              <span
+                className={cn(
+                  "font-mono font-semibold tabular-nums tracking-wide",
+                  compact && isOverload ? "text-sm" : compact ? "text-[11px]" : "text-xs",
+                )}
+                title={countdownUntil ? formatBeijingTime(countdownUntil) : undefined}
+              >
+                {countdownText}
+              </span>
+            ) : null}
+            {isOverload && onRecover ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={(event) => void handleRecover(event)}
+                className={cn(
+                  "pointer-events-auto inline-flex items-center rounded-full bg-orange-600 font-medium text-white shadow-sm transition-colors hover:bg-orange-500 disabled:cursor-wait disabled:opacity-70 dark:bg-orange-500 dark:hover:bg-orange-400",
+                  compact ? "gap-1.5 px-2.5 py-1 text-xs" : "gap-1 px-2 py-0.5 text-[11px]",
+                )}
+              >
+                {busy ? (
+                  <Loader2 className={compact ? "size-3.5 animate-spin" : "size-3 animate-spin"} />
+                ) : (
+                  <RotateCcw className={compact ? "size-3.5" : "size-3"} />
+                )}
+                {busy ? recoveringLabel : recoverLabel}
+              </button>
+            ) : null}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function renderAccountStateOverlay(
+  account: AccountRow,
+  t: ReturnType<typeof useTranslation>["t"],
+  options: {
+    compact?: boolean;
+    onRecover?: () => void | Promise<void>;
+  } = {},
+) {
+  const kind = resolveAccountOverlayKind(account);
+  if (!kind) return null;
+  return (
+    <AccountStateOverlay
+      kind={kind}
+      compact={options.compact}
+      label={
+        kind === "disabled"
+          ? t("accounts.disabledOverlay")
+          : t("accounts.overloadOverlay")
+      }
+      countdownUntil={
+        kind === "overload"
+          ? getAccountStatusCountdownUntil(account)
+          : undefined
+      }
+      resumingLabel={t("accounts.overloadResuming")}
+      recoverLabel={t("accounts.overloadRecover")}
+      recoveringLabel={t("accounts.overloadRecovering")}
+      onRecover={kind === "overload" ? options.onRecover : undefined}
+    />
+  );
 }
 
 // memo 边界:宿主 Accounts 组件有上百个 state,任何弹窗/表单/进度条状态变化都会
@@ -903,6 +1144,10 @@ const AccountTableRow = memo(function AccountTableRow({
                                 : selected
                                   ? "bg-primary/5"
                                   : ""
+                            }${
+                              // 禁用 / 过载暂停用独立遮罩层淡化内容，徽章保持清晰。relative 让遮罩以整行为定位基准。
+                              // 不用 grayscale / 行级 opacity：filter 会破坏定位包含块，opacity 会把徽章一起冲淡。
+                              accountStateSurfaceClass(account, " relative")
                             }`}
                             onClick={(event) => {
                               const target = event.target as HTMLElement | null;
@@ -917,6 +1162,10 @@ const AccountTableRow = memo(function AccountTableRow({
                             }}
                           >
                             <TableCell>
+                              {renderAccountStateOverlay(account, t, {
+                                compact: true,
+                                onRecover: () => actions.resetStatus(account),
+                              })}
                               <input
                                 type="checkbox"
                                 className="size-4 cursor-pointer accent-primary"
@@ -988,7 +1237,6 @@ const AccountTableRow = memo(function AccountTableRow({
                                     account.openai_responses_api ||
                                     account.grok_api ||
                                     account.agent_identity ||
-                                    account.enabled === false ||
                                     account.locked ||
                                     (account.rate_limit_reset_credits ?? 0) >
                                       0 ||
@@ -1015,12 +1263,6 @@ const AccountTableRow = memo(function AccountTableRow({
                                         <span className="inline-flex items-center gap-0.5 rounded-md bg-zinc-900 px-1.5 py-0.5 text-[10px] font-medium text-white ring-1 ring-inset ring-zinc-700 dark:bg-white dark:text-zinc-900 dark:ring-zinc-300">
                                           <Sparkles className="size-2.5" />
                                           Grok
-                                        </span>
-                                      )}
-                                      {account.enabled === false && (
-                                        <span className="inline-flex items-center rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-400/20">
-                                          <PowerOff className="mr-0.5 size-2.5" />
-                                          {t("accounts.disabled")}
                                         </span>
                                       )}
                                       {account.locked && (
@@ -1157,15 +1399,23 @@ const AccountTableRow = memo(function AccountTableRow({
                                 >
                                   <div className="flex min-h-6 flex-wrap items-center gap-1.5">
                                     <StatusBadge
-                                      status={account.status}
+                                      status={
+                                        account.status === "overload_paused"
+                                          ? "active"
+                                          : account.status
+                                      }
                                       detail={
-                                        getAccountRateLimitWindow(account) ??
-                                        undefined
+                                        account.status === "overload_paused"
+                                          ? undefined
+                                          : getAccountRateLimitWindow(account) ??
+                                            undefined
                                       }
                                       errorMessage={account.error_message}
                                     />
                                     <UsingCreditsBadge account={account} />
-                                    <AccountStatusCountdown account={account} />
+                                    {account.status !== "overload_paused" && (
+                                      <AccountStatusCountdown account={account} />
+                                    )}
                                     {(account.active_requests ?? 0) > 0 && (
                                       <span
                                         className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20"
@@ -1460,6 +1710,7 @@ export default function Accounts() {
   const [statusFilter, setStatusFilter] = useState<
     | "all"
     | "normal"
+    | "scheduling"
     | "rate_limited"
     | "abnormal"
     | "banned"
@@ -2707,6 +2958,7 @@ export default function Accounts() {
   const accountSummary = {
     totalAccounts: data.summary?.total ?? data.total,
     normalAccounts: data.summary?.normal ?? 0,
+    schedulingAccounts: data.summary?.active ?? 0,
     rateLimitedAccounts: data.summary?.rate_limited ?? 0,
     rateLimited5hAccounts: data.summary?.rate_limited_5h ?? 0,
     rateLimited7dAccounts: data.summary?.rate_limited_7d ?? 0,
@@ -2726,6 +2978,7 @@ export default function Accounts() {
   const {
     totalAccounts,
     normalAccounts,
+    schedulingAccounts,
     rateLimitedAccounts,
     rateLimited5hAccounts,
     rateLimited7dAccounts,
@@ -4303,7 +4556,11 @@ export default function Accounts() {
   const handleResetStatus = async (account: AccountRow) => {
     try {
       await api.resetAccountStatus(account.id);
-      showToast(t("accounts.resetStatusSuccess"));
+      showToast(
+        account.status === "overload_paused"
+          ? t("accounts.overloadRecoverSuccess")
+          : t("accounts.resetStatusSuccess"),
+      );
       await refreshAccountRow(account.id);
     } catch (error) {
       showToast(
@@ -5325,7 +5582,7 @@ export default function Accounts() {
     generateAuthJson: (account) => void handleGenerateAuthJSON(account),
     toggleEnabled: (account) => void handleToggleEnabled(account),
     toggleLock: (account) => void handleToggleLock(account),
-    resetStatus: (account) => void handleResetStatus(account),
+    resetStatus: (account) => handleResetStatus(account),
     resetCredits: (account) => void handleResetCredits(account),
     openModelsEditor,
     remove: (account) => void handleDelete(account),
@@ -5776,7 +6033,7 @@ export default function Accounts() {
                   : t("accounts.statsStale")}
             </div>
           ) : null}
-          <div className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-4">
+          <div className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-5">
             <CompactStat
               label={t("accounts.totalAccounts")}
               chipLabel={t("accounts.filterAll")}
@@ -5796,6 +6053,17 @@ export default function Accounts() {
               active={statusFilter === "normal"}
               onClick={() => {
                 setStatusFilter("normal");
+                setPage(1);
+              }}
+            />
+            <CompactStat
+              label={t("accounts.schedulingAccounts")}
+              chipLabel={t("accounts.filterScheduling")}
+              value={schedulingAccounts}
+              tone="warning"
+              active={statusFilter === "scheduling"}
+              onClick={() => {
+                setStatusFilter("scheduling");
                 setPage(1);
               }}
             />
@@ -5876,6 +6144,11 @@ export default function Accounts() {
                 [
                   ["all", t("accounts.filterAll"), totalAccounts],
                   ["normal", t("accounts.filterNormal"), normalAccounts],
+                  [
+                    "scheduling",
+                    t("accounts.filterScheduling"),
+                    schedulingAccounts,
+                  ],
                   [
                     "rate_limited",
                     t("accounts.filterRateLimited"),
@@ -6263,6 +6536,8 @@ export default function Accounts() {
                   >
                     {statusFilter === "normal"
                       ? t("accounts.filterNormal")
+                      : statusFilter === "scheduling"
+                        ? t("accounts.filterScheduling")
                       : statusFilter === "rate_limited"
                         ? t("accounts.filterRateLimited")
                         : statusFilter === "abnormal"
@@ -12370,7 +12645,10 @@ function AccountRowActionsMenu({
     },
     {
       key: "reset-status",
-      label: t("accounts.resetStatus"),
+      label:
+        account.status === "overload_paused"
+          ? t("accounts.overloadRecover")
+          : t("accounts.resetStatus"),
       icon: <RotateCcw className="size-3.5" />,
       onSelect: onResetStatus,
     },
@@ -12720,19 +12998,21 @@ function AccountMobileCard({
     account.at_only ||
     account.openai_responses_api ||
     account.grok_api ||
-    account.enabled === false ||
     account.locked;
   const modelCooldownCount = account.model_cooldowns?.length ?? 0;
 
   if (isPersonal) {
     return (
       <article
-        className={`group flex h-full min-w-0 flex-col overflow-hidden rounded-xl border bg-card shadow-sm transition-colors ${
+        className={`group relative flex h-full min-w-0 flex-col overflow-hidden rounded-xl border bg-card shadow-sm transition-colors ${
           detailOpen || selected
             ? "border-primary/40 bg-primary/5 ring-1 ring-primary/20"
             : "border-border hover:border-border/80"
-        }`}
+        }${accountStateSurfaceClass(account)}`}
       >
+        {renderAccountStateOverlay(account, t, {
+          onRecover: onResetStatus,
+        })}
         <div className="flex min-w-0 items-start gap-4 p-5 pb-4">
           <input
             type="checkbox"
@@ -12795,7 +13075,9 @@ function AccountMobileCard({
               <PlanBadge planType={account.plan_type} />
               <SchedulerPriorityBadge account={account} />
               <UsingCreditsBadge account={account} />
-              <AccountStatusCountdown account={account} />
+              {account.status !== "overload_paused" && (
+                <AccountStatusCountdown account={account} />
+              )}
               <ExpiryBadge
                 expiresAt={account.subscription_expires_at}
                 planType={account.plan_type}
@@ -12834,8 +13116,16 @@ function AccountMobileCard({
               <div className="shrink-0">
                 <div className="flex flex-wrap items-center justify-end gap-1.5">
                   <StatusBadge
-                    status={account.status}
-                    detail={getAccountRateLimitWindow(account) ?? undefined}
+                    status={
+                      account.status === "overload_paused"
+                        ? "active"
+                        : account.status
+                    }
+                    detail={
+                      account.status === "overload_paused"
+                        ? undefined
+                        : getAccountRateLimitWindow(account) ?? undefined
+                    }
                     errorMessage={account.error_message}
                   />
                   {(account.active_requests ?? 0) > 0 && (
@@ -12873,12 +13163,6 @@ function AccountMobileCard({
                     <Sparkles className="size-2.5" />
                     Grok
                     {account.grok_auth_kind === "api_key" ? " · API Key" : " · OAuth"}
-                  </span>
-                )}
-                {account.enabled === false && (
-                  <span className="inline-flex items-center rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-400/20">
-                    <PowerOff className="mr-0.5 size-2.5" />
-                    {t("accounts.disabled")}
                   </span>
                 )}
                 {account.locked && (
@@ -13072,12 +13356,16 @@ function AccountMobileCard({
 
   return (
     <article
-      className={`min-w-0 rounded-xl border bg-card p-3 shadow-sm transition-colors ${
+      className={`relative min-w-0 rounded-xl border bg-card p-3 shadow-sm transition-colors ${
         detailOpen || selected
           ? "border-primary/40 bg-primary/5 ring-1 ring-primary/20"
           : "border-border"
-      }`}
+      }${accountStateSurfaceClass(account, " overflow-hidden")}`}
     >
+      {renderAccountStateOverlay(account, t, {
+        compact: true,
+        onRecover: onResetStatus,
+      })}
       <div className="flex min-w-0 items-start gap-3">
         <input
           type="checkbox"
@@ -13132,13 +13420,23 @@ function AccountMobileCard({
               {(!visibleColumns || visibleColumns.status) && (
                 <div className="flex min-w-[112px] shrink-0 flex-col items-end">
                   <StatusBadge
-                    status={account.status}
-                    detail={getAccountRateLimitWindow(account) ?? undefined}
+                    status={
+                      account.status === "overload_paused"
+                        ? "active"
+                        : account.status
+                    }
+                    detail={
+                      account.status === "overload_paused"
+                        ? undefined
+                        : getAccountRateLimitWindow(account) ?? undefined
+                    }
                     errorMessage={account.error_message}
                   />
                   <div className="mt-1 flex min-h-6 flex-wrap items-center justify-end gap-1.5">
                     <UsingCreditsBadge account={account} />
-                    <AccountStatusCountdown account={account} />
+                    {account.status !== "overload_paused" && (
+                      <AccountStatusCountdown account={account} />
+                    )}
                   </div>
                 </div>
               )}
@@ -13160,12 +13458,6 @@ function AccountMobileCard({
                 <Sparkles className="size-2.5" />
                 Grok
                 {account.grok_auth_kind === "api_key" ? " · API Key" : " · OAuth"}
-              </span>
-            )}
-            {account.enabled === false && (
-              <span className="inline-flex items-center rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-400/20">
-                <PowerOff className="mr-0.5 size-2.5" />
-                {t("accounts.disabled")}
               </span>
             )}
             {account.locked && (
@@ -14447,7 +14739,10 @@ function getAccountStatusCountdownUntil(
     status === "rate_limited_7d";
   if (
     account.cooldown_until &&
-    (rateLimited || status === "error" || status === "cooldown")
+    (rateLimited ||
+      status === "error" ||
+      status === "cooldown" ||
+      status === "overload_paused")
   ) {
     return account.cooldown_until;
   }
@@ -14477,36 +14772,8 @@ function AccountStatusCountdown({ account }: { account: AccountRow }) {
 
 // 冷却倒计时组件
 function CooldownTimer({ until }: { until: string }) {
-  const [remaining, setRemaining] = useState("");
+  const remaining = useCountdownRemaining(until);
   const title = formatBeijingTime(until);
-
-  useEffect(() => {
-    const target = new Date(until).getTime();
-
-    const update = () => {
-      const diff = Math.max(0, target - Date.now());
-      if (diff <= 0) {
-        setRemaining("");
-        return;
-      }
-      const h = Math.floor(diff / 3600000);
-      const m = Math.floor((diff % 3600000) / 60000);
-      const s = Math.floor((diff % 60000) / 1000);
-      if (h > 0) {
-        setRemaining(
-          `${h}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`,
-        );
-      } else if (m > 0) {
-        setRemaining(`${m}m ${String(s).padStart(2, "0")}s`);
-      } else {
-        setRemaining(`${s}s`);
-      }
-    };
-
-    update();
-    const id = setInterval(update, 1000);
-    return () => clearInterval(id);
-  }, [until]);
 
   if (!remaining) return null;
   return (

@@ -78,6 +78,7 @@ type accountListSummary struct {
 	Total                int `json:"total"`
 	Normal               int `json:"normal"`
 	Active               int `json:"active"`
+	OverloadPaused       int `json:"overload_paused"`
 	RateLimited          int `json:"rate_limited"`
 	RateLimited5h        int `json:"rate_limited_5h"`
 	RateLimited7d        int `json:"rate_limited_7d"`
@@ -301,8 +302,8 @@ func parseAccountPageQuery(c *gin.Context) (accountPageQuery, error) {
 
 func validateAccountPageFilters(query accountPageQuery) error {
 	validStatuses := map[string]bool{
-		"": true, "all": true, "normal": true, "active": true,
-		"rate_limited": true, "abnormal": true, "banned": true,
+		"": true, "all": true, "normal": true, "active": true, "scheduling": true,
+		"overload_paused": true, "rate_limited": true, "abnormal": true, "banned": true,
 		"error": true, "unsampled": true, "disabled": true, "locked": true,
 	}
 	if !validStatuses[query.Status] {
@@ -779,8 +780,12 @@ func accountListStatusMatches(item *accountListSnapshotItem, status, channel str
 	limited := accountListRateLimited(item)
 	if channel == database.UpstreamChannelGrok {
 		switch status {
-		case "active", "normal":
-			return item.Enabled && !banned && !errorState && !limited
+		case "normal":
+			return accountListNormal(item)
+		case "active", "scheduling":
+			return accountListSchedulable(item)
+		case "overload_paused":
+			return accountListOverloadPaused(item)
 		case "rate_limited":
 			return limited
 		case "disabled":
@@ -793,9 +798,13 @@ func accountListStatusMatches(item *accountListSnapshotItem, status, channel str
 		return true
 	}
 	switch status {
-	case "normal", "active":
-		// 与 Grok 分支同口径：禁用账号不算"正常"（issue #522），单独走 disabled 筛选。
-		return item.Enabled && !banned && !errorState && !limited
+	case "normal":
+		// 过载暂停、禁用都归入「正常」；真正可调度的账号走 scheduling/active。
+		return accountListNormal(item)
+	case "active", "scheduling":
+		return accountListSchedulable(item)
+	case "overload_paused":
+		return accountListOverloadPaused(item)
 	case "rate_limited":
 		return !banned && !errorState && limited
 	case "abnormal":
@@ -814,8 +823,34 @@ func accountListStatusMatches(item *accountListSnapshotItem, status, channel str
 	return true
 }
 
+func accountListOverloadPaused(item *accountListSnapshotItem) bool {
+	return strings.EqualFold(item.Status, "overload_paused") ||
+		strings.EqualFold(item.CooldownReason, "overload_paused")
+}
+
+func accountListNormal(item *accountListSnapshotItem) bool {
+	if item.Status == "unauthorized" || item.Status == "error" {
+		return false
+	}
+	if !item.Enabled || accountListOverloadPaused(item) {
+		return true
+	}
+	return !accountListRateLimited(item)
+}
+
+func accountListSchedulable(item *accountListSnapshotItem) bool {
+	return item.Enabled &&
+		item.Status != "unauthorized" &&
+		item.Status != "error" &&
+		!accountListRateLimited(item) &&
+		!accountListOverloadPaused(item)
+}
+
 func accountListRateLimited(item *accountListSnapshotItem) bool {
 	if item.UsingCredits || item.Status == "unauthorized" || item.Status == "error" {
+		return false
+	}
+	if accountListOverloadPaused(item) {
 		return false
 	}
 	limited := map[string]bool{
@@ -929,6 +964,7 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 		banned := item.Status == "unauthorized"
 		errorState := item.Status == "error"
 		limited := accountListRateLimited(item)
+		overloadPaused := accountListOverloadPaused(item)
 		if banned {
 			summary.Banned++
 		}
@@ -937,6 +973,9 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 		}
 		if banned || errorState {
 			summary.Abnormal++
+		}
+		if overloadPaused {
+			summary.OverloadPaused++
 		}
 		if limited {
 			summary.RateLimited++
@@ -949,10 +988,10 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 				summary.RateLimited5h++
 			}
 		}
-		if item.Enabled && !banned && !errorState && !limited {
+		if accountListNormal(item) {
 			summary.Normal++
 		}
-		if item.Enabled && !banned && !errorState && !limited {
+		if accountListSchedulable(item) {
 			summary.Active++
 		}
 		if !item.Enabled {

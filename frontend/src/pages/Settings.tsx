@@ -1315,6 +1315,10 @@ export default function Settings() {
     codex_ws_stateless_slots: 8,
     github_token_configured: false,
     github_proxy_url: '',
+    codex_overload_pause_enabled: false,
+    codex_overload_threshold_percent: 20,
+    codex_overload_pause_minutes: 30,
+    codex_overload_window_minutes: 5,
     codex_continue_thinking_enabled: false,
     overflow_auto_compact_enabled: false,
     compact_via_responses_enabled: false,
@@ -3008,6 +3012,72 @@ export default function Settings() {
                   onCheckedChange={(checked) => autoSaveBooleanField('codex_preflight_sse_passthrough_enabled', checked)}
                 />
               </SettingField>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.codexOverloadPause')} description={t('settings.codexOverloadPauseDesc')} icon={<ShieldAlert className="size-4" />}>
+            <div className="space-y-4">
+              <div className={SETTINGS_SWITCH_GRID}>
+                <SettingField label={t('settings.codexOverloadPauseEnabled')} description={t('settings.codexOverloadPauseEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.codex_overload_pause_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('codex_overload_pause_enabled', checked)}
+                  />
+                </SettingField>
+              </div>
+              <div className={cn(SETTINGS_FIELD_GRID_3, !settingsForm.codex_overload_pause_enabled && 'opacity-60')}>
+                <SettingField
+                  label={t('settings.codexOverloadThreshold')}
+                  description={t('settings.codexOverloadThresholdDesc')}
+                  suffix="%"
+                >
+                  <DraftNumberInput
+                    min={1}
+                    max={100}
+                    disabled={!settingsForm.codex_overload_pause_enabled}
+                    value={settingsForm.codex_overload_threshold_percent}
+                    emptyValue={20}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, codex_overload_threshold_percent: value }))}
+                    onValueCommit={(value) => {
+                      void autoSaveSettingsPatch({ codex_overload_threshold_percent: value })
+                    }}
+                  />
+                </SettingField>
+                <SettingField
+                  label={t('settings.codexOverloadPauseMinutes')}
+                  description={t('settings.codexOverloadPauseMinutesDesc')}
+                  suffix={t('settings.unit.min')}
+                >
+                  <DraftNumberInput
+                    min={1}
+                    max={1440}
+                    disabled={!settingsForm.codex_overload_pause_enabled}
+                    value={settingsForm.codex_overload_pause_minutes}
+                    emptyValue={30}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, codex_overload_pause_minutes: value }))}
+                    onValueCommit={(value) => {
+                      void autoSaveSettingsPatch({ codex_overload_pause_minutes: value })
+                    }}
+                  />
+                </SettingField>
+                <SettingField
+                  label={t('settings.codexOverloadWindow')}
+                  description={t('settings.codexOverloadWindowDesc')}
+                  suffix={t('settings.unit.min')}
+                >
+                  <DraftNumberInput
+                    min={1}
+                    max={120}
+                    disabled={!settingsForm.codex_overload_pause_enabled}
+                    value={settingsForm.codex_overload_window_minutes}
+                    emptyValue={5}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, codex_overload_window_minutes: value }))}
+                    onValueCommit={(value) => {
+                      void autoSaveSettingsPatch({ codex_overload_window_minutes: value })
+                    }}
+                  />
+                </SettingField>
+              </div>
             </div>
           </SettingsCard>
 

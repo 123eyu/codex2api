@@ -88,6 +88,12 @@ type RuntimeSettings struct {
 	GithubToken string
 	// GithubProxyURL GitHub 域名专用出站代理；空表示回落调用方的默认代理（issue #522）。
 	GithubProxyURL string
+	// Codex 过载熔断：单账号滑动窗口内 server_is_overloaded 错误占比达到阈值且样本数
+	// 足够时，自动暂停该账号调度一段时间（默认关闭）。
+	CodexOverloadPauseEnabled     bool
+	CodexOverloadThresholdPercent int // 触发比例（%），默认 20
+	CodexOverloadPauseMinutes     int // 暂停时长（分钟），默认 30
+	CodexOverloadWindowMinutes    int // 统计窗口（分钟），默认 5
 	// OverflowAutoCompact 上下文超窗时自动摘要旧轮次并重试一次（实验性，默认 false，issue #415）。
 	// 全局开关与 per-key limits.auto_compact_overflow 为「或」关系。
 	OverflowAutoCompact bool
@@ -163,6 +169,9 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		CodexWSBusyMaxWaitSec:            defaultCodexWSBusyMaxWaitSec,
 		CodexWSBusyPatienceSec:           defaultCodexWSBusyPatienceSec,
 		CodexWSStatelessSlots:            defaultCodexWSStatelessSlots,
+		CodexOverloadThresholdPercent:    database.NormalizeCodexOverloadThresholdPercent(0),
+		CodexOverloadPauseMinutes:        database.NormalizeCodexOverloadPauseMinutes(0),
+		CodexOverloadWindowMinutes:       database.NormalizeCodexOverloadWindowMinutes(0),
 		CodexContinueMaxRounds:           defaultCodexContinueMaxRounds,
 		RequestIsolationMode:             defaultRequestIsolationMode(),
 		CodexCLIVersionSyncEnabled:       true,
@@ -288,6 +297,9 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	if settings.CodexWSStatelessSlots > maxCodexWSStatelessSlots {
 		settings.CodexWSStatelessSlots = maxCodexWSStatelessSlots
 	}
+	settings.CodexOverloadThresholdPercent = database.NormalizeCodexOverloadThresholdPercent(settings.CodexOverloadThresholdPercent)
+	settings.CodexOverloadPauseMinutes = database.NormalizeCodexOverloadPauseMinutes(settings.CodexOverloadPauseMinutes)
+	settings.CodexOverloadWindowMinutes = database.NormalizeCodexOverloadWindowMinutes(settings.CodexOverloadWindowMinutes)
 	if settings.CodexContinueMaxRounds < minCodexContinueMaxRounds {
 		settings.CodexContinueMaxRounds = defaults.CodexContinueMaxRounds
 	}
@@ -325,6 +337,10 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.CodexWSStatelessSlots = settings.CodexWSStatelessSlots
 		next.GithubToken = strings.TrimSpace(settings.GithubToken)
 		next.GithubProxyURL = strings.TrimSpace(settings.GithubProxyURL)
+		next.CodexOverloadPauseEnabled = settings.CodexOverloadPauseEnabled
+		next.CodexOverloadThresholdPercent = settings.CodexOverloadThresholdPercent
+		next.CodexOverloadPauseMinutes = settings.CodexOverloadPauseMinutes
+		next.CodexOverloadWindowMinutes = settings.CodexOverloadWindowMinutes
 		next.OverflowAutoCompact = settings.OverflowAutoCompactEnabled
 		next.CompactViaResponses = settings.CompactViaResponsesEnabled
 		next.CodexPreflightSSEPassthrough = settings.CodexPreflightSSEPassthroughEnabled

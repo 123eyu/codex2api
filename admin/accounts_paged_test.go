@@ -574,21 +574,50 @@ func TestListAccountsPageKeepsGrokQuotaBars(t *testing.T) {
 	}
 }
 
-func TestCodexNormalStatusExcludesDisabledAccounts(t *testing.T) {
+func TestCodexNormalIncludesDisabledButSchedulingExcludesIt(t *testing.T) {
 	enabled := &accountListSnapshotItem{Status: "active", Enabled: true}
 	disabled := &accountListSnapshotItem{Status: "active", Enabled: false}
-	if !accountListStatusMatches(enabled, "normal", database.UpstreamChannelCodex) {
+	codex := database.UpstreamChannelCodex
+	if !accountListStatusMatches(enabled, "normal", codex) {
 		t.Fatal("enabled healthy account should match normal")
 	}
-	if accountListStatusMatches(disabled, "normal", database.UpstreamChannelCodex) {
-		t.Fatal("disabled account must not match normal (issue #522)")
+	if !accountListStatusMatches(disabled, "normal", codex) {
+		t.Fatal("disabled account should classify as normal")
 	}
-	if !accountListStatusMatches(disabled, "disabled", database.UpstreamChannelCodex) {
+	if accountListStatusMatches(disabled, "scheduling", codex) || accountListStatusMatches(disabled, "active", codex) {
+		t.Fatal("disabled account must be excluded from scheduling")
+	}
+	if !accountListStatusMatches(disabled, "disabled", codex) {
 		t.Fatal("disabled account should match disabled filter")
 	}
-	summary, _ := summarizeAccountList([]*accountListSnapshotItem{enabled, disabled}, database.UpstreamChannelCodex)
-	if summary.Normal != 1 || summary.Disabled != 1 || summary.Total != 2 {
-		t.Fatalf("summary = %+v, want Normal=1 Disabled=1 Total=2", summary)
+	summary, _ := summarizeAccountList([]*accountListSnapshotItem{enabled, disabled}, codex)
+	if summary.Normal != 2 || summary.Active != 1 || summary.Disabled != 1 || summary.Total != 2 {
+		t.Fatalf("summary = %+v, want Normal=2 Active=1 Disabled=1 Total=2", summary)
+	}
+}
+
+func TestOverloadPausedCountsAsNormalNotRateLimitedOrScheduling(t *testing.T) {
+	item := &accountListSnapshotItem{
+		Status:         "overload_paused",
+		Enabled:        true,
+		CooldownReason: "overload_paused",
+	}
+	codex := database.UpstreamChannelCodex
+	if accountListRateLimited(item) {
+		t.Fatal("overload_paused must not count as rate limited")
+	}
+	if !accountListStatusMatches(item, "normal", codex) {
+		t.Fatal("overload_paused should classify as normal")
+	}
+	if accountListStatusMatches(item, "scheduling", codex) || accountListStatusMatches(item, "active", codex) {
+		t.Fatal("overload_paused must be excluded from scheduling")
+	}
+	if accountListStatusMatches(item, "rate_limited", codex) {
+		t.Fatal("overload_paused must not match rate_limited")
+	}
+	summary, _ := summarizeAccountList([]*accountListSnapshotItem{item}, codex)
+	if summary.Normal != 1 || summary.Active != 0 || summary.RateLimited != 0 || summary.OverloadPaused != 1 {
+		t.Fatalf("summary = %+v, want Normal=1 Active=0 RateLimited=0 OverloadPaused=1", summary)
 	}
 }
 
