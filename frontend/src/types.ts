@@ -645,6 +645,18 @@ export interface AddGrokAccountRequest {
 
 export type UpdateGrokAccountRequest = AddGrokAccountRequest
 
+export interface BatchUpdateGrokModelsRequest {
+  ids: number[]
+  models: string[]
+}
+
+export interface BatchUpdateGrokModelsResponse {
+  message: string
+  success: number
+  failed: number
+  models: string[]
+}
+
 export interface FetchGrokModelsResponse {
   models: string[]
 }

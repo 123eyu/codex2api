@@ -569,6 +569,35 @@ data: [DONE]
 }
 ```
 
+#### POST /api/admin/accounts/grok/batch-models
+
+批量替换 Grok 账号的模型白名单。`ids` 会自动去重；非 Grok 或不存在的账号计入 `failed`，不中断整批。空数组表示清空白名单（未声明，仅 grok 渠道 Key 可调度）。
+
+**请求:**
+
+```json
+{
+  "ids": [1, 2, 3],
+  "models": ["grok-4.5"]
+}
+```
+
+| 参数 | 类型 | 必填 | 说明 |
+| ---- | ---- | ---- | ---- |
+| ids | integer[] | 是 | 要更新的 Grok 账号 ID |
+| models | string[] | 否 | 替换后的模型白名单；省略或空数组表示清空声明 |
+
+**响应:**
+
+```json
+{
+  "message": "已更新 3 个账号，失败 0 个",
+  "success": 3,
+  "failed": 0,
+  "models": ["grok-4.5"]
+}
+```
+
 #### POST /api/admin/accounts
 
 添加 Refresh Token 账号（支持批量）。

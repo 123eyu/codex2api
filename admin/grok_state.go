@@ -701,9 +701,6 @@ func (h *Handler) syncGrokAccountStateSelected(ctx context.Context, id int64, se
 				return nil, errGrokCredentialChanged
 			}
 			result.Models = visiblePersistedModelIDs(oldItems, account.GrokAuthKind())
-			if oldSnapshot != nil {
-				legacyUpdates["models"] = append([]string(nil), result.Models...)
-			}
 		} else if catalog.NotModified {
 			applied, touchErr := h.db.TouchGrokModelCatalogNotModified(ctx, id, origin, generation, catalog.ObservedAt, catalog.ObservedAt.Add(grokFactFreshness))
 			if touchErr != nil {
@@ -716,7 +713,6 @@ func (h *Handler) syncGrokAccountStateSelected(ctx context.Context, id int64, se
 				_, _ = h.db.UpdateGrokModelsETagHint(ctx, id, origin, generation, catalog.ModelsETagHint, catalog.ObservedAt)
 			}
 			result.Models = visiblePersistedModelIDs(oldItems, account.GrokAuthKind())
-			legacyUpdates["models"] = append([]string(nil), result.Models...)
 		} else {
 			items := persistedCatalogItems(catalog.Models)
 			snapshot := database.GrokModelCatalogSnapshot{
@@ -735,9 +731,11 @@ func (h *Handler) syncGrokAccountStateSelected(ctx context.Context, id int64, se
 				return nil, errGrokCredentialChanged
 			}
 			result.Models = proxy.VisibleGrokModelIDs(catalog.Models, account.GrokAuthKind())
-			legacyUpdates["models"] = append([]string(nil), result.Models...)
 		}
 	}
+	// credentials.models 是运营声明的调度白名单（空=未声明）。上游目录已经
+	// 落在 grok_model_catalog；再写回 models 会把批量/编辑设置的白名单覆盖成
+	// 当前可见目录（免费 OAuth 常见只剩 grok-4.6），几分钟后列表就“丢模型”。
 	if len(legacyUpdates) > 0 {
 		applied, persistErr := h.db.MergeAccountCredentialsForGeneration(ctx, id, generation, legacyUpdates)
 		if persistErr != nil {
@@ -745,9 +743,6 @@ func (h *Handler) syncGrokAccountStateSelected(ctx context.Context, id int64, se
 		}
 		if !applied {
 			return nil, errGrokCredentialChanged
-		}
-		if models, ok := legacyUpdates["models"].([]string); ok {
-			h.store.ApplyAccountModels(id, models)
 		}
 	}
 	if err := h.store.ReloadGrokPersistentState(ctx, id); err != nil {
