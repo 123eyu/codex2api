@@ -149,6 +149,7 @@ import {
   Shield,
   ArrowUpRight,
   Settings2,
+  ListChecks,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import AccountUsageModal from "../components/AccountUsageModal";
@@ -1473,6 +1474,10 @@ export default function Accounts() {
   const [planFilter, setPlanFilter] = useState<
     "all" | "pro" | "prolite" | "plus" | "team" | "k12" | "free"
   >("all");
+  // 账号类型：oauth=官方 OAuth 账号，api_key=Responses API 中转账号（issue #522）
+  const [authFilter, setAuthFilter] = useState<"all" | "oauth" | "api_key">(
+    "all",
+  );
   const [sortKey, setSortKey] = useState<
     "requests" | "usage" | "importTime" | "schedulerPriority" | "group" | null
   >(null);
@@ -2335,6 +2340,7 @@ export default function Accounts() {
       search: debouncedSearchQuery,
       status: statusFilter,
       plan: planFilter,
+      authKind: authFilter,
       tag: tagFilter,
       emailDomain: domainFilter,
       groupInclude: groupFilter.include,
@@ -2356,7 +2362,7 @@ export default function Accounts() {
       snapshotAt: accountsResponse.snapshot_at,
       statsState: accountsResponse.stats_state,
     };
-  }, [debouncedSearchQuery, domainFilter, groupFilter.exclude, groupFilter.include, groupFilter.ungrouped, page, pageSize, planFilter, sortDir, sortKey, statusFilter, tagFilter]);
+  }, [authFilter, debouncedSearchQuery, domainFilter, groupFilter.exclude, groupFilter.include, groupFilter.ungrouped, page, pageSize, planFilter, sortDir, sortKey, statusFilter, tagFilter]);
 
   const loadAccountAnalysis = useCallback(async () => {
     accountAnalysisAbortRef.current?.abort();
@@ -2714,6 +2720,8 @@ export default function Accounts() {
     healthyAccounts: data.summary?.healthy ?? 0,
     warmAccounts: data.summary?.warm ?? 0,
     riskyAccounts: data.summary?.risky ?? 0,
+    oauthAccounts: data.summary?.oauth ?? 0,
+    apiKeyAccounts: data.summary?.api_key ?? 0,
   };
   const {
     totalAccounts,
@@ -2731,6 +2739,8 @@ export default function Accounts() {
     healthyAccounts,
     warmAccounts,
     riskyAccounts,
+    oauthAccounts,
+    apiKeyAccounts,
   } = accountSummary;
 
   const allTags = data.facets.tags;
@@ -2740,12 +2750,13 @@ export default function Accounts() {
     search: debouncedSearchQuery || undefined,
     status: statusFilter === "all" ? undefined : statusFilter,
     plan: planFilter === "all" ? undefined : planFilter,
+    auth_kind: authFilter === "all" ? undefined : authFilter,
     tag: tagFilter || undefined,
     email_domain: domainFilter || undefined,
     group_include: groupFilter.include.length > 0 ? groupFilter.include : undefined,
     group_exclude: groupFilter.exclude.length > 0 ? groupFilter.exclude : undefined,
     ungrouped: groupFilter.ungrouped || undefined,
-  }), [debouncedSearchQuery, domainFilter, groupFilter.exclude, groupFilter.include, groupFilter.ungrouped, planFilter, statusFilter, tagFilter]);
+  }), [authFilter, debouncedSearchQuery, domainFilter, groupFilter.exclude, groupFilter.include, groupFilter.ungrouped, planFilter, statusFilter, tagFilter]);
 
   // 服务端已完成全池筛选、排序和分页。
   const filteredAccounts = accounts;
@@ -5963,6 +5974,32 @@ export default function Accounts() {
                 ))}
               </div>
 
+              {/* 账号类型：快速把 Responses API 中转账号从 OAuth 官方账号里筛出来（issue #522） */}
+              <div className="flex max-w-full shrink-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-border bg-muted/30 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                {(
+                  [
+                    ["all", t("accounts.filterAll"), totalAccounts],
+                    ["oauth", "OAuth", oauthAccounts],
+                    ["api_key", "API", apiKeyAccounts],
+                  ] as const
+                ).map(([key, label, count]) => (
+                  <button
+                    key={key}
+                    onClick={() => {
+                      setAuthFilter(key);
+                      setPage(1);
+                    }}
+                    className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
+                      authFilter === key
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {key === "all" ? label : `${label} ${count}`}
+                  </button>
+                ))}
+              </div>
+
               <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
                 <Select
                   className="w-full min-w-0 sm:w-36"
@@ -6323,6 +6360,18 @@ export default function Accounts() {
                 {t("common.selected", { count: selected.size })}
               </span>
               <div className="flex flex-wrap items-center justify-end gap-1.5 max-lg:justify-start">
+                {/* 卡片视图（移动端/grid/自用）没有表头全选框，这里是唯一的全选入口（issue #522） */}
+                {!allPageSelected && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={batchLoading || batchTesting}
+                    onClick={toggleSelectAll}
+                  >
+                    <ListChecks className="size-3.5" />
+                    <span>{t("accounts.selectCurrentPage")}</span>
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"

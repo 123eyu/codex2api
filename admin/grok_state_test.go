@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -370,5 +371,34 @@ func TestRunGrokCapabilityProbeKnownEmptyCatalogDoesNotUseDefaults(t *testing.T)
 	}
 	if len(result.Results) != 0 || inferenceCalls.Load() != 0 {
 		t.Fatalf("known empty catalog produced results=%v calls=%d", result.Results, inferenceCalls.Load())
+	}
+}
+
+func TestInspectGrokProbeResponseRecordsFirstTokenFromDelta(t *testing.T) {
+	started := time.Now().Add(-80 * time.Millisecond)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n" +
+				"data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n")),
+	}
+	observation := inspectGrokProbeResponse(context.Background(), proxy.GrokProtocolChatCompletions, resp, nil, started)
+	if observation.status != "ok" || observation.firstTokenMs < 80 {
+		t.Fatalf("delta first token = %+v", observation)
+	}
+}
+
+func TestInspectGrokProbeResponseUsesCompletionWhenNoDelta(t *testing.T) {
+	started := time.Now().Add(-50 * time.Millisecond)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")),
+	}
+	observation := inspectGrokProbeResponse(context.Background(), proxy.GrokProtocolResponses, resp, nil, started)
+	if observation.status != "ok" || observation.firstTokenMs < 50 {
+		t.Fatalf("completed-only first token = %+v", observation)
 	}
 }

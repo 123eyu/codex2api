@@ -7670,6 +7670,9 @@ type settingsResponse struct {
 	CodexWSBusyAcquireMaxWaitSec        int    `json:"codex_ws_busy_acquire_max_wait_sec"`
 	CodexWSBusyOverflowEnabled          bool   `json:"codex_ws_busy_overflow_enabled"`
 	CodexWSBusyPatienceSec              int    `json:"codex_ws_busy_patience_sec"`
+	CodexWSStatelessSlots               int    `json:"codex_ws_stateless_slots"`
+	GithubTokenConfigured               bool   `json:"github_token_configured"`
+	GithubProxyURL                      string `json:"github_proxy_url"`
 	OverflowAutoCompactEnabled          bool   `json:"overflow_auto_compact_enabled"`
 	CompactViaResponsesEnabled          bool   `json:"compact_via_responses_enabled"`
 	CodexPreflightSSEPassthroughEnabled bool   `json:"codex_preflight_sse_passthrough_enabled"`
@@ -7816,6 +7819,9 @@ type updateSettingsReq struct {
 	CodexWSBusyAcquireMaxWaitSec        *int     `json:"codex_ws_busy_acquire_max_wait_sec"`
 	CodexWSBusyOverflowEnabled          *bool    `json:"codex_ws_busy_overflow_enabled"`
 	CodexWSBusyPatienceSec              *int     `json:"codex_ws_busy_patience_sec"`
+	CodexWSStatelessSlots               *int     `json:"codex_ws_stateless_slots"`
+	GithubToken                         *string  `json:"github_token"`
+	GithubProxyURL                      *string  `json:"github_proxy_url"`
 	OverflowAutoCompactEnabled          *bool    `json:"overflow_auto_compact_enabled"`
 	CompactViaResponsesEnabled          *bool    `json:"compact_via_responses_enabled"`
 	CodexPreflightSSEPassthroughEnabled *bool    `json:"codex_preflight_sse_passthrough_enabled"`
@@ -8539,6 +8545,9 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexWSBusyAcquireMaxWaitSec:        h.store.CodexWSBusyAcquireMaxWaitSec(),
 		CodexWSBusyOverflowEnabled:          h.store.CodexWSBusyOverflowEnabled(),
 		CodexWSBusyPatienceSec:              h.store.CodexWSBusyPatienceSec(),
+		CodexWSStatelessSlots:               h.store.CodexWSStatelessSlots(),
+		GithubTokenConfigured:               h.store.GithubToken() != "",
+		GithubProxyURL:                      h.store.GithubProxyURL(),
 		OverflowAutoCompactEnabled:          h.store.OverflowAutoCompactEnabled(),
 		CompactViaResponsesEnabled:          h.store.CompactViaResponsesEnabled(),
 		CodexPreflightSSEPassthroughEnabled: h.store.CodexPreflightSSEPassthroughEnabled(),
@@ -9232,6 +9241,27 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: codex_ws_busy_patience_sec = %d", v)
 	}
 
+	if req.CodexWSStatelessSlots != nil {
+		v := database.NormalizeCodexWSStatelessSlots(*req.CodexWSStatelessSlots)
+		h.store.SetCodexWSStatelessSlots(v)
+		runtimeCfg.CodexWSStatelessSlots = v
+		log.Printf("设置已更新: codex_ws_stateless_slots = %d", v)
+	}
+
+	// GitHub 访问设置（issue #522）。token 不回显也不落日志，空串表示清除。
+	if req.GithubToken != nil {
+		v := strings.TrimSpace(*req.GithubToken)
+		h.store.SetGithubToken(v)
+		runtimeCfg.GithubToken = v
+		log.Printf("设置已更新: github_token configured=%t", v != "")
+	}
+	if req.GithubProxyURL != nil {
+		v := strings.TrimSpace(*req.GithubProxyURL)
+		h.store.SetGithubProxyURL(v)
+		runtimeCfg.GithubProxyURL = v
+		log.Printf("设置已更新: github_proxy_url = %s", v)
+	}
+
 	if req.OverflowAutoCompactEnabled != nil {
 		h.store.SetOverflowAutoCompactEnabled(*req.OverflowAutoCompactEnabled)
 		runtimeCfg.OverflowAutoCompact = *req.OverflowAutoCompactEnabled
@@ -9802,6 +9832,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSBusyAcquireMaxWaitSec:        h.store.CodexWSBusyAcquireMaxWaitSec(),
 		CodexWSBusyOverflowEnabled:          h.store.CodexWSBusyOverflowEnabled(),
 		CodexWSBusyPatienceSec:              h.store.CodexWSBusyPatienceSec(),
+		CodexWSStatelessSlots:               h.store.CodexWSStatelessSlots(),
+		GithubToken:                         h.store.GithubToken(),
+		GithubProxyURL:                      h.store.GithubProxyURL(),
 		OverflowAutoCompactEnabled:          h.store.OverflowAutoCompactEnabled(),
 		CompactViaResponsesEnabled:          h.store.CompactViaResponsesEnabled(),
 		CodexPreflightSSEPassthroughEnabled: h.store.CodexPreflightSSEPassthroughEnabled(),
@@ -10040,6 +10073,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSBusyAcquireMaxWaitSec:        h.store.CodexWSBusyAcquireMaxWaitSec(),
 		CodexWSBusyOverflowEnabled:          h.store.CodexWSBusyOverflowEnabled(),
 		CodexWSBusyPatienceSec:              h.store.CodexWSBusyPatienceSec(),
+		CodexWSStatelessSlots:               h.store.CodexWSStatelessSlots(),
+		GithubTokenConfigured:               h.store.GithubToken() != "",
+		GithubProxyURL:                      h.store.GithubProxyURL(),
 		OverflowAutoCompactEnabled:          h.store.OverflowAutoCompactEnabled(),
 		CompactViaResponsesEnabled:          h.store.CompactViaResponsesEnabled(),
 		CodexPreflightSSEPassthroughEnabled: h.store.CodexPreflightSSEPassthroughEnabled(),

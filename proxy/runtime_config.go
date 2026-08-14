@@ -51,6 +51,8 @@ const (
 	defaultCodexWSBusyMaxWaitSec  = 30
 	defaultCodexWSBusyPatienceSec = 2
 	maxCodexWSBusyWaitSec         = 300
+	defaultCodexWSStatelessSlots  = 8
+	maxCodexWSStatelessSlots      = 32
 
 	defaultCodexContinueMaxRounds = 8
 	minCodexContinueMaxRounds     = 1
@@ -77,6 +79,15 @@ type RuntimeSettings struct {
 	CodexWSBusyMaxWaitSec  int  // busy session/容量等待的累计上限秒数（默认 30，issue #413）
 	CodexWSBusyOverflow    bool // busy session 溢出到同账号兄弟连接（默认 false）
 	CodexWSBusyPatienceSec int  // 触发溢出前的短等待秒数（默认 2）
+	// CodexWSStatelessSlots 无状态请求每 (账号, cacheKey) 维度的持久连接槽位数
+	// （默认 8，范围 1-32，issue #522）。调大→单账号挂更多空闲连接；调小→握手更频繁，
+	// 高 RPM 下可能触发上游握手限流。实际生效值仍受账号动态并发上限钳制。
+	CodexWSStatelessSlots int
+	// GithubToken 用于 api.github.com 请求的 Personal Access Token（提升 API 限流配额；
+	// 只发给 api.github.com，绝不发给镜像或其他主机；空表示未配置，issue #522）。
+	GithubToken string
+	// GithubProxyURL GitHub 域名专用出站代理；空表示回落调用方的默认代理（issue #522）。
+	GithubProxyURL string
 	// OverflowAutoCompact 上下文超窗时自动摘要旧轮次并重试一次（实验性，默认 false，issue #415）。
 	// 全局开关与 per-key limits.auto_compact_overflow 为「或」关系。
 	OverflowAutoCompact bool
@@ -151,6 +162,7 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		CodexWSSizeRouter:                defaultCodexWSSizeRouter,
 		CodexWSBusyMaxWaitSec:            defaultCodexWSBusyMaxWaitSec,
 		CodexWSBusyPatienceSec:           defaultCodexWSBusyPatienceSec,
+		CodexWSStatelessSlots:            defaultCodexWSStatelessSlots,
 		CodexContinueMaxRounds:           defaultCodexContinueMaxRounds,
 		RequestIsolationMode:             defaultRequestIsolationMode(),
 		CodexCLIVersionSyncEnabled:       true,
@@ -270,6 +282,12 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	if settings.CodexWSBusyPatienceSec > maxCodexWSBusyWaitSec {
 		settings.CodexWSBusyPatienceSec = maxCodexWSBusyWaitSec
 	}
+	if settings.CodexWSStatelessSlots <= 0 {
+		settings.CodexWSStatelessSlots = defaultCodexWSStatelessSlots
+	}
+	if settings.CodexWSStatelessSlots > maxCodexWSStatelessSlots {
+		settings.CodexWSStatelessSlots = maxCodexWSStatelessSlots
+	}
 	if settings.CodexContinueMaxRounds < minCodexContinueMaxRounds {
 		settings.CodexContinueMaxRounds = defaults.CodexContinueMaxRounds
 	}
@@ -304,6 +322,9 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.CodexWSBusyMaxWaitSec = settings.CodexWSBusyAcquireMaxWaitSec
 		next.CodexWSBusyOverflow = settings.CodexWSBusyOverflowEnabled
 		next.CodexWSBusyPatienceSec = settings.CodexWSBusyPatienceSec
+		next.CodexWSStatelessSlots = settings.CodexWSStatelessSlots
+		next.GithubToken = strings.TrimSpace(settings.GithubToken)
+		next.GithubProxyURL = strings.TrimSpace(settings.GithubProxyURL)
 		next.OverflowAutoCompact = settings.OverflowAutoCompactEnabled
 		next.CompactViaResponses = settings.CompactViaResponsesEnabled
 		next.CodexPreflightSSEPassthrough = settings.CodexPreflightSSEPassthroughEnabled

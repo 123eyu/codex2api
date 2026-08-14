@@ -167,7 +167,7 @@ interface GrokRowHandlers {
   edit: (account: AccountRow) => void;
   editGroups: (account: AccountRow) => void;
   remove: (account: AccountRow) => void;
-  usageRefreshed: () => void;
+  usageRefreshed: (account: AccountRow) => void;
 }
 
 function resolveAccountGroups(
@@ -180,6 +180,10 @@ function resolveAccountGroups(
 }
 
 function accountUsageSortValue(account: AccountRow): number {
+  const monthly = account.grok_billing?.monthly_percent;
+  if (typeof monthly === "number") return monthly;
+  const weekly = account.grok_billing?.weekly_percent;
+  if (typeof weekly === "number") return weekly;
   if (typeof account.usage_percent_7d === "number") return account.usage_percent_7d;
   if (typeof account.usage_percent_5h === "number") return account.usage_percent_5h;
   return -1;
@@ -941,7 +945,9 @@ function GrokAccounts({
     edit: (account) => openEdit(account),
     editGroups: (account) => openQuickGroupEditor(account),
     remove: (account) => void handleDelete(account),
-    usageRefreshed: () => void reload(),
+    usageRefreshed: (account) => {
+      void refreshAccountRow(account.id);
+    },
   };
   const rowHandlers = useMemo<GrokRowHandlers>(
     () => ({
@@ -954,7 +960,7 @@ function GrokAccounts({
       edit: (account) => rowHandlersRef.current.edit(account),
       editGroups: (account) => rowHandlersRef.current.editGroups(account),
       remove: (account) => rowHandlersRef.current.remove(account),
-      usageRefreshed: () => rowHandlersRef.current.usageRefreshed(),
+      usageRefreshed: (account) => rowHandlersRef.current.usageRefreshed(account),
     }),
     [],
   );
@@ -3010,7 +3016,9 @@ function GrokAccounts({
             <GrokUsageCell
               account={detailAccount}
               detailed
-              onRefreshed={() => void reload()}
+              onRefreshed={() => {
+                void refreshAccountRow(detailAccount.id);
+              }}
             />
           ) : null
         }
@@ -3442,7 +3450,7 @@ const MemoGrokAccountTableRow = memo(function MemoGrokAccountTableRow({
       onEdit={() => handlers.edit(account)}
       onEditGroups={() => handlers.editGroups(account)}
       onDelete={() => handlers.remove(account)}
-      onUsageRefreshed={handlers.usageRefreshed}
+      onUsageRefreshed={() => handlers.usageRefreshed(account)}
     />
   );
 });
@@ -3488,7 +3496,7 @@ const MemoGrokAccountCard = memo(function MemoGrokAccountCard({
       onEdit={() => handlers.edit(account)}
       onEditGroups={() => handlers.editGroups(account)}
       onDelete={() => handlers.remove(account)}
-      onUsageRefreshed={handlers.usageRefreshed}
+      onUsageRefreshed={() => handlers.usageRefreshed(account)}
     />
   );
 });

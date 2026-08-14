@@ -960,7 +960,7 @@ func (h *Handler) runGrokCapabilityProbe(ctx context.Context, id int64, force bo
 			probeCtx, cancel := context.WithTimeout(ctx, grokCapabilityProbeTimeout)
 			started := time.Now()
 			resp, requestErr := proxy.ExecuteGrokNativeProtocolProbeAtOriginWithHeaders(probeCtx, account, protocol, target.model, proxy.MinimalGrokProbeBody(protocol, target.model), target.origin, h.store.ResolveProxyForAccount(account), target.extraHeaders)
-			observation := inspectGrokProbeResponse(probeCtx, protocol, resp, requestErr)
+			observation := inspectGrokProbeResponse(probeCtx, protocol, resp, requestErr, started)
 			cancel()
 			currentGeneration, _, generationErr := h.db.GetAccountCredentialState(ctx, id)
 			if generationErr != nil {
@@ -991,9 +991,10 @@ func (h *Handler) runGrokCapabilityProbe(ctx context.Context, id int64, force bo
 				AccountID: id, CredentialGeneration: generation, Channel: database.UpstreamChannelGrok, InternalReason: "grok_capability_probe",
 				Endpoint: grokProtocolPath(protocol), InboundEndpoint: grokProtocolPath(protocol), UpstreamEndpoint: grokProtocolPath(protocol),
 				Model: target.model, EffectiveModel: target.model, StatusCode: observation.httpStatus,
-				DurationMs: int(time.Since(started).Milliseconds()), InputTokens: observation.inputTokens,
-				OutputTokens: observation.outputTokens, PromptTokens: observation.inputTokens,
-				CompletionTokens: observation.outputTokens, TotalTokens: observation.inputTokens + observation.outputTokens,
+				DurationMs: int(time.Since(started).Milliseconds()), FirstTokenMs: observation.firstTokenMs,
+				InputTokens: observation.inputTokens, OutputTokens: observation.outputTokens,
+				PromptTokens: observation.inputTokens, CompletionTokens: observation.outputTokens,
+				TotalTokens:     observation.inputTokens + observation.outputTokens,
 				ReasoningTokens: observation.reasoningTokens, Stream: true,
 			})
 			response.Results = append(response.Results, grokCapabilityProbeResult{
@@ -1016,6 +1017,7 @@ type grokProbeObservation struct {
 	providerCode                               string
 	retryAfter                                 int64
 	inputTokens, outputTokens, reasoningTokens int
+	firstTokenMs                               int
 }
 
 func grokProtocolPath(protocol proxy.GrokProtocol) string {
@@ -1127,7 +1129,7 @@ func updateProbeUsage(observation *grokProbeObservation, protocol proxy.GrokProt
 	}
 }
 
-func inspectGrokProbeResponse(ctx context.Context, protocol proxy.GrokProtocol, resp *http.Response, requestErr error) grokProbeObservation {
+func inspectGrokProbeResponse(ctx context.Context, protocol proxy.GrokProtocol, resp *http.Response, requestErr error, startedAt time.Time) grokProbeObservation {
 	observation := grokProbeObservation{status: "unavailable"}
 	if requestErr != nil || resp == nil {
 		return observation
@@ -1165,11 +1167,17 @@ func inspectGrokProbeResponse(ctx context.Context, protocol proxy.GrokProtocol, 
 		if observation.status != "ok" {
 			observation.status = classifyProbeStatus(resp.StatusCode, observation.providerCode)
 		}
+		if observation.status == "ok" && observation.firstTokenMs == 0 && !startedAt.IsZero() {
+			observation.firstTokenMs = max(int(time.Since(startedAt).Milliseconds()), 1)
+		}
 		return observation
 	}
 	var responsesCompleted, chatFinished, messagesStopReason, messagesStopped, failed bool
 	_ = proxy.ReadSSEStream(resp.Body, func(data []byte) bool {
 		updateProbeUsage(&observation, protocol, data)
+		if observation.firstTokenMs == 0 && proxy.GrokStreamEventIsVisible(protocol, data) && !startedAt.IsZero() {
+			observation.firstTokenMs = max(int(time.Since(startedAt).Milliseconds()), 1)
+		}
 		eventType := gjson.GetBytes(data, "type").String()
 		switch protocol {
 		case proxy.GrokProtocolResponses:
@@ -1209,6 +1217,11 @@ func inspectGrokProbeResponse(ctx context.Context, protocol proxy.GrokProtocol, 
 		observation.status = "ok"
 	} else {
 		observation.status = classifyProbeStatus(resp.StatusCode, observation.providerCode)
+	}
+	// Grok often emits the only visible token on the terminal frame. Without a
+	// prior delta, first_token_ms would stay 0 and the usage table shows 首字-.
+	if observation.status == "ok" && observation.firstTokenMs == 0 && !startedAt.IsZero() {
+		observation.firstTokenMs = max(int(time.Since(startedAt).Milliseconds()), 1)
 	}
 	return observation
 }

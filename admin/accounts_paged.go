@@ -719,8 +719,15 @@ func accountListItemMatches(item *accountListSnapshotItem, query accountPageQuer
 			return false
 		}
 	}
-	if query.AuthKind != "" && query.AuthKind != "all" && item.GrokAuthKind != query.AuthKind {
-		return false
+	if query.AuthKind != "" && query.AuthKind != "all" {
+		if channel == database.UpstreamChannelGrok {
+			if item.GrokAuthKind != query.AuthKind {
+				return false
+			}
+		} else if item.OpenAIResponses != (query.AuthKind == auth.GrokAuthKindAPIKey) {
+			// Codex 渠道复用 auth_kind：api_key=Responses API 中转账号，oauth=官方账号（issue #522）
+			return false
+		}
 	}
 	if query.Tag != "" && !containsString(item.Tags, query.Tag) {
 		return false
@@ -787,7 +794,8 @@ func accountListStatusMatches(item *accountListSnapshotItem, status, channel str
 	}
 	switch status {
 	case "normal", "active":
-		return !banned && !errorState && !limited
+		// 与 Grok 分支同口径：禁用账号不算"正常"（issue #522），单独走 disabled 筛选。
+		return item.Enabled && !banned && !errorState && !limited
 	case "rate_limited":
 		return !banned && !errorState && limited
 	case "abnormal":
@@ -941,7 +949,7 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 				summary.RateLimited5h++
 			}
 		}
-		if !banned && !errorState && !limited {
+		if item.Enabled && !banned && !errorState && !limited {
 			summary.Normal++
 		}
 		if item.Enabled && !banned && !errorState && !limited {
@@ -969,6 +977,13 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 		}
 		if item.GrokAuthKind == auth.GrokAuthKindAPIKey {
 			summary.APIKey++
+		}
+		if channel == database.UpstreamChannelCodex {
+			if item.OpenAIResponses {
+				summary.APIKey++
+			} else {
+				summary.OAuth++
+			}
 		}
 		if channel == database.UpstreamChannelCodex && accountListSubscriptionPlan(item.PlanType) && !item.Locked {
 			summary.SubscriptionUnlocked++

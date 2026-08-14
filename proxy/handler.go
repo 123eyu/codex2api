@@ -833,10 +833,12 @@ func forwardGrokNativeResponse(c *gin.Context, resp *http.Response, protocol Gro
 			}
 		}
 		isVisible := frame.HasData && !frame.Done && grokNativeVisibleEvent(protocol, frame.Data)
-		// Preserve the pre-output retry window. Lifecycle/role-only frames are
-		// buffered until the first visible delta; a failure before then produces
-		// no downstream bytes and the handler may safely select another account.
-		if !visible && !isTerminal && !isVisible {
+		// Hold only the frames that must stay invisible for a silent retry.
+		// Responses used to buffer every non-text frame until the first
+		// output_text.delta (issue #207's anti-pattern); reasoning models then
+		// looked synchronous because thinking/structure never reached the client
+		// (issue #521). Chat/Messages still hold role-only / start frames.
+		if holdGrokNativePreOutput(protocol, frame, visible, isTerminal, isVisible) {
 			if pending.Len()+len(frame.Raw) > grokMaxNativeSSEPendingBytes {
 				frameErr = fmt.Errorf("Grok pre-output SSE exceeds %d bytes", grokMaxNativeSSEPendingBytes)
 				return false
@@ -887,6 +889,26 @@ func forwardGrokNativeResponse(c *gin.Context, resp *http.Response, protocol Gro
 		flusher.Flush()
 	}
 	return usage, outcome, wrote, firstTokenMs
+}
+
+func holdGrokNativePreOutput(protocol GrokProtocol, frame rawGrokSSEFrame, alreadyVisible, isTerminal, isVisible bool) bool {
+	if alreadyVisible || isTerminal || isVisible {
+		return false
+	}
+	if auth.NormalizeGrokProtocol(string(protocol)) == GrokProtocolResponses {
+		if !frame.HasData || frame.Done {
+			return false
+		}
+		return isPreContentLifecycleEvent(gjson.GetBytes(frame.Data, "type").String())
+	}
+	return true
+}
+
+// GrokStreamEventIsVisible reports whether a native Grok SSE payload carries
+// model output the client can see. Capability probes reuse this so usage_logs
+// first_token_ms is not left at 0 for otherwise successful streams.
+func GrokStreamEventIsVisible(protocol GrokProtocol, payload []byte) bool {
+	return grokNativeVisibleEvent(protocol, payload)
 }
 
 func grokNativeVisibleEvent(protocol GrokProtocol, payload []byte) bool {

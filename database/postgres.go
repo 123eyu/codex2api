@@ -1312,6 +1312,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_busy_acquire_max_wait_sec INT DEFAULT 30;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_busy_overflow_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_busy_patience_sec INT DEFAULT 2;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_stateless_slots INT DEFAULT 8;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS github_token TEXT DEFAULT '';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS github_proxy_url TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS overflow_auto_compact_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS compact_via_responses_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_preflight_sse_passthrough_enabled BOOLEAN DEFAULT FALSE;
@@ -2124,6 +2127,13 @@ type SystemSettings struct {
 	CodexWSBusyAcquireMaxWaitSec        int  // busy session/容量等待的累计上限（秒），默认 30（issue #413）
 	CodexWSBusyOverflowEnabled          bool // busy session 溢出到同账号兄弟连接，默认 false（issue #413）
 	CodexWSBusyPatienceSec              int  // 触发溢出前的短等待（秒），默认 2（issue #413）
+	CodexWSStatelessSlots               int  // 无状态请求每 (账号, cacheKey) 的持久连接槽位数，默认 8，范围 1-32（issue #522）
+	// GithubToken 用于 api.github.com 请求的 Personal Access Token（提升限流配额，
+	// 只发给 api.github.com，绝不发给镜像/其他主机；空表示未配置，issue #522）。
+	GithubToken string
+	// GithubProxyURL GitHub 域名（github.com / api.github.com / *.githubusercontent.com）
+	// 专用出站代理；空表示回落全局代理/环境代理（issue #522）。
+	GithubProxyURL string
 	OverflowAutoCompactEnabled          bool // 上下文超窗时自动摘要旧轮次并重试一次（实验性，默认 false，issue #415）
 	CompactViaResponsesEnabled          bool // /v1/responses/compact 改写为 /responses body-signal 压缩（上游已下线专用端点，默认 false）
 	CodexPreflightSSEPassthroughEnabled bool // 前置元数据 SSE 事件立即透传下游（旧版兼容，默认 false，issue #425）
@@ -2343,7 +2353,10 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			       COALESCE(utls_shutdown_timeout_minutes, 30),
 			       COALESCE(codex_ws_weak_network_mode, false),
 			       COALESCE(NULLIF(TRIM(codex_fingerprint_default_mode), ''), 'off'),
-			       COALESCE(compact_via_responses_enabled, false)
+			       COALESCE(compact_via_responses_enabled, false),
+		       COALESCE(codex_ws_stateless_slots, 8),
+		       COALESCE(github_token, ''),
+		       COALESCE(github_proxy_url, '')
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -2411,6 +2424,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.CodexWSWeakNetworkMode,
 		&s.CodexFingerprintDefaultMode,
 		&s.CompactViaResponsesEnabled,
+		&s.CodexWSStatelessSlots,
+		&s.GithubToken,
+		&s.GithubProxyURL,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -2544,9 +2560,12 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					utls_shutdown_timeout_minutes,
 					codex_ws_weak_network_mode,
 					codex_fingerprint_default_mode,
-					compact_via_responses_enabled
+					compact_via_responses_enabled,
+					codex_ws_stateless_slots,
+					github_token,
+					github_proxy_url
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -2586,10 +2605,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				prompt_filter_log_matches = EXCLUDED.prompt_filter_log_matches,
 				prompt_filter_max_text_length = EXCLUDED.prompt_filter_max_text_length,
 				prompt_filter_sensitive_words = EXCLUDED.prompt_filter_sensitive_words,
-				prompt_filter_custom_patterns = CASE WHEN $108 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
+				prompt_filter_custom_patterns = CASE WHEN $111 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
 				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns,
 				prompt_filter_review_enabled = EXCLUDED.prompt_filter_review_enabled,
-				prompt_filter_review_api_key = CASE WHEN $109 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
+				prompt_filter_review_api_key = CASE WHEN $112 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
 				prompt_filter_review_base_url = EXCLUDED.prompt_filter_review_base_url,
 				prompt_filter_review_model = EXCLUDED.prompt_filter_review_model,
 				prompt_filter_review_timeout_seconds = EXCLUDED.prompt_filter_review_timeout_seconds,
@@ -2651,7 +2670,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					utls_shutdown_timeout_minutes = EXCLUDED.utls_shutdown_timeout_minutes,
 					codex_ws_weak_network_mode = EXCLUDED.codex_ws_weak_network_mode,
 					codex_fingerprint_default_mode = EXCLUDED.codex_fingerprint_default_mode,
-					compact_via_responses_enabled = EXCLUDED.compact_via_responses_enabled
+					compact_via_responses_enabled = EXCLUDED.compact_via_responses_enabled,
+					codex_ws_stateless_slots = EXCLUDED.codex_ws_stateless_slots,
+					github_token = EXCLUDED.github_token,
+					github_proxy_url = EXCLUDED.github_proxy_url
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -2689,6 +2711,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.CodexWSWeakNetworkMode,
 		NormalizeCodexFingerprintDefaultMode(s.CodexFingerprintDefaultMode),
 		s.CompactViaResponsesEnabled,
+		NormalizeCodexWSStatelessSlots(s.CodexWSStatelessSlots),
+		strings.TrimSpace(s.GithubToken),
+		strings.TrimSpace(s.GithubProxyURL),
 		s.PreservePromptFilterCustomPatterns,
 		s.PreservePromptFilterReviewAPIKey)
 	return err
@@ -2790,6 +2815,17 @@ func NormalizeCodexWSBusyPatienceSec(seconds int) int {
 		return 300
 	}
 	return seconds
+}
+
+// NormalizeCodexWSStatelessSlots 把无状态 WS 连接槽位数限制在 1-32，非正值回落默认 8（issue #522）。
+func NormalizeCodexWSStatelessSlots(slots int) int {
+	if slots <= 0 {
+		return 8
+	}
+	if slots > 32 {
+		return 32
+	}
+	return slots
 }
 
 // normalizeCodexWSSilentMaxRetries 把 WS 静默重试次数限制在 0-10。

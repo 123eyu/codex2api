@@ -2987,6 +2987,7 @@ type Store struct {
 	codexWSBusyMaxWaitSec       atomic.Int64 // busy session 等待上限（秒），默认 30（issue #413）
 	codexWSBusyOverflowEnabled  atomic.Bool  // busy session 溢出到同账号兄弟连接，默认关闭
 	codexWSBusyPatienceSec      atomic.Int64 // 触发溢出前的短等待（秒），默认 2
+	codexWSStatelessSlots       atomic.Int64 // 无状态请求每 (账号, cacheKey) 的连接槽位数，默认 8（issue #522）
 	overflowAutoCompactEnabled  atomic.Bool  // 上下文超窗自动摘要重试（实验性，默认关闭，issue #415）
 	compactViaResponsesEnabled  atomic.Bool  // /v1/responses/compact 改写为 /responses body-signal 压缩，默认关闭
 	firstTokenExcludesWsAcquire atomic.Bool  // 落库 first_token_ms 扣除 WS 取连耗时，默认关闭
@@ -3004,6 +3005,8 @@ type Store struct {
 	// 重试间隔与传输错误重试策略（issue #331）
 	retryIntervalMS      atomic.Int64 // 重试间隔毫秒，0 = 立即重试（旧行为）
 	transportRetryPolicy atomic.Value // 传输错误重试策略: rotate / sticky
+	githubToken          atomic.Value // GitHub API token，仅发给 api.github.com（issue #522）
+	githubProxyURL       atomic.Value // GitHub 域名专用出站代理，空回落全局/环境代理（issue #522）
 
 	// 新导入/新建 Codex 账号默认盖上的指纹收敛档位: off / device / session / full
 	codexFingerprintDefaultMode atomic.Value
@@ -3434,6 +3437,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 			CodexWSSizeRouterEnabled:           true,
 			CodexWSBusyAcquireMaxWaitSec:       30,
 			CodexWSBusyPatienceSec:             2,
+			CodexWSStatelessSlots:              8,
 			CodexContinueMaxRounds:             8,
 			AutoPause5hGuardBandPercent:        defaultAutoPause5hGuardBandPercent,
 			AutoPause5hGuardConcurrency:        defaultAutoPause5hGuardConcurrency,
@@ -3533,6 +3537,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.codexWSBusyMaxWaitSec.Store(int64(database.NormalizeCodexWSBusyAcquireMaxWaitSec(settings.CodexWSBusyAcquireMaxWaitSec)))
 	s.codexWSBusyOverflowEnabled.Store(settings.CodexWSBusyOverflowEnabled)
 	s.codexWSBusyPatienceSec.Store(int64(database.NormalizeCodexWSBusyPatienceSec(settings.CodexWSBusyPatienceSec)))
+	s.codexWSStatelessSlots.Store(int64(database.NormalizeCodexWSStatelessSlots(settings.CodexWSStatelessSlots)))
 	s.overflowAutoCompactEnabled.Store(settings.OverflowAutoCompactEnabled)
 	s.compactViaResponsesEnabled.Store(settings.CompactViaResponsesEnabled)
 	s.codexPreflightSSEPassthroughEnabled.Store(settings.CodexPreflightSSEPassthroughEnabled)
@@ -3545,6 +3550,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.retryIntervalMS.Store(int64(normalizeRetryIntervalMS(settings.RetryIntervalMS)))
 	s.transportRetryPolicy.Store(database.NormalizeTransportRetryPolicy(settings.TransportRetryPolicy))
 	s.codexFingerprintDefaultMode.Store(NormalizeCodexFingerprintMode(settings.CodexFingerprintDefaultMode))
+	s.githubToken.Store(strings.TrimSpace(settings.GithubToken))
+	s.githubProxyURL.Store(strings.TrimSpace(settings.GithubProxyURL))
 	s.SetModelCooldownSettings(database.ModelCooldownSettings{
 		RelayMode:           settings.RelayModelCooldownMode,
 		RelaySeconds:        settings.RelayModelCooldownSeconds,
@@ -3902,6 +3909,60 @@ func (s *Store) CodexWSBusyPatienceSec() int {
 		return 2
 	}
 	return int(s.codexWSBusyPatienceSec.Load())
+}
+
+// SetGithubToken 设置 GitHub API token（仅发给 api.github.com）。
+func (s *Store) SetGithubToken(token string) {
+	if s == nil {
+		return
+	}
+	s.githubToken.Store(strings.TrimSpace(token))
+}
+
+// GithubToken 返回配置的 GitHub API token，空表示未配置。
+func (s *Store) GithubToken() string {
+	if s == nil {
+		return ""
+	}
+	if v, ok := s.githubToken.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// SetGithubProxyURL 设置 GitHub 域名专用出站代理。
+func (s *Store) SetGithubProxyURL(proxyURL string) {
+	if s == nil {
+		return
+	}
+	s.githubProxyURL.Store(strings.TrimSpace(proxyURL))
+}
+
+// GithubProxyURL 返回 GitHub 域名专用出站代理，空表示回落全局/环境代理。
+func (s *Store) GithubProxyURL() string {
+	if s == nil {
+		return ""
+	}
+	if v, ok := s.githubProxyURL.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// SetCodexWSStatelessSlots 设置无状态请求每 (账号, cacheKey) 的连接槽位数。
+func (s *Store) SetCodexWSStatelessSlots(slots int) {
+	if s == nil {
+		return
+	}
+	s.codexWSStatelessSlots.Store(int64(database.NormalizeCodexWSStatelessSlots(slots)))
+}
+
+// CodexWSStatelessSlots 返回无状态请求每 (账号, cacheKey) 的连接槽位数。
+func (s *Store) CodexWSStatelessSlots() int {
+	if s == nil {
+		return 8
+	}
+	return int(s.codexWSStatelessSlots.Load())
 }
 
 // SetCodexContinueThinkingEnabled 设置是否在上游截断思考时自动续想。
