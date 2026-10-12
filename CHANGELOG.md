@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.1.0 - 2026-10-13
+
+### Fixes
+
+- **Antigravity Claude models can call tools again (#783, reported by @ATM-M).** Every Claude request that carried tools failed with 400 `tools.0.custom.input_schema.type: Input should be 'object'`. This happened on `/v1/chat/completions`, `/v1/messages`, `/v1/responses` and native `/v1beta`; text-only requests and Gemini worked. Tool schemas travel as `parametersJsonSchema`, which Cloud Code hands to Claude verbatim as Anthropic `input_schema`, and since v2.9.4 the schema cleaner had uppercased every type (`OBJECT`, `STRING`). Types are now lowercase at every level, and Gemini accepts both casings. Claude also refuses a forced tool choice (Anthropic `tool`/`any`, Chat `required` or a named function). The Claude 5.5 family always refuses it, and Claude 4.x refuses it while thinking is enabled. In those cases the gateway sends `AUTO` instead and drops the allowed function names. Claude 4.x without thinking keeps the forced choice, and Gemini is unchanged.
+
+- **`/v1/messages` keeps Claude model IDs that Antigravity serves instead of mapping them to Codex.** The built-in Anthropic-to-Codex default map (for example `claude-sonnet-4-6` → `gpt-5.5`) ran before the gateway checked whether an account could serve the requested ID under its own name. An Antigravity-only key got 503 "No available accounts", and a key that could also reach Codex silently got a GPT answer. The default map is now skipped when an account visible to the key publishes the ID directly, such as an Antigravity public model or a model declared by a relay account. Only structural conditions count: the key's visibility (the same as for `/v1/models`), its upstream channel and its affinity groups. Cooldowns and rate limits don't, so a busy pool never swaps in another vendor's model. Explicit model mappings still take precedence, and keys without such accounts keep the Codex fallback.
+
+- **Structured output on Antigravity Claude returns the JSON instead of a 500.** When a Claude model gets a `json_schema` response format, Cloud Code forces an internal `json_mode` tool. The non-streaming answer comes back as a `json_mode` function call with finish reason `OTHER`, which the gateway reported as `antigravity response terminated with OTHER`. That call is now turned into the JSON text answer, with key order preserved, preamble text dropped and thoughts kept. This applies to the Responses, Chat Completions and native `/v1beta` paths, streaming and non-streaming. `OTHER` becomes a normal stop once the answer has made a tool call, and requests that declare their own `json_mode` tool are left alone. Claude 5.5 rejects the forced tool upstream, so those requests now fail with a 400 `antigravity_feature_unsupported` error naming `json_schema` structured output, instead of an opaque `tool_choice` error.
+
 ## v3.0.9 - 2026-10-12
 
 ### Features
