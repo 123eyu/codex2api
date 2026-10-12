@@ -27,6 +27,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const antigravityInteractionsAgent = "antigravity-preview-05-2026"
@@ -226,6 +227,7 @@ func executeAntigravityOAuthRequest(ctx context.Context, account *auth.Account, 
 	useUserProject := antigravityUserProjectHeaderEnabled()
 	sameEndpointBudget := &antigravitySameEndpointRetryBudget{}
 	payload = sanitizeAntigravityEnvelopeToolSchemas(payload)
+	payload = relaxAntigravityClaudeForcedToolChoice(payload)
 	publicModel := strings.TrimSpace(wireModel)
 	for headerAttempt := 0; headerAttempt < 2; headerAttempt++ {
 		retryWithoutUserProject := false
@@ -1107,6 +1109,60 @@ func antigravityGeminiToolMode(choice any) string {
 	}
 }
 
+// antigravityClaude4ModelPattern matches the Claude 4.x backing IDs
+// (claude-sonnet-4-6, claude-opus-4-6-thinking, ...).
+var antigravityClaude4ModelPattern = regexp.MustCompile(`^claude-[a-z]+-4(?:[-.]|$)`)
+
+// antigravityClaudeRejectsForcedToolChoice reports whether a Claude backing
+// model refuses a forced tool choice (functionCallingConfig mode ANY, which the
+// backend forwards as Anthropic tool_choice any/tool). Anthropic refuses forced
+// tool use while thinking is on ("Thinking may not be enabled when tool_choice
+// forces tool use"), and the Claude 5.5 family refuses it outright, even with a
+// zero thinking budget ("tool_choice: type tool and any are not supported for
+// this model"). Only Claude 4.x without thinking is known to honor it, so
+// unknown future versions are treated as refusing.
+func antigravityClaudeRejectsForcedToolChoice(wireModel string, thinkingConfig gjson.Result) bool {
+	name := strings.ToLower(strings.TrimSpace(wireModel))
+	if !strings.Contains(name, "claude") {
+		return false
+	}
+	if !antigravityClaude4ModelPattern.MatchString(name) {
+		return true
+	}
+	if !thinkingConfig.IsObject() {
+		return false
+	}
+	if budget := thinkingConfig.Get("thinkingBudget"); budget.Exists() {
+		return budget.Int() != 0
+	}
+	return strings.TrimSpace(thinkingConfig.Get("thinkingLevel").String()) != ""
+}
+
+// relaxAntigravityClaudeForcedToolChoice downgrades a forced function-calling
+// mode to AUTO for Claude models that refuse forced tool use. Without it a
+// client that pins tool_choice (issue #783) gets an upstream 400 for the whole
+// turn; with AUTO the model still sees the tools and normally calls the one
+// the prompt asks for. allowedFunctionNames is only valid with ANY/VALIDATED,
+// so it is dropped together with the mode. Gemini models are left untouched.
+func relaxAntigravityClaudeForcedToolChoice(payload []byte) []byte {
+	const modePath = "request.toolConfig.functionCallingConfig.mode"
+	if !strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, modePath).String()), "ANY") {
+		return payload
+	}
+	thinkingConfig := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig")
+	if !antigravityClaudeRejectsForcedToolChoice(gjson.GetBytes(payload, "model").String(), thinkingConfig) {
+		return payload
+	}
+	out, err := sjson.SetBytes(payload, modePath, "AUTO")
+	if err != nil {
+		return payload
+	}
+	if trimmed, err := sjson.DeleteBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames"); err == nil {
+		out = trimmed
+	}
+	return out
+}
+
 func antigravityGeminiFunctionDeclarations(tools []any) []any {
 	declarations := make([]any, 0, len(tools))
 	for _, rawTool := range tools {
@@ -1183,10 +1239,10 @@ func antigravityGeminiCustomToolDeclaration(tool map[string]any) map[string]any 
 		declaration["description"] = description
 	}
 	declaration["parametersJsonSchema"] = antigravityGeminiParameters(map[string]any{
-		"type": "OBJECT",
+		"type": "object",
 		"properties": map[string]any{
 			"input": map[string]any{
-				"type":        "STRING",
+				"type":        "string",
 				"description": "The complete raw payload for " + name + ", exactly as its own format expects.",
 			},
 		},
@@ -1275,7 +1331,7 @@ func antigravityCustomToolCallInput(arguments string) string {
 func antigravityGeminiParameters(raw any) map[string]any {
 	root, ok := raw.(map[string]any)
 	if !ok {
-		return antigravityFinalizeToolSchema(map[string]any{"type": "OBJECT", "properties": map[string]any{}})
+		return antigravityFinalizeToolSchema(map[string]any{"type": "object", "properties": map[string]any{}})
 	}
 	root = antigravityNormalizeMalformedToolSchema(root)
 	root = antigravityInlineLocalSchemaRefs(root)
@@ -1295,7 +1351,7 @@ func antigravityGeminiParameters(raw any) map[string]any {
 		cleaned = map[string]any{}
 	}
 	if _, ok := cleaned["type"]; !ok {
-		cleaned["type"] = "OBJECT"
+		cleaned["type"] = "object"
 	}
 	if _, ok := cleaned["properties"]; !ok {
 		cleaned["properties"] = map[string]any{}
@@ -1452,12 +1508,17 @@ func antigravityCleanGeminiSchema(value any, definitions map[string]any, resolvi
 	}
 }
 
+// antigravityGeminiSchemaType normalizes a schema type to its lowercase JSON
+// Schema spelling. Tool schemas travel as parametersJsonSchema, which the
+// backend hands to Claude models verbatim as input_schema; Anthropic accepts
+// only lowercase types at every level ("OBJECT" fails with "Input should be
+// 'object'", issue #783). Gemini and responseSchema accept either casing.
 func antigravityGeminiSchemaType(value any) (string, bool) {
 	if single, ok := value.(string); ok {
 		if strings.EqualFold(strings.TrimSpace(single), "null") {
 			return "", true
 		}
-		return strings.ToUpper(strings.TrimSpace(single)), false
+		return strings.ToLower(strings.TrimSpace(single)), false
 	}
 	values, _ := value.([]any)
 	nullable := false
@@ -1472,7 +1533,7 @@ func antigravityGeminiSchemaType(value any) (string, bool) {
 			continue
 		}
 		if schemaType == "" {
-			schemaType = strings.ToUpper(strings.TrimSpace(single))
+			schemaType = strings.ToLower(strings.TrimSpace(single))
 		}
 	}
 	return schemaType, nullable
