@@ -22,6 +22,7 @@ import {
   FieldHint,
   FieldLabel,
   FormSection,
+  SecretInput,
   TEXTAREA_CLASS,
 } from "./AntigravityFormFields";
 import { AccountAvatar, AntigravityAuthKindChip } from "./AntigravityStatePanel";
@@ -262,11 +263,9 @@ export default function AntigravityEditModal({
             ) : (
               <label className="block space-y-1.5">
                 <FieldLabel>{t("antigravity.replacementApiKey")}</FieldLabel>
-                <Input
-                  type="password"
-                  autoComplete="new-password"
+                <SecretInput
                   value={editDraft.apiKey}
-                  onChange={(event) => setEditDraft((current) => ({ ...current, apiKey: event.target.value }))}
+                  onChange={(apiKey) => setEditDraft((current) => ({ ...current, apiKey }))}
                   placeholder={t("antigravity.replacementApiKeyPlaceholder")}
                 />
                 <FieldHint>{t("antigravity.replacementApiKeyHint")}</FieldHint>
@@ -287,6 +286,7 @@ export default function AntigravityEditModal({
 
           <FormSection title={t("antigravity.editSectionNetwork")}>
             <AccountMetadataFields
+              stacked
               proxyUrl={editDraft.proxyUrl}
               proxies={proxies}
               onProxyUrlChange={(proxyUrl) => setEditDraft((current) => ({ ...current, proxyUrl }))}

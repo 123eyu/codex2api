@@ -278,8 +278,17 @@ export function AntigravityQuotaOverview({ account }: { account: AccountRow }) {
 
 const MODEL_PREVIEW_LIMIT = 8;
 
-/** 详情抽屉里的逐模型额度明细;模型多时默认只展开前几项。 */
-export function AntigravityModelQuotaList({ account }: { account: AccountRow }) {
+/**
+ * 逐模型额度明细。compact 用于详情抽屉(模型多时默认只展开前几项);
+ * wide 用于"额度与权限"窗口:每行右侧是重置时间 + 百分比 + 进度条,全部展开。
+ */
+export function AntigravityModelQuotaList({
+  account,
+  variant = "compact",
+}: {
+  account: AccountRow;
+  variant?: "compact" | "wide";
+}) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const models = sortedModelQuotaEntries(account.antigravity_quota);
@@ -290,39 +299,79 @@ export function AntigravityModelQuotaList({ account }: { account: AccountRow }) 
       </div>
     );
   }
-  const visible = expanded ? models : models.slice(0, MODEL_PREVIEW_LIMIT);
+  const wide = variant === "wide";
+  const visible = wide || expanded ? models : models.slice(0, MODEL_PREVIEW_LIMIT);
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card">
       <div className="divide-y divide-border/70">
         {visible.map(([model, info]) => {
           const fraction = quotaRemaining(info);
           const resetAt = quotaResetTime(info);
+          const capabilities = (
+            <div className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] text-muted-foreground">
+              {info.supports_images ? <span>{t("antigravity.images")}</span> : null}
+              {info.supports_thinking ? <span>{t("antigravity.thinking")}</span> : null}
+              {info.max_output_tokens ? (
+                <span>{t("antigravity.maxOutput", { count: info.max_output_tokens })}</span>
+              ) : null}
+              {!wide && resetAt ? (
+                <span title={formatBeijingTime(resetAt)}>
+                  {t("antigravity.resetAt", { time: formatBeijingTime(resetAt).slice(5, 16) })}
+                </span>
+              ) : null}
+            </div>
+          );
+          const title = (
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span
+                className={cn("truncate font-medium text-foreground", wide ? "text-[13px]" : "text-[12px]")}
+                title={model}
+              >
+                {quotaDisplayName(model, info)}
+              </span>
+              {wide && quotaDisplayName(model, info) !== model ? (
+                <span className="hidden truncate font-mono text-[10px] text-muted-foreground sm:inline">{model}</span>
+              ) : null}
+              {info.recommended ? (
+                <Badge variant="secondary" className="h-4 px-1 text-[9px]">
+                  {t("antigravity.recommended")}
+                </Badge>
+              ) : null}
+            </div>
+          );
+          if (wide) {
+            return (
+              <div
+                key={model}
+                className="grid gap-2 px-3.5 py-2.5 sm:grid-cols-[minmax(0,1fr)_220px] sm:items-center"
+              >
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <ModelLogo model={model} size={18} variant="plain" />
+                  <div className="min-w-0 flex-1">
+                    {title}
+                    {capabilities}
+                  </div>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="truncate text-muted-foreground" title={resetAt ? formatBeijingTime(resetAt) : undefined}>
+                      {resetAt ? t("antigravity.resetAt", { time: formatBeijingTime(resetAt) }) : "-"}
+                    </span>
+                    <span className={cn("shrink-0 font-mono font-semibold tabular-nums", quotaTextTone(fraction))}>
+                      {formatPercent(fraction)}
+                    </span>
+                  </div>
+                  <QuotaBar fraction={fraction} className="mt-1.5" />
+                </div>
+              </div>
+            );
+          }
           return (
             <div key={model} className="flex items-center gap-2.5 px-3 py-2">
               <ModelLogo model={model} size={16} variant="plain" />
               <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <span className="truncate text-[12px] font-medium text-foreground" title={model}>
-                    {quotaDisplayName(model, info)}
-                  </span>
-                  {info.recommended ? (
-                    <Badge variant="secondary" className="h-4 px-1 text-[9px]">
-                      {t("antigravity.recommended")}
-                    </Badge>
-                  ) : null}
-                </div>
-                <div className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] text-muted-foreground">
-                  {info.supports_images ? <span>{t("antigravity.images")}</span> : null}
-                  {info.supports_thinking ? <span>{t("antigravity.thinking")}</span> : null}
-                  {info.max_output_tokens ? (
-                    <span>{t("antigravity.maxOutput", { count: info.max_output_tokens })}</span>
-                  ) : null}
-                  {resetAt ? (
-                    <span title={formatBeijingTime(resetAt)}>
-                      {t("antigravity.resetAt", { time: formatBeijingTime(resetAt).slice(5, 16) })}
-                    </span>
-                  ) : null}
-                </div>
+                {title}
+                {capabilities}
               </div>
               <QuotaBar fraction={fraction} className="w-16 shrink-0" />
               <span className={cn("w-9 shrink-0 text-right text-[11px] font-semibold tabular-nums", quotaTextTone(fraction))}>
@@ -332,7 +381,7 @@ export function AntigravityModelQuotaList({ account }: { account: AccountRow }) 
           );
         })}
       </div>
-      {models.length > MODEL_PREVIEW_LIMIT ? (
+      {!wide && models.length > MODEL_PREVIEW_LIMIT ? (
         <button
           type="button"
           onClick={() => setExpanded((current) => !current)}

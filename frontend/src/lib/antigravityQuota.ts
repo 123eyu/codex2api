@@ -1,5 +1,6 @@
 import type {
   AccountRow,
+  AntigravityImportResponse,
   AntigravityModelQuota,
   AntigravityPermissionsSnapshot,
   AntigravityQuotaGroup,
@@ -229,6 +230,40 @@ export function tierLabel(value: unknown): string {
   }
 }
 
+export interface AntigravityTierEntry {
+  key: string;
+  name: string;
+  /** 上游 tier id(free-tier / standard-tier …);与 name 不同时用来区分同名套餐。 */
+  id: string;
+  isDefault: boolean;
+}
+
+/**
+ * 套餐列表:上游常给出同名不同 id 的套餐(两个都叫 "Antigravity"),只显示名字会像重复项。
+ * 这里保留 id 与默认标记,并去掉 id+名字完全相同的重复条目。
+ */
+export function tierEntries(value: unknown): AntigravityTierEntry[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const entries: AntigravityTierEntry[] = [];
+  value.forEach((item, index) => {
+    const record = toRecord(item);
+    const name = tierLabel(item);
+    if (!name) return;
+    const id = firstString(record, ["id", "tier", "key"]);
+    const dedupeKey = `${id}\u0000${name}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    entries.push({
+      key: `${dedupeKey}-${index}`,
+      name,
+      id: id && id !== name ? id : "",
+      isDefault: record.is_default === true || record.isDefault === true,
+    });
+  });
+  return entries;
+}
+
 export function quotaTone(fraction: number | null): string {
   if (fraction == null) return "bg-muted-foreground/40";
   if (fraction <= 0.1) return "bg-red-500";
@@ -293,6 +328,96 @@ export function parseRefreshTokenLines(value: string): string[] {
         .filter((line) => line && !line.startsWith("#")),
     ),
   );
+}
+
+export type CredentialInputKind = "empty" | "json" | "json_invalid" | "refresh_token" | "unknown";
+
+/**
+ * 单个凭据输入框的实时识别:JSON(含格式错误)、Google refresh token(1// 开头)或其他。
+ * 只做提示,不拦截提交——后端解析器认得的形态比这里多。
+ */
+export function detectCredentialInput(value: string): CredentialInputKind {
+  const text = value.trim();
+  if (!text) return "empty";
+  if (text.startsWith("{") || text.startsWith("[")) {
+    try {
+      JSON.parse(text);
+      return "json";
+    } catch {
+      return "json_invalid";
+    }
+  }
+  if (/^1\/\/[\w.-]+$/.test(text)) return "refresh_token";
+  return "unknown";
+}
+
+/** 后端单次导入上限(admin antigravityImportMaxAccounts)。 */
+export const ANTIGRAVITY_IMPORT_BATCH_MAX = 500;
+/** 后端单份内容上限是 4 MiB;超过这个体积的文件拆成逐账号条目再发。 */
+export const ANTIGRAVITY_IMPORT_CONTENT_SPLIT_BYTES = 3 * 1024 * 1024;
+
+function expandImportContent(content: string): string[] {
+  const text = content.trim();
+  if (!text.startsWith("[") && !text.startsWith("{")) return [content];
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const list = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(toRecord(parsed).accounts)
+        ? (toRecord(parsed).accounts as unknown[])
+        : null;
+    if (!list) return [content];
+    return list.map((item) => JSON.stringify(item));
+  } catch {
+    // 解析失败的内容原样交给后端,由后端给出逐文件的错误。
+    return [content];
+  }
+}
+
+/**
+ * 把待导入内容切成若干批:总条目不超过单次上限且没有超大文件时原样一批发送(保留文件序号);
+ * 否则把 JSON 数组 / {"accounts": [...]} 展开成逐账号条目,按上限分批。
+ * 导出的多账号 JSON 数组超过 500 个账号时仍能一次选文件导入。
+ */
+export function planAntigravityImportBatches(
+  contents: string[],
+  maxPerBatch = ANTIGRAVITY_IMPORT_BATCH_MAX,
+): string[][] {
+  const units = contents.flatMap(expandImportContent);
+  const oversized = contents.some((content) => content.length > ANTIGRAVITY_IMPORT_CONTENT_SPLIT_BYTES);
+  if (units.length <= maxPerBatch && !oversized) return contents.length > 0 ? [contents] : [];
+  const batches: string[][] = [];
+  for (let start = 0; start < units.length; start += maxPerBatch) {
+    batches.push(units.slice(start, start + maxPerBatch));
+  }
+  return batches;
+}
+
+/** 合并分批导入的结果;条目序号按批次偏移成全局位置,便于定位失败项。 */
+export function mergeAntigravityImportResponses(
+  responses: Array<{ response: AntigravityImportResponse; offset: number }>,
+): AntigravityImportResponse {
+  const merged: AntigravityImportResponse = { total: 0, imported: 0, synced: 0, degraded: 0, failed: 0, items: [] };
+  const warnings = new Set<string>();
+  const proxyWarnings = new Set<string>();
+  for (const { response, offset } of responses) {
+    merged.total += response.total ?? 0;
+    merged.imported += response.imported ?? 0;
+    merged.synced = (merged.synced ?? 0) + (response.synced ?? 0);
+    merged.degraded = (merged.degraded ?? 0) + (response.degraded ?? 0);
+    merged.failed += response.failed ?? 0;
+    merged.items.push(...(response.items ?? []).map((item) => ({ ...item, index: item.index + offset })));
+    if (response.group_ids) merged.group_ids = response.group_ids;
+    if (response.warning?.trim()) warnings.add(response.warning.trim());
+    if (response.proxies_imported !== undefined) {
+      merged.proxies_imported = (merged.proxies_imported ?? 0) + response.proxies_imported;
+      merged.proxies_skipped = (merged.proxies_skipped ?? 0) + (response.proxies_skipped ?? 0);
+    }
+    if (response.proxy_warning?.trim()) proxyWarnings.add(response.proxy_warning.trim());
+  }
+  if (warnings.size > 0) merged.warning = Array.from(warnings).join("；");
+  if (proxyWarnings.size > 0) merged.proxy_warning = Array.from(proxyWarnings).join("；");
+  return merged;
 }
 
 const warningURLPattern = /https?:\/\/[^\s;]+/;

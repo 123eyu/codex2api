@@ -23,7 +23,13 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useToast } from "../../hooks/useToast";
 import { getErrorMessage } from "../../utils/error";
-import { AccountMetadataFields, FieldHint, FieldLabel, TEXTAREA_CLASS } from "./AntigravityFormFields";
+import {
+  AccountMetadataFields,
+  FieldHint,
+  FieldLabel,
+  OptionalSettingsSection,
+  TEXTAREA_CLASS,
+} from "./AntigravityFormFields";
 
 type OAuthModalStatus = "idle" | "starting" | "waiting" | "processing" | "completed" | "failed" | "cancelled";
 
@@ -343,15 +349,18 @@ export default function AntigravityOAuthModal({
                 placeholder={t("antigravity.accountNamePlaceholder")}
               />
             </label>
-            <AccountMetadataFields
-              proxyUrl={draft.proxyUrl}
-              proxies={proxies}
-              onProxyUrlChange={(proxyUrl) => setDraft((current) => ({ ...current, proxyUrl }))}
-              groupIds={draft.groupIds}
-              onGroupIdsChange={(groupIds) => setDraft((current) => ({ ...current, groupIds }))}
-              groups={groups}
-              onCreateGroup={onCreateGroup}
-            />
+            <OptionalSettingsSection proxyUrl={draft.proxyUrl} groupIds={draft.groupIds} groups={groups}>
+              <AccountMetadataFields
+                stacked
+                proxyUrl={draft.proxyUrl}
+                proxies={proxies}
+                onProxyUrlChange={(proxyUrl) => setDraft((current) => ({ ...current, proxyUrl }))}
+                groupIds={draft.groupIds}
+                onGroupIdsChange={(groupIds) => setDraft((current) => ({ ...current, groupIds }))}
+                groups={groups}
+                onCreateGroup={onCreateGroup}
+              />
+            </OptionalSettingsSection>
           </>
         ) : (
           <>

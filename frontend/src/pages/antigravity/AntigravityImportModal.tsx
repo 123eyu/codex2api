@@ -6,7 +6,6 @@ import {
   ClipboardPaste,
   FileJson,
   FolderOpen,
-  KeyRound,
   Loader2,
   TriangleAlert,
   Upload,
@@ -17,28 +16,30 @@ import { api } from "../../api";
 import type { ProxyRow } from "../../api";
 import type {
   AccountGroup,
-  AntigravityAuthKind,
   AntigravityImportItem,
   AntigravityImportResponse,
 } from "../../types";
 import Modal from "../../components/Modal";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useToast } from "../../hooks/useToast";
-import { ANTIGRAVITY_DEFAULT_MODELS } from "../../lib/antigravityModels";
-import { parseModelList, parseRefreshTokenLines } from "../../lib/antigravityQuota";
+import {
+  ANTIGRAVITY_IMPORT_BATCH_MAX,
+  mergeAntigravityImportResponses,
+  parseRefreshTokenLines,
+  planAntigravityImportBatches,
+} from "../../lib/antigravityQuota";
 import { getErrorMessage } from "../../utils/error";
 import {
   AccountMetadataFields,
-  APIKeyModelFields,
   FieldHint,
   FieldLabel,
+  OptionalSettingsSection,
   SegmentedChoice,
   TEXTAREA_CLASS,
 } from "./AntigravityFormFields";
 
-type ImportMode = "single" | "files" | "tokens";
+type ImportMode = "files" | "tokens";
 
 interface CredentialFile {
   name: string;
@@ -47,12 +48,6 @@ interface CredentialFile {
 }
 
 interface ImportDraft {
-  name: string;
-  authKind: AntigravityAuthKind;
-  authJson: string;
-  apiKey: string;
-  models: string;
-  modelMapping: string;
   refreshTokens: string;
   proxyUrl: string;
   groupIds: number[];
@@ -62,12 +57,6 @@ interface ImportDraft {
 }
 
 const EMPTY_IMPORT_DRAFT: ImportDraft = {
-  name: "",
-  authKind: "oauth",
-  authJson: "",
-  apiKey: "",
-  models: ANTIGRAVITY_DEFAULT_MODELS.join("\n"),
-  modelMapping: "",
   refreshTokens: "",
   proxyUrl: "",
   groupIds: [],
@@ -134,6 +123,7 @@ function ImportResultSummary({ result }: { result: AntigravityImportResponse }) 
   );
 }
 
+/** 批量导入:多个 JSON 凭据文件(可拖拽)或多行 refresh token。单个账号走"添加账号"。 */
 export default function AntigravityImportModal({
   show,
   proxies,
@@ -152,11 +142,12 @@ export default function AntigravityImportModal({
   const { t } = useTranslation();
   const { showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [mode, setMode] = useState<ImportMode>("single");
+  const [mode, setMode] = useState<ImportMode>("files");
   const [draft, setDraft] = useState<ImportDraft>(EMPTY_IMPORT_DRAFT);
   const [files, setFiles] = useState<CredentialFile[]>([]);
   const [dragging, setDragging] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
   const [result, setResult] = useState<AntigravityImportResponse | null>(null);
 
   const tokens = parseRefreshTokenLines(draft.refreshTokens);
@@ -165,7 +156,7 @@ export default function AntigravityImportModal({
     setDraft(EMPTY_IMPORT_DRAFT);
     setFiles([]);
     setResult(null);
-    setMode("single");
+    setMode("files");
     setDragging(false);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
@@ -238,14 +229,6 @@ export default function AntigravityImportModal({
 
   const handleImport = async () => {
     if (importing) return;
-    if (mode === "single" && draft.authKind === "oauth" && !draft.authJson.trim()) {
-      showToast(t("antigravity.authJsonRequired"), "error");
-      return;
-    }
-    if (mode === "single" && draft.authKind === "api_key" && !draft.apiKey.trim()) {
-      showToast(t("antigravity.apiKeyRequired"), "error");
-      return;
-    }
     if (mode === "files" && files.length === 0) {
       showToast(t("antigravity.filesRequired"), "error");
       return;
@@ -256,67 +239,76 @@ export default function AntigravityImportModal({
     }
     setImporting(true);
     setResult(null);
+    // 超过单次上限(或单个文件过大)时自动分批:导出的多账号 JSON 数组可以整份导入。
+    const batches =
+      mode === "files"
+        ? planAntigravityImportBatches(files.map((file) => file.content))
+        : Array.from({ length: Math.ceil(tokens.length / ANTIGRAVITY_IMPORT_BATCH_MAX) }, (_, index) =>
+            tokens.slice(index * ANTIGRAVITY_IMPORT_BATCH_MAX, (index + 1) * ANTIGRAVITY_IMPORT_BATCH_MAX),
+          );
+    const collected: Array<{ response: AntigravityImportResponse; offset: number }> = [];
+    let offset = 0;
     try {
-      if (mode === "single") {
-        const response = await api.addAntigravityAccount({
-          name: draft.name.trim() || undefined,
-          auth_kind: draft.authKind,
-          auth_json: draft.authKind === "oauth" ? draft.authJson.trim() : undefined,
-          api_key: draft.authKind === "api_key" ? draft.apiKey.trim() : undefined,
-          models: draft.authKind === "api_key" ? parseModelList(draft.models) : undefined,
-          model_mapping: draft.authKind === "api_key" ? draft.modelMapping.trim() : undefined,
-          proxy_url: draft.proxyUrl.trim() || undefined,
-          group_ids: draft.groupIds,
-        });
-        const warning = response.warning?.trim();
-        showToast(
-          warning || (response.synced ? t("antigravity.addSuccess") : t("antigravity.addDegraded")),
-          warning || !response.synced ? "warning" : "success",
-        );
-        onClose();
-        reset();
-      } else {
+      for (const [index, batch] of batches.entries()) {
+        if (batches.length > 1) setBatchProgress({ current: index + 1, total: batches.length });
         const response = await api.importAntigravityAccounts({
-          files: mode === "files" ? files.map((file) => file.content) : [],
-          refresh_tokens: mode === "tokens" ? tokens : undefined,
+          files: mode === "files" ? batch : [],
+          refresh_tokens: mode === "tokens" ? batch : undefined,
           proxy_url: draft.proxyUrl.trim() || undefined,
           group_ids: draft.groupIds,
           import_proxy: mode === "files" ? draft.importFileProxies || undefined : undefined,
         });
-        setResult(response);
-        if (!summarizeBatchResult(response)) {
-          onClose();
-          reset();
-        }
+        collected.push({ response, offset });
+        offset += batch.length;
+      }
+      const merged = collected.length === 1 ? collected[0].response : mergeAntigravityImportResponses(collected);
+      setResult(merged);
+      if (!summarizeBatchResult(merged)) {
+        onClose();
+        reset();
       }
       await onImported();
     } catch (importError) {
-      showToast(getErrorMessage(importError), "error");
+      const message = getErrorMessage(importError);
+      if (collected.length > 0) {
+        // 已完成的批次照常展示并刷新列表,失败批次的错误单独提示。
+        setResult(mergeAntigravityImportResponses(collected));
+        showToast(
+          t("antigravity.importBatchStopped", { done: collected.length, total: batches.length, error: message }),
+          "error",
+        );
+        await onImported();
+      } else {
+        showToast(message, "error");
+      }
     } finally {
       setImporting(false);
+      setBatchProgress(null);
     }
   };
 
+  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+  const pending = mode === "files" ? files.length : tokens.length;
   const submitLabel = importing
-    ? t("antigravity.importing")
-    : mode === "single"
-      ? t("antigravity.addAccount")
-      : mode === "files"
-        ? t("antigravity.importFilesCount", { count: files.length })
-        : t("antigravity.importTokensCount", { count: tokens.length });
+    ? batchProgress
+      ? t("antigravity.importingBatch", batchProgress)
+      : t("antigravity.importing")
+    : mode === "files"
+      ? t("antigravity.importFilesCount", { count: files.length })
+      : t("antigravity.importTokensCount", { count: tokens.length });
 
   return (
     <Modal
       show={show}
       title={t("antigravity.importTitle")}
       onClose={close}
-      contentClassName="sm:max-w-[660px]"
+      contentClassName="sm:max-w-[640px]"
       footer={
         <>
           <Button variant="outline" onClick={close} disabled={importing}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={() => void handleImport()} disabled={importing}>
+          <Button onClick={() => void handleImport()} disabled={importing || pending === 0}>
             {importing ? <Loader2 className="animate-spin" /> : <Upload />}
             {submitLabel}
           </Button>
@@ -331,71 +323,12 @@ export default function AntigravityImportModal({
             setResult(null);
           }}
           options={[
-            { value: "single", label: t("antigravity.singleCredential"), icon: <FileJson className="size-4" /> },
             { value: "files", label: t("antigravity.batchFiles"), icon: <FolderOpen className="size-4" /> },
             { value: "tokens", label: t("antigravity.refreshTokensMode"), icon: <ClipboardPaste className="size-4" /> },
           ]}
         />
 
-        {mode === "single" ? (
-          <div className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_200px]">
-              <label className="block space-y-1.5">
-                <FieldLabel>{t("antigravity.accountName")}</FieldLabel>
-                <Input
-                  value={draft.name}
-                  onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
-                  placeholder={t("antigravity.accountNamePlaceholder")}
-                />
-              </label>
-              <div className="space-y-1.5">
-                <FieldLabel>{t("antigravity.authKind")}</FieldLabel>
-                <SegmentedChoice<AntigravityAuthKind>
-                  value={draft.authKind}
-                  onChange={(authKind) => setDraft((current) => ({ ...current, authKind }))}
-                  options={[
-                    { value: "oauth", label: t("antigravity.authKindOAuth"), icon: <FileJson className="size-3.5" /> },
-                    { value: "api_key", label: t("antigravity.authKindApiKey"), icon: <KeyRound className="size-3.5" /> },
-                  ]}
-                />
-              </div>
-            </div>
-            {draft.authKind === "oauth" ? (
-              <label className="block space-y-1.5">
-                <FieldLabel>{t("antigravity.authJson")}</FieldLabel>
-                <textarea
-                  value={draft.authJson}
-                  onChange={(event) => setDraft((current) => ({ ...current, authJson: event.target.value }))}
-                  rows={8}
-                  spellCheck={false}
-                  placeholder={t("antigravity.authJsonPlaceholder")}
-                  className={TEXTAREA_CLASS}
-                />
-                <FieldHint>{t("antigravity.authJsonHint")}</FieldHint>
-              </label>
-            ) : (
-              <div className="space-y-3">
-                <label className="block space-y-1.5">
-                  <FieldLabel>{t("antigravity.apiKey")}</FieldLabel>
-                  <Input
-                    type="password"
-                    autoComplete="new-password"
-                    value={draft.apiKey}
-                    onChange={(event) => setDraft((current) => ({ ...current, apiKey: event.target.value }))}
-                    placeholder={t("antigravity.apiKeyPlaceholder")}
-                  />
-                  <FieldHint>{t("antigravity.apiKeyHint")}</FieldHint>
-                </label>
-                <APIKeyModelFields
-                  models={draft.models}
-                  modelMapping={draft.modelMapping}
-                  onModelsChange={(models) => setDraft((current) => ({ ...current, models }))}
-                  onModelMappingChange={(modelMapping) => setDraft((current) => ({ ...current, modelMapping }))}
-                />
-              </div>
-            )}
-          </div>
-        ) : mode === "files" ? (
+        {mode === "files" ? (
           <div className="space-y-2">
             <input
               ref={fileInputRef}
@@ -415,7 +348,8 @@ export default function AntigravityImportModal({
               onDragLeave={() => setDragging(false)}
               onDrop={(event) => void handleDrop(event)}
               className={cn(
-                "flex min-h-[132px] w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed px-5 py-6 text-center transition-colors",
+                "flex w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed px-5 text-center transition-colors",
+                files.length > 0 ? "min-h-[96px] py-4" : "min-h-[150px] py-6",
                 dragging
                   ? "border-primary bg-primary/10"
                   : "border-border bg-muted/20 hover:border-primary/40 hover:bg-primary/5",
@@ -425,14 +359,20 @@ export default function AntigravityImportModal({
                 <FolderOpen className="size-5" />
               </span>
               <span className="text-sm font-semibold text-foreground">
-                {dragging ? t("antigravity.dropFilesHere") : t("antigravity.chooseFiles")}
+                {dragging
+                  ? t("antigravity.dropFilesHere")
+                  : files.length > 0
+                    ? t("antigravity.addMoreFiles")
+                    : t("antigravity.chooseFiles")}
               </span>
               <span className="text-xs text-muted-foreground">{t("antigravity.chooseFilesHint")}</span>
             </button>
             {files.length > 0 ? (
               <div className="rounded-xl border border-border">
                 <div className="flex items-center justify-between border-b border-border/70 px-3 py-1.5 text-[11px] text-muted-foreground">
-                  <span>{t("antigravity.filesSelected", { count: files.length })}</span>
+                  <span>
+                    {t("antigravity.filesSelected", { count: files.length })} · {formatFileSize(totalSize)}
+                  </span>
                   <button
                     type="button"
                     className="font-medium transition-colors hover:text-foreground"
@@ -441,7 +381,7 @@ export default function AntigravityImportModal({
                     {t("antigravity.clearFiles")}
                   </button>
                 </div>
-                <div className="max-h-32 overflow-y-auto px-1.5 py-1">
+                <div className="max-h-36 overflow-y-auto px-1.5 py-1">
                   {files.map((file) => (
                     <div key={file.name} className="flex items-center gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-muted/40">
                       <FileJson className="size-3.5 shrink-0 text-muted-foreground" />
@@ -460,25 +400,39 @@ export default function AntigravityImportModal({
                 </div>
               </div>
             ) : null}
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg px-1 py-1 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                className="mt-0.5 size-3.5 accent-primary"
+                checked={draft.importFileProxies}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, importFileProxies: event.target.checked }))
+                }
+              />
+              <span>
+                <span className="font-medium text-foreground">{t("accounts.importFileProxies")}</span>
+                <span className="mt-0.5 block text-[11px]">{t("antigravity.importFileProxiesHint")}</span>
+              </span>
+            </label>
           </div>
         ) : (
           <label className="block space-y-1.5">
-            <FieldLabel>
-              {t("antigravity.refreshTokensLabel")}
+            <span className="flex items-center justify-between gap-2">
+              <FieldLabel>{t("antigravity.refreshTokensLabel")}</FieldLabel>
               {tokens.length > 0 ? (
-                <span className="ml-1.5 inline-flex items-center gap-1 font-normal text-emerald-700 dark:text-emerald-300">
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
                   <CheckCircle2 className="size-3" aria-hidden />
                   {t("antigravity.refreshTokensDetected", { count: tokens.length })}
                 </span>
               ) : null}
-            </FieldLabel>
+            </span>
             <textarea
               value={draft.refreshTokens}
               onChange={(event) => {
                 setDraft((current) => ({ ...current, refreshTokens: event.target.value }));
                 setResult(null);
               }}
-              rows={8}
+              rows={9}
               spellCheck={false}
               placeholder={t("antigravity.refreshTokensPlaceholder")}
               className={TEXTAREA_CLASS}
@@ -487,32 +441,18 @@ export default function AntigravityImportModal({
           </label>
         )}
 
-        <AccountMetadataFields
-          proxyUrl={draft.proxyUrl}
-          proxies={proxies}
-          onProxyUrlChange={(proxyUrl) => setDraft((current) => ({ ...current, proxyUrl }))}
-          groupIds={draft.groupIds}
-          onGroupIdsChange={(groupIds) => setDraft((current) => ({ ...current, groupIds }))}
-          groups={groups}
-          onCreateGroup={onCreateGroup}
-        />
-
-        {mode === "files" ? (
-          <div className="space-y-1">
-            <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-              <input
-                type="checkbox"
-                className="size-3.5 accent-primary"
-                checked={draft.importFileProxies}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, importFileProxies: event.target.checked }))
-                }
-              />
-              {t("accounts.importFileProxies")}
-            </label>
-            <FieldHint>{t("antigravity.importFileProxiesHint")}</FieldHint>
-          </div>
-        ) : null}
+        <OptionalSettingsSection proxyUrl={draft.proxyUrl} groupIds={draft.groupIds} groups={groups}>
+          <AccountMetadataFields
+            stacked
+            proxyUrl={draft.proxyUrl}
+            proxies={proxies}
+            onProxyUrlChange={(proxyUrl) => setDraft((current) => ({ ...current, proxyUrl }))}
+            groupIds={draft.groupIds}
+            onGroupIdsChange={(groupIds) => setDraft((current) => ({ ...current, groupIds }))}
+            groups={groups}
+            onCreateGroup={onCreateGroup}
+          />
+        </OptionalSettingsSection>
 
         {result && (result.failed > 0 || (result.degraded ?? 0) > 0) ? <ImportResultSummary result={result} /> : null}
       </div>

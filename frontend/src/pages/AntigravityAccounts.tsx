@@ -24,6 +24,7 @@ import {
   SlidersHorizontal,
   Trash2,
   Unlock,
+  Upload,
   X,
 } from "lucide-react";
 import { api } from "../api";
@@ -101,8 +102,10 @@ import {
 } from "./antigravity/AntigravityAccountRow";
 import AntigravityBatchModelsModal from "./antigravity/AntigravityBatchModelsModal";
 import AntigravityEditModal from "./antigravity/AntigravityEditModal";
+import AntigravityAddModal from "./antigravity/AntigravityAddModal";
 import AntigravityImportModal from "./antigravity/AntigravityImportModal";
 import AntigravityOAuthModal from "./antigravity/AntigravityOAuthModal";
+import AntigravityQuotaDetailModal from "./antigravity/AntigravityQuotaDetailModal";
 import { AntigravityQuotaOverview } from "./antigravity/AntigravityQuotaCells";
 import { AntigravityProviderPanel } from "./antigravity/AntigravityStatePanel";
 
@@ -217,6 +220,7 @@ function AntigravityAccounts({
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null);
   const [editTarget, setEditTarget] = useState<AccountRow | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showOAuth, setShowOAuth] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -263,6 +267,8 @@ function AntigravityAccounts({
 
   // ---------- 详情抽屉 ----------
   const [detailAccountId, setDetailAccountId] = useState<number | null>(null);
+  // 同一个详情账号有两种视图:管理抽屉(sheet)与"额度与权限"宽版窗口(quota),共用管理状态。
+  const [detailView, setDetailView] = useState<"sheet" | "quota">("sheet");
   const [managementState, setManagementState] = useState<AntigravityAccountState | null>(null);
   const [managementLoading, setManagementLoading] = useState(false);
   const [managementError, setManagementError] = useState<string | null>(null);
@@ -279,7 +285,12 @@ function AntigravityAccounts({
     [],
   );
 
-  const openDetailAccount = useCallback((accountId: number) => {
+  const openDetailAccount = useCallback((accountId: number, view: "sheet" | "quota" = "sheet") => {
+    setDetailView(view);
+    if (detailAccountIdRef.current === accountId) {
+      // 同一账号只切换视图,不重拉管理状态。
+      return;
+    }
     managementAbortRef.current?.abort();
     detailGenerationRef.current += 1;
     detailAccountIdRef.current = accountId;
@@ -295,6 +306,7 @@ function AntigravityAccounts({
     detailGenerationRef.current += 1;
     detailAccountIdRef.current = null;
     detailNavigationTargetRef.current = null;
+    setDetailView("sheet");
     setDetailAccountId(null);
     setManagementState(null);
     setManagementError(null);
@@ -744,7 +756,8 @@ function AntigravityAccounts({
       const { blob, filename, count: responseCount } =
         await api.exportAntigravityAccounts(ids);
       const count = responseCount ?? (ids?.length || undefined);
-      const fallback = `codex2api-antigravity-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.${blob.type.includes("zip") ? "zip" : "json"}`;
+      // 导出始终是单个 JSON 文件(多账号为数组,与 Codex 导出一致),服务端文件名缺失时按同样格式兜底。
+      const fallback = `codex2api-antigravity-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${count ?? 0}.json`;
       downloadAntigravityBlob(blob, filename || fallback);
       showToast(
         count === undefined
@@ -1139,6 +1152,8 @@ function AntigravityAccounts({
     exporting,
     onToggleSelect: toggleSelect,
     onOpenDetail: (target) => openDetailAccount(target.id),
+    onOpenQuota: (target) =>
+      openDetailAccount(target.id, isAntigravityAPIKeyAccount(target) ? "sheet" : "quota"),
     onTest: setTestingAccount,
     onSync: handleSync,
     onEdit: setEditTarget,
@@ -1165,7 +1180,7 @@ function AntigravityAccounts({
         titleAdornment={headerSlot}
         actions={
           <div className="flex w-full flex-wrap items-center gap-1.5 sm:gap-2 [&>button]:h-8">
-            <Button size="sm" onClick={() => setShowImport(true)}>
+            <Button size="sm" onClick={() => setShowAdd(true)}>
               <Plus className="size-3.5" />
               {t("antigravity.addAccount")}
             </Button>
@@ -1179,6 +1194,17 @@ function AntigravityAccounts({
             >
               <Link2 className="size-3.5" />
               <span className="hidden md:inline">{t("antigravity.oauthAddAccount")}</span>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="size-8 p-0 md:w-auto md:px-2.5"
+              title={t("antigravity.importFiles")}
+              aria-label={t("antigravity.importFiles")}
+              onClick={() => setShowImport(true)}
+            >
+              <Upload className="size-3.5" />
+              <span className="hidden md:inline">{t("antigravity.importFiles")}</span>
             </Button>
             <Button
               variant="outline"
@@ -1574,13 +1600,17 @@ function AntigravityAccounts({
             action={
               poolEmpty ? (
                 <div className="flex flex-wrap items-center justify-center gap-2">
-                  <Button onClick={() => setShowImport(true)}>
+                  <Button onClick={() => setShowAdd(true)}>
                     <Plus className="size-4" />
                     {t("antigravity.addAccount")}
                   </Button>
                   <Button variant="outline" onClick={() => setShowOAuth(true)}>
                     <Link2 className="size-4" />
                     {t("antigravity.oauthAddAccount")}
+                  </Button>
+                  <Button variant="outline" onClick={() => setShowImport(true)}>
+                    <Upload className="size-4" />
+                    {t("antigravity.importFiles")}
                   </Button>
                 </div>
               ) : (
@@ -1654,6 +1684,18 @@ function AntigravityAccounts({
           </StateShell>
         </CardContent>
       </Card>
+
+      <AntigravityAddModal
+        show={showAdd}
+        proxies={proxyPool}
+        groups={antigravityGroups}
+        onCreateGroup={createAntigravityGroup}
+        onClose={() => setShowAdd(false)}
+        onAdded={async () => {
+          setPage(1);
+          await reload({ silent: true });
+        }}
+      />
 
       <AntigravityImportModal
         show={showImport}
@@ -1751,8 +1793,20 @@ function AntigravityAccounts({
         />
       ) : null}
 
+      <AntigravityQuotaDetailModal
+        account={detailView === "quota" ? detailAccount : null}
+        state={managementState}
+        loading={managementLoading}
+        error={managementError}
+        action={managementAction}
+        onSync={() => void handleStateSync()}
+        onProbe={() => void handleCapabilityProbe()}
+        onClose={closeDetailAccount}
+        onOpenManage={() => setDetailView("sheet")}
+      />
+
       <AccountDetailSheet
-        account={detailAccount}
+        account={detailView === "sheet" ? detailAccount : null}
         groups={
           detailAccount
             ? ((detailAccount.group_ids ?? [])
@@ -1773,6 +1827,7 @@ function AntigravityAccounts({
               action={managementAction}
               onSync={() => void handleStateSync()}
               onProbe={() => void handleCapabilityProbe()}
+              onOpenFullDetail={() => setDetailView("quota")}
             />
           ) : null
         }

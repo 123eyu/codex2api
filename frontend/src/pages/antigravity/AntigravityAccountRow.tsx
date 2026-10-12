@@ -5,6 +5,7 @@ import {
   Activity,
   BarChart3,
   CheckCircle2,
+  CircleGauge,
   Coins,
   Download,
   Hourglass,
@@ -68,6 +69,8 @@ export interface AntigravityRowProps {
   exporting: boolean;
   onToggleSelect: (id: number) => void;
   onOpenDetail: (account: AccountRow) => void;
+  /** 打开"额度与权限"宽版窗口(API Key 号没有配额快照,回落到详情抽屉)。 */
+  onOpenQuota: (account: AccountRow) => void;
   onTest: (account: AccountRow) => void;
   onSync: (account: AccountRow) => void;
   onEdit: (account: AccountRow) => void;
@@ -317,7 +320,18 @@ function useRowMenuItems(props: AntigravityRowProps): HeaderActionMenuItem[] {
   const { account, busyAction, exporting } = props;
   const busy = busyAction !== null;
   const disabled = account.enabled === false;
+  const isAPIKey = account.antigravity_auth_kind === "api_key";
   return [
+    ...(isAPIKey
+      ? []
+      : [
+          {
+            key: "quota",
+            label: t("antigravity.quotaDetailTitle"),
+            icon: <CircleGauge className="size-3.5" />,
+            onSelect: () => props.onOpenQuota(account),
+          },
+        ]),
     {
       key: "usage",
       label: t("accounts.usageDetail"),
@@ -458,7 +472,7 @@ export const AntigravityAccountRow = memo(function AntigravityAccountRow(props: 
       ) : null}
       {columns.quota ? (
         <TableCell>
-          <AntigravityQuotaCell account={account} onOpen={() => props.onOpenDetail(account)} />
+          <AntigravityQuotaCell account={account} onOpen={() => props.onOpenQuota(account)} />
         </TableCell>
       ) : null}
       {columns.proxy ? (
@@ -542,7 +556,7 @@ export const AntigravityAccountCard = memo(function AntigravityAccountCard(props
           <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
             {t("antigravity.columnQuota")}
           </div>
-          <AntigravityQuotaCell account={account} onOpen={() => props.onOpenDetail(account)} />
+          <AntigravityQuotaCell account={account} onOpen={() => props.onOpenQuota(account)} />
         </div>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <TodayStatsCell account={account} />
