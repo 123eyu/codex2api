@@ -1,5 +1,23 @@
 # Changelog
 
+## v3.0.9 - 2026-10-12
+
+### Features
+
+- **The Antigravity account page gains batch delete and a full set of batch operations (#782, reported by @10373064).** Selected accounts can be synced, tested, regrouped, enabled or disabled, locked or unlocked, reset, exported or deleted into the recycle bin, and API-key accounts can have their model list replaced in bulk. Sync and test can also target the current filter, and a one-click clean moves abnormal (banned or errored) accounts to the recycle bin using the same definition as the list. The quota column shows each quota group's 5h and weekly buckets with reset countdowns and marks snapshots older than six hours. Stat cards, status and credential-type filters, sorting by quota usage, today's requests or total requests, today and request columns, and health bars match the other channels. Clicking a row opens the shared account sheet with previous/next navigation and model cooldown management; clicking the quota opens a wide quota and access window with quota groups, Code Assist access and tiers, state and capabilities, AI credits and per-model quota. The single-row "refresh quota" and "refresh credential" buttons, which ran the same sync, become one sync action. Adding one account and importing files are separate entries: the add dialog detects whether the pasted credential is JSON, a refresh token or malformed JSON, the import dialog accepts dragged JSON files or many pasted refresh tokens, and proxy and group settings sit in a collapsible section.
+
+- **Account refresh endpoints sync Antigravity accounts, and the account list filters and sorts them (#782).** `POST /api/admin/accounts/:id/refresh` and `POST /api/admin/accounts/batch-refresh`, including SSE progress, filter selectors and bounded concurrency, now run the full Antigravity control-plane sync (credential, project, access and quota). Disabled accounts are recognized from the database because they are not in the runtime pool. The paged account list accepts `auth_kind=oauth|api_key` for Antigravity, its summary counts OAuth and API-key accounts, and `sort=usage` orders accounts by the used share of their tightest quota bucket, the same key the scheduler uses. The dashboard's Antigravity quota distribution reads the same value.
+
+- **Antigravity exports are one JSON file (#782).** `GET /api/admin/accounts/antigravity/export` now defaults to `format=json`: one account downloads as a single credential document and several as one JSON array, like the Codex and Claude exports. The importer reads both shapes, and the import dialog automatically splits files with more than 500 accounts into batches and merges the results. `format=zip` keeps the previous one-file-per-account archive.
+
+### Fixes
+
+- **Long-range usage statistics no longer time out on slow SQLite storage (#778, reported by @HanYC666).** The new `usage_log_hourly` table aggregates usage logs per UTC hour by API key, channel, model, endpoints, status, stream and internal flag. It is updated in the same transaction as each log batch, cleared with the logs and backfilled in the background; queries keep reading detail rows until the backfill completes. Queries read whole hours from the rollup and edge hours and window boundaries from detail rows, so results are unchanged. Rows written outside the normal path are detected and repaired, and the last three closed hours are re-counted every 20 minutes. This covers the public key-usage report, admin range totals and breakdowns, the error summary and request log counts; filters on account, search text, error kind or request shape other than stream still scan detail rows. On a 400k-row SQLite benchmark with a 30-day range the key-usage report drops from 950 ms to 12 ms and admin stats from 2.1 s to 21 ms. API-key rankings now break label ties by key ID.
+
+- **Usage stat cards no longer show the previous range's numbers when a refresh fails (#778, reported by @HanYC666).** A failed silent refresh after changing the range or filters kept the old figures under the new range's label, so a custom range spanning all history could show roughly today's totals. Cards are dimmed while new filters load, and a failed refresh covers them with the error and a retry button.
+
+- **Edit buttons in the account group manager show a label.** The `common.edit` translation was missing, so its tooltip showed the raw key.
+
 ## v3.0.8 - 2026-10-10
 
 ### Features
