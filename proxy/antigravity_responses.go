@@ -148,7 +148,16 @@ func executeAntigravityResponses(ctx context.Context, account *auth.Account, mod
 	// custom_tool_call by name and will not accept a function_call for a tool it
 	// declared as custom.
 	customTools := antigravityCustomToolNames(body)
-	return executeAntigravityOAuthRequest(ctx, account, payload, antigravityOAuthGenerateCall(upstreamStream), proxyURL, wireModel, func(resp *http.Response, stream bool, _ string) (*http.Response, error) {
+	jsonMode := antigravityClaudeJSONModeRequest(payload)
+	resp, err := executeAntigravityOAuthRequest(ctx, account, payload, antigravityOAuthGenerateCall(upstreamStream), proxyURL, wireModel, func(resp *http.Response, stream bool, _ string) (*http.Response, error) {
+		if !stream && jsonMode {
+			raw, readErr := readBoundedAntigravityBody(resp.Body, antigravityResponseBodyLimit)
+			if readErr != nil {
+				return nil, fmt.Errorf("read Antigravity JSON response: %w", readErr)
+			}
+			raw, _ = antigravityRewriteJSONModeFrame(raw, false)
+			resp.Body = io.NopCloser(bytes.NewReader(raw))
+		}
 		if !stream && sseOut {
 			// A generateContent body has the shape of one streamed chunk; replay
 			// it as a single compact SSE event through the stream converter.
@@ -166,7 +175,9 @@ func executeAntigravityResponses(ctx context.Context, account *auth.Account, mod
 			stream = true
 		}
 		if stream {
-			resp.Body = newAntigravitySSEResponseBodyWithThoughts(resp.Body, customTools, exposeThoughts, publicModel)
+			sse := newAntigravitySSEResponseBodyWithThoughts(resp.Body, customTools, exposeThoughts, publicModel)
+			sse.jsonMode = jsonMode
+			resp.Body = sse
 			resp.Header.Set("Content-Type", "text/event-stream")
 			return resp, nil
 		}
@@ -177,6 +188,10 @@ func executeAntigravityResponses(ctx context.Context, account *auth.Account, mod
 		resp.Body = converted
 		return resp, nil
 	})
+	if err != nil || !jsonMode {
+		return resp, err
+	}
+	return antigravityJSONModeRejection(resp, model)
 }
 
 type antigravityOAuthUpstreamCall struct {
@@ -1971,6 +1986,10 @@ type antigravitySSEBody struct {
 	messageIndex     int
 	// nextOutputIndex hands out output_index values in the order items open.
 	nextOutputIndex int
+	// jsonMode reads every frame through antigravityRewriteJSONModeFrame;
+	// jsonModeToolCalled is its cross-frame state.
+	jsonMode           bool
+	jsonModeToolCalled bool
 }
 
 func newAntigravitySSEResponseBody(r io.ReadCloser, model ...string) io.ReadCloser {
@@ -1983,7 +2002,7 @@ func newAntigravitySSEResponseBodyWithCustomTools(r io.ReadCloser, customTools m
 	return newAntigravitySSEResponseBodyWithThoughts(r, customTools, false, model...)
 }
 
-func newAntigravitySSEResponseBodyWithThoughts(r io.ReadCloser, customTools map[string]bool, exposeThoughts bool, model ...string) io.ReadCloser {
+func newAntigravitySSEResponseBodyWithThoughts(r io.ReadCloser, customTools map[string]bool, exposeThoughts bool, model ...string) *antigravitySSEBody {
 	modelID := ""
 	if len(model) > 0 {
 		modelID = strings.TrimSpace(model[0])
@@ -2270,6 +2289,9 @@ func (b *antigravitySSEBody) Read(p []byte) (int, error) {
 		if len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
 			b.enqueueFailure(ErrorCodeUpstreamStreamBreak, "antigravity stream ended before completion")
 			continue
+		}
+		if b.jsonMode {
+			data, b.jsonModeToolCalled = antigravityRewriteJSONModeFrame(data, b.jsonModeToolCalled)
 		}
 		env, err := decodeAntigravityStreamEnvelope(data)
 		if err != nil {
