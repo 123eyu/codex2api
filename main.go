@@ -206,6 +206,8 @@ func main() {
 	settings.OAuthModelCooldownMode = modelCooldownSettings.OAuthMode
 	settings.OAuthModelCooldownSeconds = modelCooldownSettings.OAuthSeconds
 	settings.OAuthModelCooldownBackoffEnabled = modelCooldownSettings.OAuthBackoffEnabled
+	settings.OAuthUnsupportedModelCooldownDisabled = modelCooldownSettings.OAuthUnsupportedDisabled
+	settings.OAuthUnsupportedModelCooldownSeconds = modelCooldownSettings.OAuthUnsupportedSeconds
 	if envPolicy := strings.TrimSpace(os.Getenv("CODEX_BILLING_TIER_POLICY")); envPolicy != "" {
 		settings.BillingTierPolicy = proxy.NormalizeBillingTierPolicy(envPolicy)
 	}
