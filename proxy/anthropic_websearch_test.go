@@ -141,21 +141,34 @@ func TestConvertAnthropicToolChoice_FlatFunctionShape(t *testing.T) {
 	}
 }
 
-func TestConvertAnthropicToolChoice_HostedWebSearchUsesRequired(t *testing.T) {
+func TestConvertAnthropicToolChoice_HostedWebSearchRestrictsAllowedTools(t *testing.T) {
 	got := convertAnthropicToolChoiceForTools(
 		json.RawMessage(`{"type":"tool","name":"web_search"}`),
 		[]anthropicTool{{Type: "web_search_20250305", Name: "web_search"}},
 	)
-	if got != "required" {
-		t.Fatalf("hosted web_search tool_choice = %v, want required", got)
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("hosted web_search tool_choice = %v, want allowed_tools object", got)
+	}
+	// 字符串 "required" 只保证「调用某个工具」；工具表里还有普通 function 时
+	// 模型可能改选它（实测会选中别的 function），违反命名选择语义。
+	if m["type"] != "allowed_tools" || m["mode"] != "required" {
+		t.Fatalf("choice = %v, want allowed_tools + required", m)
+	}
+	tools, ok := m["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("allowed tools = %v, want exactly web_search", m["tools"])
+	}
+	if tool := tools[0].(map[string]any); tool["type"] != "web_search" {
+		t.Fatalf("allowed tool = %v, want web_search", tool)
 	}
 
 	got = convertAnthropicToolChoiceForTools(
 		json.RawMessage(`{"type":"tool","name":"lookup"}`),
 		[]anthropicTool{{Name: "lookup", InputSchema: json.RawMessage(`{"type":"object"}`)}},
 	)
-	m, ok := got.(map[string]any)
-	if !ok || m["type"] != "function" || m["name"] != "lookup" {
+	fm, ok := got.(map[string]any)
+	if !ok || fm["type"] != "function" || fm["name"] != "lookup" {
 		t.Fatalf("function tool_choice = %v, want flat function lookup", got)
 	}
 }
@@ -191,6 +204,67 @@ func TestAnthropicServerToolBlocks(t *testing.T) {
 	// 未完成的调用不下发
 	if got := anthropicServerToolBlocks(gjson.Parse(`{"id":"ws_x","status":"in_progress"}`)); got != nil {
 		t.Fatalf("in-progress call should emit nothing, got %v", got)
+	}
+	if got := anthropicServerToolBlocks(gjson.Parse(`{"id":"ws_x","status":"searching"}`)); got != nil {
+		t.Fatalf("searching call should emit nothing, got %v", got)
+	}
+}
+
+// 失败的检索必须下发配对的 web_search_tool_result_error，否则 server_tool_use
+// 会悬空、客户端拿不到终态。空 content 数组只对「完成但无命中」合法。
+func TestAnthropicServerToolBlocks_FailedSearchEmitsErrorResult(t *testing.T) {
+	for _, status := range []string{"failed", "incomplete"} {
+		t.Run(status, func(t *testing.T) {
+			item := gjson.Parse(`{"id":"ws_bad","type":"web_search_call","status":"` + status + `","action":{"type":"search","queries":["北京时间"]}}`)
+			blocks := anthropicServerToolBlocks(item)
+			if len(blocks) != 2 {
+				t.Fatalf("len = %d, want paired server_tool_use + result", len(blocks))
+			}
+			if blocks[0].Type != "server_tool_use" || blocks[0].ID != "srvtoolu_ws_bad" {
+				t.Fatalf("first block = %+v", blocks[0])
+			}
+			if blocks[1].Type != "web_search_tool_result" || blocks[1].ToolUseID != blocks[0].ID {
+				t.Fatalf("result not linked: %+v", blocks[1])
+			}
+			var content map[string]any
+			if err := json.Unmarshal(blocks[1].Content, &content); err != nil {
+				t.Fatalf("content not JSON: %v", err)
+			}
+			if content["type"] != "web_search_tool_result_error" {
+				t.Fatalf("content = %v, want error object not empty array", content)
+			}
+			// 上游没给已知错误码时收敛到 unavailable，不编造内部原因
+			if content["error_code"] != "unavailable" {
+				t.Fatalf("error_code = %v, want unavailable", content["error_code"])
+			}
+		})
+	}
+}
+
+func TestAnthropicServerToolBlocks_KnownErrorCodePassesThrough(t *testing.T) {
+	item := gjson.Parse(`{"id":"ws_q","status":"failed","action":{"query":"x"},"error":{"code":"query_too_long"}}`)
+	blocks := anthropicServerToolBlocks(item)
+	if len(blocks) != 2 {
+		t.Fatalf("len = %d, want 2", len(blocks))
+	}
+	var content map[string]any
+	if err := json.Unmarshal(blocks[1].Content, &content); err != nil {
+		t.Fatalf("content not JSON: %v", err)
+	}
+	if content["error_code"] != "query_too_long" {
+		t.Fatalf("error_code = %v, want passthrough query_too_long", content["error_code"])
+	}
+}
+
+// 完成但无命中仍是空数组，不能误判成错误。
+func TestAnthropicServerToolBlocks_CompletedWithoutMatchesIsEmptyArray(t *testing.T) {
+	item := gjson.Parse(`{"id":"ws_ok","status":"completed","action":{"query":"x"}}`)
+	blocks := anthropicServerToolBlocks(item)
+	if len(blocks) != 2 {
+		t.Fatalf("len = %d, want 2", len(blocks))
+	}
+	if string(blocks[1].Content) != "[]" {
+		t.Fatalf("content = %s, want []", blocks[1].Content)
 	}
 }
 

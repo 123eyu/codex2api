@@ -1119,10 +1119,19 @@ func convertAnthropicToolChoiceForTools(raw json.RawMessage, tools []anthropicTo
 		Name string `json:"name,omitempty"`
 	}
 	if json.Unmarshal(raw, &tc) == nil && tc.Type == "tool" && tc.Name != "" && anthropicToolsContainHostedName(tools, tc.Name) {
-		// OpenAI Responses documents "required" for hosted tool forcing, but not a
-		// stable named hosted-tool object. Returning a function choice for
-		// web_search would not match the hosted tool declaration and can 400.
-		return "required"
+		// Anthropic 的 {"type":"tool","name":"web_search"} 要求「必须调用 web_search」。
+		// Responses 的字符串 "required" 只保证「调用某个工具」，工具表里同时存在普通
+		// function 时模型可能改选它（实测确实会选中别的 function），违反命名选择语义；
+		// 命名 function 形态又会因 web_search 是 hosted 而非 function 而 400
+		// ("Tool choice 'web_search' not found in 'tools' parameter")。
+		// allowed_tools + mode=required 把可选集合收敛到 web_search 本身。
+		return map[string]any{
+			"type": "allowed_tools",
+			"mode": "required",
+			"tools": []any{
+				map[string]any{"type": "web_search"},
+			},
+		}
 	}
 	return convertAnthropicToolChoice(raw)
 }
@@ -1713,15 +1722,27 @@ func compactAnthropicContent(content []anthropicContentBlock) []anthropicContent
 	return out
 }
 
-// anthropicServerToolBlocks 把一个已完成的 Codex hosted tool item
-// （目前只有 web_search_call）转成 Anthropic 的服务端工具块对：
+// anthropicServerToolBlocks 把一个 Codex hosted tool item（目前只有
+// web_search_call）转成 Anthropic 的服务端工具块对：
 // server_tool_use（客户端据此展示「正在检索」）+ web_search_tool_result。
+//
+// 状态映射遵循 Anthropic 的服务端工具约定：
+//   - completed：正常结果（无命中时 content 为空数组，不是错误）
+//   - failed / incomplete：检索本身失败，content 为单个
+//     web_search_tool_result_error 对象，仍要配对下发，否则 server_tool_use
+//     会悬空，客户端拿不到终态
+//   - 其它（in_progress / searching）：仍在进行，不下发
 //
 // Codex 默认不回传完整 results（正文和链接通常在随后的 message 块承载），
 // 因此这里只转发上游明确给出的 results，不从 action.sources 或正文里伪造结果。
 func anthropicServerToolBlocks(item gjson.Result) []anthropicContentBlock {
-	// 未完成的调用不下发，避免客户端显示一个永远不返回结果的检索。
-	if status := item.Get("status").String(); status != "" && status != "completed" {
+	status := strings.TrimSpace(item.Get("status").String())
+	switch status {
+	case "completed":
+	case "failed", "incomplete":
+		return anthropicServerToolErrorBlocks(item)
+	default:
+		// in_progress / searching / 未知状态：检索还没终态，等 done 事件再发。
 		return nil
 	}
 	callID := anthropicServerToolUseID(item)
@@ -1738,10 +1759,6 @@ func anthropicServerToolBlocks(item gjson.Result) []anthropicContentBlock {
 		if q := strings.TrimSpace(item.Get("action.query").String()); q != "" {
 			queries = append(queries, q)
 		}
-	}
-	inputJSON, err := json.Marshal(map[string]any{"query": strings.Join(queries, " ")})
-	if err != nil {
-		inputJSON = []byte("{}")
 	}
 
 	results := make([]any, 0)
@@ -1764,17 +1781,80 @@ func anthropicServerToolBlocks(item gjson.Result) []anthropicContentBlock {
 	}
 
 	return []anthropicContentBlock{
-		{
-			Type:  "server_tool_use",
-			ID:    callID,
-			Name:  "web_search",
-			Input: json.RawMessage(inputJSON),
-		},
+		anthropicServerToolUseBlock(item, callID, queries),
 		{
 			Type:      "web_search_tool_result",
 			ToolUseID: callID,
 			Content:   json.RawMessage(resultJSON),
 		},
+	}
+}
+
+// anthropicServerToolErrorBlocks 为 failed / incomplete 的检索下发配对块：
+// server_tool_use + content 为单个 web_search_tool_result_error 的结果块。
+// Anthropic 把工具级失败表达成 200 响应内的错误结果对象，而不是 HTTP 错误。
+func anthropicServerToolErrorBlocks(item gjson.Result) []anthropicContentBlock {
+	callID := anthropicServerToolUseID(item)
+
+	var queries []string
+	item.Get("action.queries").ForEach(func(_, q gjson.Result) bool {
+		if s := strings.TrimSpace(q.String()); s != "" {
+			queries = append(queries, s)
+		}
+		return true
+	})
+	if len(queries) == 0 {
+		if q := strings.TrimSpace(item.Get("action.query").String()); q != "" {
+			queries = append(queries, q)
+		}
+	}
+
+	// 只有 Anthropic 文档列出的错误码才原样透传；上游给不出已知错误码时用
+	// unavailable，而不是把上游内部原因当作客户端可见错误码编造出来。
+	errorCode := strings.TrimSpace(item.Get("error.code").String())
+	if !anthropicWebSearchErrorCodes[errorCode] {
+		errorCode = "unavailable"
+	}
+	contentJSON, err := json.Marshal(map[string]any{
+		"type":       "web_search_tool_result_error",
+		"error_code": errorCode,
+	})
+	if err != nil {
+		contentJSON = []byte(`{"type":"web_search_tool_result_error","error_code":"unavailable"}`)
+	}
+
+	return []anthropicContentBlock{
+		anthropicServerToolUseBlock(item, callID, queries),
+		{
+			Type:      "web_search_tool_result",
+			ToolUseID: callID,
+			Content:   json.RawMessage(contentJSON),
+		},
+	}
+}
+
+// anthropicWebSearchErrorCodes 是 Anthropic 文档列出的服务端检索错误码。
+var anthropicWebSearchErrorCodes = map[string]bool{
+	"too_many_requests":  true,
+	"invalid_tool_input": true,
+	"max_uses_exceeded":  true,
+	"query_too_long":     true,
+	"request_too_large":  true,
+	"unavailable":        true,
+}
+
+// anthropicServerToolUseBlock 构造配对的 server_tool_use 块。
+// query 为空时仍下发空对象，保持与结果块的 id 配对。
+func anthropicServerToolUseBlock(item gjson.Result, callID string, queries []string) anthropicContentBlock {
+	inputJSON, err := json.Marshal(map[string]any{"query": strings.Join(queries, " ")})
+	if err != nil {
+		inputJSON = []byte("{}")
+	}
+	return anthropicContentBlock{
+		Type:  "server_tool_use",
+		ID:    callID,
+		Name:  "web_search",
+		Input: json.RawMessage(inputJSON),
 	}
 }
 
