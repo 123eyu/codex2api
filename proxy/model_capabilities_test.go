@@ -14,13 +14,13 @@ import (
 )
 
 func TestCodexCapabilityValidationAndIntersection(t *testing.T) {
-	a := parseCodexModelCapabilities([]byte(`{"models":[{"slug":"gpt-6-astra","context_window":1000,"supports_search_tool":true,"use_responses_lite":true,"supported_reasoning_levels":[{"effort":"low"},{"effort":"max"}],"base_instructions":"never persist","tool_mode":{"invalid":true}}]}`))
-	b := parseCodexModelCapabilities([]byte(`{"models":[{"slug":"gpt-6-astra","context_window":800,"supports_search_tool":false,"use_responses_lite":true,"supported_reasoning_levels":["low","high"]}]}`))
+	a := parseCodexModelCapabilities([]byte(`{"models":[{"slug":"gpt-6-astra","context_window":1000,"supports_search_tool":true,"use_responses_lite":true,"experimental_supported_tools":["function","web_search"],"supported_reasoning_levels":[{"effort":"low"},{"effort":"max"}],"base_instructions":"never persist","tool_mode":{"invalid":true}}]}`))
+	b := parseCodexModelCapabilities([]byte(`{"models":[{"slug":"gpt-6-astra","context_window":800,"supports_search_tool":false,"use_responses_lite":true,"experimental_supported_tools":["function","web_search","computer"],"supported_reasoning_levels":["low","high"]}]}`))
 	if len(a) != 1 || a["gpt-6-astra"]["base_instructions"] != nil || a["gpt-6-astra"]["tool_mode"] != nil {
 		t.Fatalf("unsafe descriptor fields admitted: %+v", a)
 	}
 	got := intersectCodexCapabilities([]map[string]json.RawMessage{a["gpt-6-astra"], b["gpt-6-astra"]})
-	if string(got["context_window"]) != "800" || string(got["supports_search_tool"]) != "false" || string(got["use_responses_lite"]) != "true" || gjson.GetBytes(got["supported_reasoning_levels"], "0.effort").String() != "low" {
+	if string(got["context_window"]) != "800" || string(got["supports_search_tool"]) != "false" || string(got["use_responses_lite"]) != "true" || string(got["experimental_supported_tools"]) != `["function","web_search"]` || gjson.GetBytes(got["supported_reasoning_levels"], "0.effort").String() != "low" {
 		t.Fatalf("unsafe intersection: %+v", got)
 	}
 	got = intersectCodexCapabilities([]map[string]json.RawMessage{a["gpt-6-astra"], nil})

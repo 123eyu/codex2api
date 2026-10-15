@@ -402,6 +402,12 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		_ = writeResponsesWSError(conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 	}
+	if strictResponsesCompatibilityRequested(c) {
+		if compatibilityErr := validateCodexRelayResponsesCompatibility(rawBody); compatibilityErr != nil {
+			_ = writeResponsesWSError(conn, compatibilityErr)
+			return newResponsesWSCloseError(websocket.ClosePolicyViolation, compatibilityErr.Message, compatibilityErr)
+		}
+	}
 
 	if len(rawBody) > security.MaxRequestBodySize {
 		apiErr = api.NewAPIError(api.ErrCodeInvalidRequest, "请求体过大", api.ErrorTypeInvalidRequest)
@@ -1722,7 +1728,15 @@ func normalizeResponsesWebSocketClientPayload(raw []byte) ([]byte, string, *api.
 		}
 	case "response.create":
 	case "response.append":
-		return nil, "", api.NewAPIError(api.ErrCodeInvalidRequest, "response.append is not supported; use response.create with previous_response_id", api.ErrorTypeInvalidRequest)
+		return nil, "", api.NewAPIErrorWithDetails(api.ErrCodeUnsupportedFeature, "response.append is not supported; use response.create with previous_response_id", api.ErrorTypeInvalidRequest, map[string]any{
+			"event": "response.append",
+			"hint":  "send response.create with previous_response_id",
+		})
+	case "response.steer":
+		return nil, "", api.NewAPIErrorWithDetails(api.ErrCodeUnsupportedFeature, "response.steer is not supported by this gateway", api.ErrorTypeInvalidRequest, map[string]any{
+			"event": "response.steer",
+			"hint":  "wait for the current turn, then send response.create with previous_response_id and the new input",
+		})
 	default:
 		return nil, "", api.NewAPIError(api.ErrCodeInvalidRequest, fmt.Sprintf("unsupported websocket request type: %s", eventType), api.ErrorTypeInvalidRequest)
 	}

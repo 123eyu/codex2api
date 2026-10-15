@@ -3935,6 +3935,12 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendError(c, validator.ToAPIError())
 		return
 	}
+	if upstreamChannel == database.UpstreamChannelCodex && strictResponsesCompatibilityRequested(c) {
+		if compatibilityErr := validateCodexRelayResponsesCompatibility(rawBody); compatibilityErr != nil {
+			api.SendError(c, compatibilityErr)
+			return
+		}
+	}
 
 	// 检查请求体大小
 	if len(rawBody) > security.MaxRequestBodySize {
@@ -5944,6 +5950,12 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	if !result.Valid {
 		api.SendError(c, validator.ToAPIError())
 		return
+	}
+	if requestUpstreamChannel(c) == database.UpstreamChannelCodex && strictResponsesCompatibilityRequested(c) {
+		if compatibilityErr := validateCodexRelayResponsesCompatibility(rawBody); compatibilityErr != nil {
+			api.SendError(c, compatibilityErr)
+			return
+		}
 	}
 
 	if len(rawBody) > security.MaxRequestBodySize {

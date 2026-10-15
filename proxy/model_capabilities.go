@@ -21,7 +21,8 @@ import (
 var codexCapabilityKinds = map[string]string{
 	"supports_search_tool": "bool", "use_responses_lite": "bool", "prefer_websockets": "bool",
 	"supports_parallel_tool_calls": "bool", "support_verbosity": "bool",
-	"apply_patch_tool_type": "string", "comp_hash": "string", "tool_mode": "string",
+	"experimental_supported_tools": "list",
+	"apply_patch_tool_type":        "string", "comp_hash": "string", "tool_mode": "string",
 	"default_reasoning_level": "string", "default_verbosity": "string",
 	"context_window": "number", "max_context_window": "number", "max_output_tokens": "number",
 	"input_modalities": "list", "supported_reasoning_levels": "list", "service_tiers": "list",

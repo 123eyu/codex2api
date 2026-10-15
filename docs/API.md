@@ -190,7 +190,11 @@ Messages 的 `tool_use.input` 必须使用对象，因此自由文本工具输�
 
 **端点:** `POST /v1/responses`
 
-**说明:** Codex 原生 Responses 接口，直接透传，无需协议翻译。
+**说明:** Codex Responses 兼容接口。网关会为 Codex 上游做必要的输入规范化；这不是对官方 Responses 全部字段的无条件原样透传。
+
+完整的分阶段边界与后续实现顺序见 [Responses 兼容性说明](RESPONSES_COMPATIBILITY.md)。
+
+默认模式保持现有兼容行为。若客户端需要 fail-closed 检查，可发送 `X-Codex2API-Strict-Compatibility: true`，或设置 `CODEX_STRICT_RESPONSES_COMPAT=true`。当请求包含当前 Codex relay 无法原样保留的 Responses 字段（包括 `max_output_tokens`、采样/惩罚参数、`background`、`conversation`、`context_management`、`metadata`、`stream_options`、`truncation`、`disable_response_storage`、`prompt_cache_retention`、`safety_identifier` 和 `verbosity`）时，网关返回 `400 unsupported_feature` 和字段列表，而不是静默丢弃。`reasoning_effort`、`response_format` 等有明确转换路径的字段不在此列表中。
 
 **请求示例:**
 
@@ -229,7 +233,7 @@ Messages 的 `tool_use.input` 必须使用对象，因此自由文本工具输�
 
 OpenAI Responses 中转账号默认仍用 HTTP POST `/v1/responses`。账号设置 `responses_upstream_transport=websocket` 后，这个账号的 Responses 出站改为 WebSocket：地址由 Base URL 换成 `ws`/`wss`，路径仍是 `/v1/responses`，握手使用该账号的 API Key 和 `OpenAI-Beta: responses_websockets=2026-02-06`，上行帧为 `response.create`。这个开关只作用于 OpenAI Responses 中转账号，和全局 `codex_force_websocket` 无关；Grok、Antigravity、Claude 不会走这条连接。握手失败返回上游状态或传输错误，不会改回 HTTP。生图请求仍走 HTTP。连接按账号、Base URL 和 API Key 隔离；带 `previous_response_id` 时优先复用产出该响应的连接。客户端 `GET /v1/responses` 也会选中已打开该开关的中转账号。
 
-原生 WebSocket 入口为 `GET /v1/responses`。通过校验与 API Key 限制后，较新的同 API Key、同渠道/分组路由作用域、同会话请求会抢占仍在运行的旧请求，并先取消旧上游以释放账号与并发位。`stream_id` 是抢占键的一部分，因此多路复用的不同流互不影响；不同 API Key 或不同路由作用域也不会互相取消。只有 `prompt_cache_key`、显式会话头、`previous_response_id`、turn state、专用 affinity key 或可稳定派生的内容会话存在时才启用，纯 API Key 兜底身份不会把无关请求合并。Redis 模式支持跨实例抢占，Memory 模式仅在当前进程内生效。
+原生 WebSocket 入口为 `GET /v1/responses`。客户端每轮发送 `response.create`；当前网关明确拒绝 `response.append` 和官方 GPT-6 `response.steer`，返回 `400 unsupported_feature`，不会伪装成已完成的 steer。需要中途改向时，应等待当前轮结束后用 `previous_response_id` 发起新的 `response.create`。通过校验与 API Key 限制后，较新的同 API Key、同渠道/分组路由作用域、同会话请求会抢占仍在运行的旧请求，并先取消旧上游以释放账号与并发位。`stream_id` 目前只参与网关侧抢占键和缓存隔离，不承诺同一上游 WebSocket 上的官方并行 lane 语义；不同 API Key 或不同路由作用域也不会互相取消。只有 `prompt_cache_key`、显式会话头、`previous_response_id`、turn state、专用 affinity key 或可稳定派生的内容会话存在时才启用，纯 API Key 兜底身份不会把无关请求合并。Redis 模式支持跨实例抢占，Memory 模式仅在当前进程内生效。
 
 **响应示例:**
 
