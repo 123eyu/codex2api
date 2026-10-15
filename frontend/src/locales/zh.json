@@ -198,7 +198,7 @@
     "streamInterrupted": "流已中断，未收到成功完成事件。"
   },
   "nav": {
-    "qualityTest": "降智检测",
+    "qualityTest": "质量测试",
     "dashboard": "仪表盘",
     "accounts": "账号管理",
     "grokAccounts": "Grok",
@@ -214,7 +214,8 @@
     "images": "生图工作台",
     "promptFilter": "Prompt 检查",
     "modelPricing": "模型定价",
-    "payloadRules": "请求体重写"
+    "payloadRules": "请求体重写",
+    "intelligenceCheck": "降智检测"
   },
   "antigravity": {
     "pageTitle": "Antigravity 账号",
@@ -2892,7 +2893,9 @@
     "mediaUnitsImage": "{{count}} 张图片",
     "mediaUnitsVideo": "{{count}} 秒视频",
     "videoSettlesOnDone": "完成时结算",
-    "mediaUnpricedHint": "该媒体模型没有上游单位成本，请到模型定价页补填"
+    "mediaUnpricedHint": "该媒体模型没有上游单位成本，请到模型定价页补填",
+    "internalIntelligenceCheck": "降智检测",
+    "internalIntelligenceCheckTooltip": "使用已保存检测配置发起的内部请求"
   },
   "promptFilter": {
     "title": "Prompt 检查",

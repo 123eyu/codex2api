@@ -1,3 +1,5 @@
+import AccountIntelligenceBar, { AccountIntelligenceActions } from "./AccountIntelligenceBar";
+import type { IntelligenceBar } from "../lib/intelligenceCheck";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import {
@@ -185,6 +187,8 @@ export interface AccountDetailSheetProps {
   account: AccountRow | null;
   groups: AccountGroup[];
   healthBuckets?: AccountHealthBucket[];
+  intelligenceBar?: IntelligenceBar;
+  intelligenceError?: boolean;
   sequence?: number;
   usageSlot?: ReactNode;
   providerSlot?: ReactNode;
@@ -220,6 +224,8 @@ export default function AccountDetailSheet({
   account,
   groups,
   healthBuckets,
+  intelligenceBar,
+  intelligenceError,
   sequence,
   usageSlot,
   providerSlot,
@@ -460,11 +466,14 @@ export default function AccountDetailSheet({
             <Section title={t("accounts.status")}>
               <div className="space-y-3 rounded-xl border border-border bg-card p-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <StatusBadge
-                    status={getAccountStatusBadgeStatus(account)}
-                    detail={rateWindow ?? undefined}
-                    errorMessage={account.error_message}
-                  />
+                  <div className="inline-flex shrink-0 items-center gap-1.5">
+                    <StatusBadge
+                      status={getAccountStatusBadgeStatus(account)}
+                      detail={rateWindow ?? undefined}
+                      errorMessage={account.error_message}
+                    />
+                    <AccountIntelligenceActions bar={intelligenceBar} accountID={account.id} accountName={account.email || account.name} />
+                  </div>
                   {Math.max(account.active_requests ?? 0, account.occupied_requests ?? 0) > 0 && (
                     <span className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
                       <span className="size-1.5 animate-pulse rounded-full bg-blue-500" />
@@ -508,6 +517,7 @@ export default function AccountDetailSheet({
                     {t("accounts.healthBarLabel")}
                   </div>
                   <AccountHealthBar buckets={healthBuckets} />
+                  <AccountIntelligenceBar bar={intelligenceBar} accountID={account.id} accountName={account.email || account.name} error={intelligenceError} />
                 </div>
 
                 {account.status === "error" && account.error_message ? (

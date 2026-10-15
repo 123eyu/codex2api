@@ -563,7 +563,7 @@ func (m *Manager) AcquireConnection(
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, error) {
 	kind := requestConnectionCapacityKind(ctx)
-	key := m.poolKey(account.ID(), wsURL, sessionKey, effectiveProxyURL(account, proxyOverride))
+	key := m.poolKey(account.ID(), wsURL, sessionKey, requestProxyKey(ctx, account, proxyOverride))
 	lock, releaseKeyLock := m.keyLock(key)
 	defer releaseKeyLock()
 	accountLock, releaseAccountLock := m.accountLock(account.ID())
@@ -717,7 +717,7 @@ func (m *Manager) tryAcquireBusyOverflow(
 	headers http.Header,
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, bool) {
-	proxyURL := effectiveProxyURL(account, proxyOverride)
+	proxyURL := requestProxyKey(ctx, account, proxyOverride)
 	kind := requestConnectionCapacityKind(ctx)
 	accountLimit := connectionLimit(kind)
 	accountLock, releaseAccountLock := m.accountLock(account.ID())
@@ -836,7 +836,7 @@ func (m *Manager) AcquireReusableConnection(
 	headers http.Header,
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, string, error) {
-	proxyURL := effectiveProxyURL(account, proxyOverride)
+	proxyURL := requestProxyKey(ctx, account, proxyOverride)
 	kind := requestConnectionCapacityKind(ctx)
 	accountLimit := connectionLimit(kind)
 	if slots < 1 || slots > statelessConnectionSlots() {
@@ -1303,7 +1303,7 @@ func (m *Manager) ReplaceConnection(
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, error) {
 	// 先移除旧连接
-	m.RemoveConnection(account.ID(), wsURL, sessionKey, effectiveProxyURL(account, proxyOverride))
+	m.RemoveConnection(account.ID(), wsURL, sessionKey, requestProxyKey(ctx, account, proxyOverride))
 
 	// 创建新连接
 	return m.AcquireConnection(ctx, account, wsURL, sessionKey, headers, proxyOverride)

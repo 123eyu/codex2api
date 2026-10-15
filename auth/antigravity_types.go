@@ -159,7 +159,7 @@ func (a *Account) applyAntigravitySchedulerOverrideLocked(baseLimit int64, tier 
 		return tier, limit, available
 	}
 	// Administrative fences are never bypassed by the OAuth refresh escape hatch.
-	if atomic.LoadInt32(&a.Disabled) != 0 || atomic.LoadInt32(&a.DispatchPaused) != 0 || a.Status == StatusError {
+	if atomic.LoadInt32(&a.Disabled) != 0 || (atomic.LoadInt32(&a.DispatchPaused) != 0 || atomic.LoadInt32(&a.IntelligencePaused) != 0) || a.Status == StatusError {
 		return tier, limit, false
 	}
 	recoverUnauthorized := a.antigravityUnauthorizedRecoveryLocked(time.Now())

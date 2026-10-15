@@ -415,13 +415,14 @@ type Account struct {
 	ActiveRequests atomic.Int64 // 当前正在执行的请求数
 	// OccupiedRequests 包含当前请求和成功结束后为原会话保留的缓冲槽。
 	// 调度准入读取它；管理端仍分别展示真实在途与含缓冲占用。
-	OccupiedRequests atomic.Int64
-	TotalRequests    atomic.Int64 // 累计总请求数
-	LastUsedAt       atomic.Int64 // 最后使用时间（UnixNano）
-	Disabled         int32        // 原子标志，1 = 立即不可调度（401 时瞬间置位，无需等锁）
-	AddedAt          atomic.Int64 // 加入号池的时间（UnixNano），用于过期清理
-	Locked           int32        // 原子标志，1 = 锁定，自动清理跳过此账号
-	DispatchPaused   int32        // 原子标志，1 = 禁用调度选择，不影响刷新/探针/清理
+	OccupiedRequests   atomic.Int64
+	TotalRequests      atomic.Int64 // 累计总请求数
+	LastUsedAt         atomic.Int64 // 最后使用时间（UnixNano）
+	Disabled           int32        // 原子标志，1 = 立即不可调度（401 时瞬间置位，无需等锁）
+	AddedAt            atomic.Int64 // 加入号池的时间（UnixNano），用于过期清理
+	Locked             int32        // 原子标志，1 = 锁定，自动清理跳过此账号
+	IntelligencePaused int32        // 独立的持久化降智检测暂停；不修改人工 enabled
+	DispatchPaused     int32        // 原子标志，1 = 禁用调度选择，不影响刷新/探针/清理
 
 	// per-account 调度配置（nil = 跟随默认）
 	ScoreBiasOverride       *int64
@@ -1195,7 +1196,7 @@ func (a *Account) premium5hUsageUrgencyBonusLocked(now time.Time) float64 {
 	if a.AccessToken == "" || a.Status == StatusError || a.HealthTier == HealthTierBanned {
 		return 0
 	}
-	if atomic.LoadInt32(&a.DispatchPaused) != 0 {
+	if atomic.LoadInt32(&a.DispatchPaused) != 0 || atomic.LoadInt32(&a.IntelligencePaused) != 0 {
 		return 0
 	}
 	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
@@ -1240,7 +1241,7 @@ func (a *Account) premium7dUsageUrgencyBonusLocked(now time.Time) float64 {
 	if a.AccessToken == "" || a.Status == StatusError || a.HealthTier == HealthTierBanned {
 		return 0
 	}
-	if atomic.LoadInt32(&a.DispatchPaused) != 0 {
+	if atomic.LoadInt32(&a.DispatchPaused) != 0 || atomic.LoadInt32(&a.IntelligencePaused) != 0 {
 		return 0
 	}
 	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
@@ -1437,7 +1438,7 @@ func (a *Account) IsAvailable() bool {
 	if atomic.LoadInt32(&a.Disabled) != 0 {
 		return false
 	}
-	if atomic.LoadInt32(&a.DispatchPaused) != 0 {
+	if atomic.LoadInt32(&a.DispatchPaused) != 0 || atomic.LoadInt32(&a.IntelligencePaused) != 0 {
 		return false
 	}
 
@@ -1957,7 +1958,7 @@ func (a *Account) usageLimitContinuationEligibleLocked(now time.Time) bool {
 	if !a.ignoreUsageLimitStatus {
 		return false
 	}
-	if atomic.LoadInt32(&a.Disabled) != 0 || atomic.LoadInt32(&a.DispatchPaused) != 0 {
+	if atomic.LoadInt32(&a.Disabled) != 0 || (atomic.LoadInt32(&a.DispatchPaused) != 0 || atomic.LoadInt32(&a.IntelligencePaused) != 0) {
 		return false
 	}
 	if a.Status == StatusError || a.healthTierLocked() == HealthTierBanned ||
@@ -1994,7 +1995,7 @@ func (a *Account) UsageLimitContinuationEligible() bool {
 // account is blocked specifically by a usage-limit observation. It lets API
 // handlers return 429 instead of misreporting an exhausted pool as 503.
 func (a *Account) FreshDispatchUsageLimited() bool {
-	if a == nil || atomic.LoadInt32(&a.Disabled) != 0 || atomic.LoadInt32(&a.DispatchPaused) != 0 {
+	if a == nil || atomic.LoadInt32(&a.Disabled) != 0 || (atomic.LoadInt32(&a.DispatchPaused) != 0 || atomic.LoadInt32(&a.IntelligencePaused) != 0) {
 		return false
 	}
 	a.mu.RLock()
@@ -2153,7 +2154,7 @@ func (a *Account) ModelCatalogEligible() bool {
 		return false
 	}
 	if a.IsAntigravityAPI() {
-		if atomic.LoadInt32(&a.DispatchPaused) != 0 {
+		if atomic.LoadInt32(&a.DispatchPaused) != 0 || atomic.LoadInt32(&a.IntelligencePaused) != 0 {
 			return false
 		}
 		a.mu.RLock()
@@ -2164,7 +2165,7 @@ func (a *Account) ModelCatalogEligible() bool {
 		}
 		return a.hasDispatchCredentialLocked()
 	}
-	if atomic.LoadInt32(&a.DispatchPaused) != 0 {
+	if atomic.LoadInt32(&a.DispatchPaused) != 0 || atomic.LoadInt32(&a.IntelligencePaused) != 0 {
 		return false
 	}
 	a.mu.RLock()
@@ -2431,7 +2432,7 @@ func (a *Account) ShouldActivate5hWindow(now time.Time) bool {
 	if a == nil {
 		return false
 	}
-	if atomic.LoadInt32(&a.Disabled) != 0 || atomic.LoadInt32(&a.DispatchPaused) != 0 {
+	if atomic.LoadInt32(&a.Disabled) != 0 || (atomic.LoadInt32(&a.DispatchPaused) != 0 || atomic.LoadInt32(&a.IntelligencePaused) != 0) {
 		return false
 	}
 	if now.IsZero() {
@@ -5458,6 +5459,11 @@ func (s *Store) Init(ctx context.Context) error {
 
 // loadFromDB 从数据库加载账号
 func (s *Store) loadFromDB(ctx context.Context) error {
+	var pauseErr error
+	ctx, pauseErr = s.withIntelligencePauses(ctx)
+	if pauseErr != nil {
+		return pauseErr
+	}
 	rows, err := s.db.ListActive(ctx)
 	if err != nil {
 		return fmt.Errorf("从数据库加载账号失败: %w", err)
@@ -5710,6 +5716,9 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	}
 	if !row.Enabled {
 		atomic.StoreInt32(&account.DispatchPaused, 1)
+	}
+	if s.intelligencePaused(ctx, row.ID) {
+		atomic.StoreInt32(&account.IntelligencePaused, 1)
 	}
 	account.CreditEnabled = row.CreditEnabled
 	account.CreditSkipUsageWindow = row.CreditSkipUsageWindow
@@ -6000,6 +6009,11 @@ func (s *Store) reconcileDispatchState(ctx context.Context) (bool, error) {
 	}
 	s.dispatchReconciledAt.Store(now.UnixNano())
 
+	var pauseErr error
+	ctx, pauseErr = s.withIntelligencePauses(ctx)
+	if pauseErr != nil {
+		return false, pauseErr
+	}
 	rows, err := s.db.ListActive(ctx)
 	if err != nil {
 		return false, fmt.Errorf("reconcile dispatch accounts: %w", err)
@@ -6066,6 +6080,14 @@ func (s *Store) reconcileDispatchState(ctx context.Context) (bool, error) {
 			paused := int32(0)
 			if !row.Enabled {
 				paused = 1
+			}
+			qualityPaused := int32(0)
+			if s.intelligencePaused(ctx, row.ID) {
+				qualityPaused = 1
+			}
+			if atomic.SwapInt32(&acc.IntelligencePaused, qualityPaused) != qualityPaused {
+				s.fastSchedulerUpdate(acc)
+				changed = true
 			}
 			if atomic.SwapInt32(&acc.DispatchPaused, paused) != paused {
 				changed = true
@@ -6527,7 +6549,7 @@ func accountOccupiedRequests(acc *Account) int64 {
 }
 
 func accountDispatchBlocked(acc *Account) bool {
-	return acc == nil || atomic.LoadInt32(&acc.Disabled) != 0 || atomic.LoadInt32(&acc.DispatchPaused) != 0
+	return acc == nil || atomic.LoadInt32(&acc.Disabled) != 0 || (atomic.LoadInt32(&acc.DispatchPaused) != 0 || atomic.LoadInt32(&acc.IntelligencePaused) != 0)
 }
 
 func reserveOccupiedAccountSlot(acc *Account, limit int64) bool {
@@ -6738,7 +6760,7 @@ func (s *Store) accountLazySelectable(acc *Account) bool {
 	if atomic.LoadInt32(&acc.Disabled) != 0 {
 		return false
 	}
-	if atomic.LoadInt32(&acc.DispatchPaused) != 0 {
+	if atomic.LoadInt32(&acc.DispatchPaused) != 0 || atomic.LoadInt32(&acc.IntelligencePaused) != 0 {
 		return false
 	}
 
@@ -7421,7 +7443,7 @@ func (s *Store) affinityAccountStillHealthy(accountID int64) bool {
 	if target == nil {
 		return false
 	}
-	if atomic.LoadInt32(&target.Disabled) != 0 || atomic.LoadInt32(&target.DispatchPaused) != 0 {
+	if atomic.LoadInt32(&target.Disabled) != 0 || (atomic.LoadInt32(&target.DispatchPaused) != 0 || atomic.LoadInt32(&target.IntelligencePaused) != 0) {
 		return false
 	}
 	target.mu.RLock()
@@ -8670,7 +8692,7 @@ func (s *Store) EnabledGrokAccounts() []*Account {
 		if a == nil || !a.IsGrokAPI() {
 			continue
 		}
-		if atomic.LoadInt32(&a.DispatchPaused) != 0 {
+		if atomic.LoadInt32(&a.DispatchPaused) != 0 || atomic.LoadInt32(&a.IntelligencePaused) != 0 {
 			continue
 		}
 		out = append(out, a)
@@ -9913,6 +9935,7 @@ func (s *Store) ApplyAccountEnabled(dbID int64, enabled bool) bool {
 	if acc == nil {
 		return false
 	}
+	atomic.StoreInt32(&acc.IntelligencePaused, 0) // DB manual write revoked detection ownership.
 	if enabled {
 		atomic.StoreInt32(&acc.DispatchPaused, 0)
 	} else {
@@ -11798,7 +11821,7 @@ func (s *Store) HealthCountsNonBlocking() (available int, total int, complete bo
 		if acc == nil {
 			continue
 		}
-		if atomic.LoadInt32(&acc.Disabled) != 0 || atomic.LoadInt32(&acc.DispatchPaused) != 0 {
+		if atomic.LoadInt32(&acc.Disabled) != 0 || (atomic.LoadInt32(&acc.DispatchPaused) != 0 || atomic.LoadInt32(&acc.IntelligencePaused) != 0) {
 			continue
 		}
 		if !acc.mu.TryRLock() {

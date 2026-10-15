@@ -46,22 +46,25 @@ import (
 
 // Handler 管理后台 API 处理器
 type Handler struct {
-	imageQueue         *imageJobQueue
-	qualityTestContext context.Context
-	qualityTestWG      sync.WaitGroup
-	store              *auth.Store
-	modelRefreshFuncs  map[string]channelModelRefreshFunc // nil = 各渠道默认实现；测试注入用
-	proxyRiskJobsMu    sync.RWMutex
-	proxyRiskJobs      map[string]*proxyRiskScoringJob
-	cache              cache.TokenCache
-	authCacheProxy     *proxy.Handler
-	db                 *database.DB
-	cacheCfgStore      responseCacheSettingsStore
-	rateLimiter        *proxy.RateLimiter
-	systemUpdate       *systemUpdater
-	systemUpdateOnce   sync.Once
-	refreshAccount     func(context.Context, int64) error
-	probeUsage         func(context.Context, *auth.Account) error
+	intelligenceDeviceConfig *proxy.DeviceProfileConfig
+	intelligenceOnce         sync.Once
+	intelligenceWG           sync.WaitGroup
+	imageQueue               *imageJobQueue
+	qualityTestContext       context.Context
+	qualityTestWG            sync.WaitGroup
+	store                    *auth.Store
+	modelRefreshFuncs        map[string]channelModelRefreshFunc // nil = 各渠道默认实现；测试注入用
+	proxyRiskJobsMu          sync.RWMutex
+	proxyRiskJobs            map[string]*proxyRiskScoringJob
+	cache                    cache.TokenCache
+	authCacheProxy           *proxy.Handler
+	db                       *database.DB
+	cacheCfgStore            responseCacheSettingsStore
+	rateLimiter              *proxy.RateLimiter
+	systemUpdate             *systemUpdater
+	systemUpdateOnce         sync.Once
+	refreshAccount           func(context.Context, int64) error
+	probeUsage               func(context.Context, *auth.Account) error
 
 	codexUsageRefreshRunning atomic.Bool
 
@@ -1226,6 +1229,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.DELETE("/modeltrace/bank", h.ResetModelTraceBank)
 	api.GET("/accounts/:id/quality-test/options", h.QualityTestOptions)
 	api.POST("/accounts/:id/quality-test", h.CreateQualityTestJob)
+	h.registerIntelligenceCheckRoutes(api)
 	api.GET("/quality-tests", h.ListQualityTests)
 	api.GET("/quality-tests/:id", h.GetQualityTest)
 	api.POST("/quality-tests/:id/cancel", h.CancelQualityTest)

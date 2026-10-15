@@ -466,6 +466,7 @@ func main() {
 		log.Fatalf("Initialize image maintenance: %v", err)
 	}
 	adminHandler.StartPromptIntelligence(backgroundCtx)
+	adminHandler.StartIntelligenceChecks(backgroundCtx, deviceCfg)
 	adminHandler.RegisterRoutes(r)
 
 	// 管理后台前端静态文件
@@ -670,6 +671,7 @@ func main() {
 	adminHandler.WaitAutoResetCredits()
 	adminHandler.WaitAutoActivate5hWindow()
 	adminHandler.WaitQualityTests()
+	adminHandler.WaitIntelligenceChecks()
 	wsKeepalive.Stop()
 	wsrelay.ShutdownExecutor()
 	if !proxy.DrainResponseCacheBackendWrites(2 * time.Second) {

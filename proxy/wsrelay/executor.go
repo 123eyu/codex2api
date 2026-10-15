@@ -191,7 +191,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" {
 		wc, pr, poolSessionID, err2 = e.acquireContinuation(ctx, websocketContinuation{
 			responseID: prevRespID, accountID: account.ID(), apiKey: apiKey, identity: websocketClientIdentity(headers),
-			model: gjson.GetBytes(wsBody, "model").String(), url: wsURL, proxyURL: effectiveProxyURL(account, proxyOverride),
+			model: gjson.GetBytes(wsBody, "model").String(), url: wsURL, proxyURL: requestProxyKey(ctx, account, proxyOverride),
 		})
 		if err2 != nil {
 			return nil, err2
