@@ -1952,9 +1952,12 @@ func excludeAntigravityAccountsFilter(inner auth.AccountFilter) auth.AccountFilt
 	}
 }
 
-func relayOnlyAccountFilter(inner auth.AccountFilter) auth.AccountFilter {
+func responsesContinuationRelayFilter(inner auth.AccountFilter) auth.AccountFilter {
 	return func(account *auth.Account) bool {
-		if account == nil || !account.IsRelayStyle() {
+		// Only the native Responses relay retains previous_response_id for its
+		// own upstream to resolve. Other adapters cannot recover a missing local
+		// snapshot merely because they are relay-style accounts.
+		if account == nil || !account.IsOpenAIResponsesAPI() {
 			return false
 		}
 		return inner == nil || inner(account)
@@ -1962,7 +1965,7 @@ func relayOnlyAccountFilter(inner auth.AccountFilter) auth.AccountFilter {
 }
 
 func responseCachePreparationFailure(prepared responsesBodyPreparation) (status int, reason string, unavailable bool) {
-	if prepared.PreviousResponseID == "" || prepared.Bypassed || prepared.CacheLookup.Kind == responseCacheLookupHit {
+	if prepared.PreviousResponseID == "" || prepared.CacheLookup.Kind == responseCacheLookupHit {
 		return 0, "", false
 	}
 	switch prepared.CacheLookup.Kind {
@@ -4034,7 +4037,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	}
 	accountFilter = h.withModelCooldownFilter(c.Request.Context(), effectiveModel, accountFilter)
 	if continuationUnavailable {
-		accountFilter = relayOnlyAccountFilter(accountFilter)
+		accountFilter = responsesContinuationRelayFilter(accountFilter)
 	}
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
 	accountFilter = excludeClaudeAccountsFilter(accountFilter)
@@ -6040,7 +6043,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	accountFilter = h.withModelCooldownFilter(c.Request.Context(), effectiveModel, accountFilter)
 	accountFilter = excludeClaudeAccountsFilter(accountFilter)
 	if continuationUnavailable {
-		accountFilter = relayOnlyAccountFilter(accountFilter)
+		accountFilter = responsesContinuationRelayFilter(accountFilter)
 	}
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)

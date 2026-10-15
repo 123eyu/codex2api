@@ -2313,19 +2313,28 @@ func prepareResponsesBodyForOwnerDetailed(rawBody []byte, owner string) response
 	prevID := gjson.GetBytes(rawBody, "previous_response_id").String()
 	preparation := responsesBodyPreparation{PreviousResponseID: prevID}
 	if prevID != "" {
+		// Codex HTTP removes previous_response_id before sending upstream. Every
+		// reference therefore needs an owner-scoped snapshot, even when the new
+		// input is plain text or also contains complete tool call/result pairs.
+		// Otherwise a cache miss silently turns a continuation into a new turn.
+		preparation.RequiresLocalContext = true
+		preparation.CacheLookup = getResponseCacheForReplay(owner, prevID)
 		currentInput := gjson.GetBytes(rawBody, "input")
 		if currentInput.IsArray() && inputHasToolCallContext(currentInput) {
+			// Avoid duplicating call IDs already replayed by the client. This only
+			// bypasses input expansion; it does not prove the referenced response.
 			preparation.Bypassed = true
-		} else {
-			preparation.RequiresLocalContext = currentInput.IsArray() && inputHasFunctionCallOutput(currentInput)
-			preparation.CacheLookup = getResponseCacheForReplay(owner, prevID)
 		}
+	}
+	cachedItems := preparation.CacheLookup.Items
+	if preparation.Bypassed {
+		cachedItems = nil
 	}
 	preparedBody, expandedInputRaw := prepareResponsesBodyWithOptions(rawBody, responsesBodyPrepareOptions{
 		forceStoreFalse:        true,
 		expandPreviousResponse: false,
 		cacheOwner:             owner,
-		cachedResponseItems:    preparation.CacheLookup.Items,
+		cachedResponseItems:    cachedItems,
 	})
 	preparation.Body = preparedBody
 	preparation.ExpandedInputRaw = expandedInputRaw
@@ -3528,9 +3537,13 @@ func normalizeResponsesToolSchema(rawTool any, descDefaults map[string]string) {
 	if !ok || isReservedCodexTool(toolMap) {
 		return
 	}
-	if toolType, _ := toolMap["type"].(string); toolType != "" {
-		if defaultDesc, ok := descDefaults[toolType]; ok {
-			if desc, _ := toolMap["description"].(string); desc == "" {
+	// Defaults describe user-defined tools by name. Builtin tool types have
+	// their own wire schemas (server-executed tool_search forbids description).
+	// Explicit fields, including empty or invalid values, belong to the client.
+	toolType, _ := toolMap["type"].(string)
+	if toolType == "function" || toolType == "custom" {
+		if _, exists := toolMap["description"]; !exists {
+			if defaultDesc, ok := descDefaults[strings.TrimSpace(firstNonEmptyAnyString(toolMap["name"]))]; ok {
 				toolMap["description"] = defaultDesc
 			}
 		}

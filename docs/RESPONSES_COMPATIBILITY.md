@@ -4,7 +4,7 @@ Codex2API 的 Responses 入口同时服务 Codex 客户端、OpenAI SDK 和不�
 
 ## 请求字段与严格模式
 
-Responses 中转保留原生 `reasoning.effort`、`text.format`、JSON Schema 约束及大整数，原生 JSON 模式不会自动改写用户提示。`reasoning_effort`、`response_format` 等兼容别名仍有显式转换；原生字段优先。HTTP 出站会删除仅属于 WebSocket 信封的顶层 `type`、`stream_id`，不会删除嵌套输入或工具里的同名字段。
+Responses 中转保留原生 `reasoning.effort`、`text.format`、JSON Schema 约束及大整数，原生 JSON 模式不会自动改写用户提示。`reasoning_effort`、`response_format` 等兼容别名仍有显式转换；原生字段优先。HTTP 出站会删除仅属于 WebSocket 信封的顶层 `type`、`stream_id`。网关内部使用命名流标识进行分流，最终发往 OAuth / Responses relay 的 WS 帧也不携带网关 `stream_id`；嵌套输入或 schema 里的同名字段仍保留。内置 `tool_search` 不会被自动补入其上游协议不接受的 `description`，用户显式字段由上游验证。
 
 ChatGPT/Codex 上游需要额外规范化，部分 Responses 字段或 schema 约束无法原样保留。客户端可发送：
 
@@ -21,6 +21,12 @@ X-Codex2API-Strict-Compatibility: true
 - 工具或结构化输出 schema 会被 Codex 清洗改变时拒绝；超过 128 个工具、会被删除的工具声明、会被改写的搜索配置也明确报错。`additional_tools` 中的工具同样检查，保留工具命名空间沿用原样透传规则。检查受工具累计数和错误数预算限制；原生 Codex 路径会丢失精度的 schema 数字也拒绝。
 
 这是一套已知有损转换门禁，**不是完整 schema 验证器或全字段无损证明**。账号映射、管理员 Payload Rules、上游模型限制和未知嵌套扩展仍可能影响最终行为。启用严格模式可能使过去被自动修复的请求改为报错，应据字段列表修正请求或改用支持该语义的上游。
+
+## HTTP 续链的恢复要求
+
+原生 Codex HTTP 出站需要展开并删除 `previous_response_id`。每个非空父响应引用都必须在当前请求归属的缓存中得到证明；缓存缺失或过期返回 409，后端故障返回 503，不会丢弃引用后继续返回一轮没有历史的成功响应。即使新输入自带完整工具调用/结果，也不能绕过父引用校验；命中后只跳过重复历史拼接。
+
+当前 HTTP 缓存主要保存工具上下文，不为普通消息新增会话存储。普通文本父轮的后续 HTTP 请求应发送完整历史并省略 `previous_response_id`；需要增量续链时使用经过验证的 WS 路径。原生 Responses relay 可把父 ID 交给自己的上游恢复，不套用 Codex 的本地缓存缺失限制；其他仅做协议翻译的渠道不能因此自动获得服务端父响应存储能力。
 
 ## WebSocket 流与续链
 
@@ -50,7 +56,7 @@ X-Codex2API-Strict-Compatibility: true
 
 ## 本地验证与真实验收
 
-测试使用假账号与 loopback 上游，检查 HTTP/WS 派发后的字段、事件、工具回传、并行与 FIFO、跨流历史、断线释放、缓存隔离及故障错误。共享缓存测试覆盖后端接口契约，不等同于独立 Redis 服务的集成验收。测试不会访问真实账户或产生模型调用费用。
+自动化回归使用假账号与 loopback 上游，检查 HTTP/WS 派发后的字段、事件、工具回传、并行与 FIFO、跨流历史、断线释放、缓存隔离及故障错误。共享缓存测试覆盖后端接口契约，不等同于独立 Redis 服务的集成验收。这些自动化回归不会访问真实账户或产生模型调用费用；真实账号验收独立进行并记录实际使用的模型及工具。
 
 真实验收仍应对同一个支持该功能的上游进行官方 SDK 直连与网关差分，比较事件序列、终态、工具配对、约束、资源归属和错误；模型升级、凭据变化及缓存/协议切换后应重验。本次代码和本地测试不等于 VPS 已部署或真实上游已全功能通过。
 
