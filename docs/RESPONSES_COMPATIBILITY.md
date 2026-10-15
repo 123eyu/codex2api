@@ -60,6 +60,6 @@ HTTP Responses/Compact 在处理原始 JSON 时拒绝重复的顶层 `input` 或
 
 自动化回归使用假账号与 loopback 上游，检查 HTTP/WS 派发后的字段、事件、工具回传、并行与 FIFO、跨流历史、断线释放、缓存隔离及故障错误。共享缓存测试覆盖后端接口契约，不等同于独立 Redis 服务的集成验收。这些自动化回归不会访问真实账户或产生模型调用费用；真实账号验收独立进行并记录实际使用的模型及工具。
 
-真实验收仍应对同一个支持该功能的上游进行官方 SDK 直连与网关差分，比较事件序列、终态、工具配对、约束、资源归属和错误；模型升级、凭据变化及缓存/协议切换后应重验。本次代码和本地测试不等于 VPS 已部署或真实上游已全功能通过。
+真实验收仍应对同一个支持该功能的上游进行官方 SDK 直连与网关差分，比较事件序列、终态、工具配对、约束、资源归属和错误；模型升级、凭据变化及缓存/协议切换后应重验。本地自动化回归不代表实际部署或上游全部能力已验证。
 
 官方契约参考：[WebSocket 模式](https://developers.openai.com/api/docs/guides/websocket-mode)、[Steering](https://developers.openai.com/api/docs/guides/steering)、[Codex 模型描述结构](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs)。
