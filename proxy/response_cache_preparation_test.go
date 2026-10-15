@@ -47,8 +47,8 @@ func TestPrepareResponsesBodyDetailedCompleteContextStillRequiresParent(t *testi
 
 	raw := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_remote","input":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`)
 	got := prepareResponsesBodyForOwnerDetailed(raw, "key:1")
-	if !got.Bypassed || !got.RequiresLocalContext {
-		t.Fatalf("preparation bypass=%v required=%v, want expansion bypass with required parent proof", got.Bypassed, got.RequiresLocalContext)
+	if got.Bypassed || !got.RequiresLocalContext {
+		t.Fatalf("preparation bypass=%v required=%v, want required parent proof before any replay bypass", got.Bypassed, got.RequiresLocalContext)
 	}
 	if _, gets := backend.counts(); gets != 1 {
 		t.Fatalf("backend gets = %d, want parent lookup before bypassing expansion", gets)

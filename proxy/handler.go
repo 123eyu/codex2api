@@ -1965,7 +1965,13 @@ func responsesContinuationRelayFilter(inner auth.AccountFilter) auth.AccountFilt
 }
 
 func responseCachePreparationFailure(prepared responsesBodyPreparation) (status int, reason string, unavailable bool) {
-	if prepared.PreviousResponseID == "" || prepared.CacheLookup.Kind == responseCacheLookupHit {
+	if prepared.PreviousResponseID == "" {
+		return 0, "", false
+	}
+	if prepared.InputReplayConflict {
+		return http.StatusConflict, "ambiguous_tool_history", true
+	}
+	if prepared.CacheLookup.Kind == responseCacheLookupHit {
 		return 0, "", false
 	}
 	switch prepared.CacheLookup.Kind {
@@ -3857,6 +3863,10 @@ func (h *Handler) Responses(c *gin.Context) {
 	rawBody, err := readRawRequestBody(c)
 	if err != nil {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
+		return
+	}
+	if contextErr := responsesHTTPContextEnvelopeError(rawBody); contextErr != nil {
+		api.SendError(c, contextErr)
 		return
 	}
 	h.capturePromptRequestIngress(c, rawBody)
@@ -5929,6 +5939,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	rawBody, err := readRawRequestBody(c)
 	if err != nil {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
+		return
+	}
+	if contextErr := responsesHTTPContextEnvelopeError(rawBody); contextErr != nil {
+		api.SendError(c, contextErr)
 		return
 	}
 	h.capturePromptRequestIngress(c, rawBody)

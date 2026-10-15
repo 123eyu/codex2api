@@ -2307,6 +2307,7 @@ type responsesBodyPreparation struct {
 	CacheLookup          responseCacheLookupResult
 	RequiresLocalContext bool
 	Bypassed             bool
+	InputReplayConflict  bool
 }
 
 func prepareResponsesBodyForOwnerDetailed(rawBody []byte, owner string) responsesBodyPreparation {
@@ -2319,11 +2320,11 @@ func prepareResponsesBodyForOwnerDetailed(rawBody []byte, owner string) response
 		// Otherwise a cache miss silently turns a continuation into a new turn.
 		preparation.RequiresLocalContext = true
 		preparation.CacheLookup = getResponseCacheForReplay(owner, prevID)
-		currentInput := gjson.GetBytes(rawBody, "input")
-		if currentInput.IsArray() && inputHasToolCallContext(currentInput) {
-			// Avoid duplicating call IDs already replayed by the client. This only
-			// bypasses input expansion; it does not prove the referenced response.
-			preparation.Bypassed = true
+		if preparation.CacheLookup.Kind == responseCacheLookupHit {
+			// A new tool pair is not a replay of the parent. Skip expansion only
+			// when overlapping call IDs prove an exact, complete parent prefix.
+			preparation.Bypassed, preparation.InputReplayConflict = responsesHTTPClientReplaysParent(
+				preparation.CacheLookup.Items, gjson.GetBytes(rawBody, "input"))
 		}
 	}
 	cachedItems := preparation.CacheLookup.Items
