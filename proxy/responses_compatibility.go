@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
 	"os"
 	"strings"
 
 	"github.com/codex2api/api"
+	"github.com/codex2api/auth"
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,8 +25,6 @@ var codexRelayResponsesCompatibilityFields = []string{
 	"max_output_tokens",
 	"max_tokens",
 	"max_completion_tokens",
-	"background",
-	"conversation",
 	"context_management",
 	"temperature",
 	"top_p",
@@ -43,6 +44,31 @@ var codexRelayResponsesCompatibilityFields = []string{
 	"prompt_cache_retention",
 	"safety_identifier",
 	"verbosity",
+	"serviceTier",
+}
+
+// Selection, rather than an API key's channel label, determines which payload
+// preparation runs. The Codex/auto pools can also select a Responses relay.
+func selectedCodexResponsesCompatibilityError(c *gin.Context, account *auth.Account, rawBody []byte) *api.APIError {
+	if account == nil || account.IsRelayStyle() || !strictResponsesCompatibilityRequested(c) {
+		return nil
+	}
+	return validateCodexRelayResponsesCompatibility(rawBody)
+}
+
+func sendResponsesCompatibilityError(c *gin.Context, err *api.APIError) {
+	if !claimContinuousRetryTerminal(c, continuousRetryProtocolResponses) {
+		return
+	}
+	if retryKeepaliveCommitted(c) && strings.Contains(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
+		payload, _ := json.Marshal(gin.H{"type": "response.failed", "response": gin.H{"status": "failed", "error": err}})
+		_, _ = c.Writer.WriteString("data: " + string(payload) + "\n\n")
+		if flusher, ok := c.Writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		return
+	}
+	api.SendError(c, err)
 }
 
 func strictResponsesCompatibilityRequested(c *gin.Context) bool {
@@ -70,14 +96,67 @@ func validateCodexRelayResponsesCompatibility(rawBody []byte) *api.APIError {
 		return nil
 	}
 	issues := make([]map[string]string, 0, len(codexRelayResponsesCompatibilityFields))
+	addIssue := func(field, reason string) {
+		issues = append(issues, map[string]string{"field": field, "reason": reason})
+	}
+	nonNull := func(field string) (json.RawMessage, bool) {
+		value, present := body[field]
+		return value, present && !bytes.Equal(bytes.TrimSpace(value), []byte("null"))
+	}
 	for _, field := range codexRelayResponsesCompatibilityFields {
-		if _, present := body[field]; !present {
+		if _, present := nonNull(field); !present {
 			continue
 		}
-		issues = append(issues, map[string]string{
-			"field":  field,
-			"reason": "Codex relay currently cannot preserve this official Responses field",
-		})
+		addIssue(field, "Codex relay currently cannot preserve this Responses field")
+	}
+	// false/null request synchronous execution and do not require background
+	// lifecycle endpoints. A string is the existing image background extension.
+	if background, present := nonNull("background"); present && !bytes.Equal(bytes.TrimSpace(background), []byte("false")) {
+		var imageBackground string
+		if json.Unmarshal(background, &imageBackground) != nil {
+			addIssue("background", "Codex relay does not implement background response lifecycle")
+		}
+	}
+	if _, present := nonNull("conversation"); present {
+		addIssue("conversation", "Codex relay does not implement the Conversations API")
+	}
+	if store, present := nonNull("store"); present && !bytes.Equal(bytes.TrimSpace(store), []byte("false")) {
+		addIssue("store", "Codex relay cannot provide official stored-response retrieval")
+	}
+	if tier, present := nonNull("service_tier"); present {
+		var requested string
+		_ = json.Unmarshal(tier, &requested)
+		requested = strings.TrimSpace(requested)
+		if _, preserved := upstreamServiceTier(requested); !preserved && requested != "auto" {
+			addIssue("service_tier", "Codex relay would discard the requested service tier")
+		}
+	}
+	var model string
+	_ = json.Unmarshal(body["model"], &model)
+	checkEffort := func(field string, value json.RawMessage) {
+		var requested string
+		if json.Unmarshal(value, &requested) != nil || normalizeReasoningEffortForModel(requested, model) != strings.ToLower(strings.TrimSpace(requested)) {
+			addIssue(field, "Codex relay would change the requested reasoning effort")
+		}
+	}
+	if effort, present := nonNull("reasoning_effort"); present {
+		checkEffort("reasoning_effort", effort)
+	}
+	var reasoning map[string]json.RawMessage
+	if json.Unmarshal(body["reasoning"], &reasoning) == nil {
+		if effort, present := reasoning["effort"]; present && !bytes.Equal(bytes.TrimSpace(effort), []byte("null")) {
+			checkEffort("reasoning.effort", effort)
+		}
+	}
+	// The legacy Chat response_format alias is translated to text.format.
+	if format, present := nonNull("response_format"); present {
+		var decoded map[string]any
+		if json.Unmarshal(format, &decoded) != nil || responsesTextFormatFromResponseFormat(decoded) == nil {
+			addIssue("response_format", "Codex relay cannot translate this response format")
+		}
+	}
+	for _, issue := range codexResponsesSchemaCompatibilityIssues(rawBody) {
+		addIssue(issue["field"], issue["reason"])
 	}
 	if len(issues) == 0 {
 		return nil

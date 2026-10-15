@@ -3935,12 +3935,6 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendError(c, validator.ToAPIError())
 		return
 	}
-	if upstreamChannel == database.UpstreamChannelCodex && strictResponsesCompatibilityRequested(c) {
-		if compatibilityErr := validateCodexRelayResponsesCompatibility(rawBody); compatibilityErr != nil {
-			api.SendError(c, compatibilityErr)
-			return
-		}
-	}
 
 	// 检查请求体大小
 	if len(rawBody) > security.MaxRequestBodySize {
@@ -4191,6 +4185,11 @@ func (h *Handler) Responses(c *gin.Context) {
 
 		if attempt == 0 {
 			emitResponsesPhaseTimings(c, logModel, len(rawBody), handlerStart, bodyReadDone, validateDone, prepareDone)
+		}
+		if compatibilityErr := selectedCodexResponsesCompatibilityError(c, account, rawBody); compatibilityErr != nil {
+			h.store.Release(account)
+			sendResponsesCompatibilityError(c, compatibilityErr)
+			return
 		}
 		h.AcquireAPIKeyScopeConcurrency(c, account)
 		attemptMaxRateLimitRetries := h.effectiveMaxRateLimitRetries(account, maxRateLimitRetries)
@@ -5951,12 +5950,6 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		api.SendError(c, validator.ToAPIError())
 		return
 	}
-	if requestUpstreamChannel(c) == database.UpstreamChannelCodex && strictResponsesCompatibilityRequested(c) {
-		if compatibilityErr := validateCodexRelayResponsesCompatibility(rawBody); compatibilityErr != nil {
-			api.SendError(c, compatibilityErr)
-			return
-		}
-	}
 
 	if len(rawBody) > security.MaxRequestBodySize {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
@@ -6152,6 +6145,11 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			}
 		}
 
+		if compatibilityErr := selectedCodexResponsesCompatibilityError(c, account, rawBody); compatibilityErr != nil {
+			h.store.Release(account)
+			sendResponsesCompatibilityError(c, compatibilityErr)
+			return
+		}
 		h.AcquireAPIKeyScopeConcurrency(c, account)
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
