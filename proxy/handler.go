@@ -8509,7 +8509,8 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 	}
 	switch statusCode {
 	case http.StatusBadRequest:
-		// 账号套餐不支持该模型：按 (账号, 模型) 冷却，调度器随后会跳过该组合；
+		// 上游"模型不支持"：套餐闸按 (账号, 模型) 冷却，调度器随后会跳过该组合；
+		// 版本闸对全池一样，冷却只会把号池逐个锁死，故不写冷却。
 		// 其余 400 属请求内容问题，不动账号状态。
 		if model != "" && isCodexModelUnsupportedError(body) {
 			decision := codex429Decision{
@@ -8517,13 +8518,19 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 				Reason: auth.ModelCooldownReasonUnsupported,
 				Model:  model,
 			}
+			outboundVersion := codexOutboundClientVersion(resp)
+			version := displayCodexOutboundVersion(outboundVersion)
+			if classifyCodexUnsupportedModel(account.GetPlanType(), model, outboundVersion, time.Now()) == codexUnsupportedVersionGate {
+				log.Printf("账号 %d (plan=%s) 请求模型 %s 被上游拒绝，判定为客户端版本过低（出站 Version=%s），不写入模型冷却；请在后台同步 Codex 客户端版本或检查固定的 User-Agent", account.ID(), account.GetPlanType(), model, version)
+				return decision
+			}
 			duration := h.store.UnsupportedModelCooldown()
 			if duration <= 0 {
-				log.Printf("账号 %d (plan=%s) 不支持模型 %s，按设置不写入模型冷却", account.ID(), account.GetPlanType(), model)
+				log.Printf("账号 %d (plan=%s) 不支持模型 %s（出站 Version=%s），按设置不写入模型冷却", account.ID(), account.GetPlanType(), model, version)
 				return decision
 			}
 			cooldown := h.store.MarkModelUnsupported(account, model, duration)
-			log.Printf("账号 %d (plan=%s) 不支持模型 %s，该模型冷却到 %s", account.ID(), account.GetPlanType(), model, cooldown.ResetAt.Format(time.RFC3339))
+			log.Printf("账号 %d (plan=%s) 不支持模型 %s（出站 Version=%s，套餐或客户端版本受限），该模型冷却到 %s", account.ID(), account.GetPlanType(), model, version, cooldown.ResetAt.Format(time.RFC3339))
 			decision.ResetAt = cooldown.ResetAt
 			decision.Cooldown = time.Until(cooldown.ResetAt)
 			return decision

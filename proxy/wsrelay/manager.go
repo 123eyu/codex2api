@@ -38,6 +38,8 @@ type WsConnection struct {
 	upstreamUserAgent      string
 	upstreamUserAgentKnown bool
 	upstreamClientIdentity string
+	// 握手时发送的 Version 头，供上游"模型不支持"时判断是否为客户端版本闸。
+	upstreamVersion string
 
 	// 创建/复用该连接的账号。请求并发由调度层独立管理，
 	// response_id 复用按共享连接槽位预算收敛无绑定的空闲连接。

@@ -94,6 +94,7 @@ func (m *Manager) wrapDialedConnection(input dialedConnection) *WsConnection {
 	wc.upstreamUserAgent = strings.TrimSpace(input.request.headers.Get("User-Agent"))
 	wc.upstreamUserAgentKnown = true
 	wc.upstreamClientIdentity = websocketClientIdentity(input.request.headers)
+	wc.upstreamVersion = strings.TrimSpace(input.request.headers.Get("Version"))
 	wc.httpResp = input.response
 	wc.onDisconnected = m.getOnDisconnected()
 	wc.onReadFailure = m.DiscardConnection

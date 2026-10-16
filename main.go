@@ -112,7 +112,7 @@ func main() {
 			PromptFilterCustomPatterns:        "[]",
 			PromptFilterDisabledPatterns:      "[]",
 			ClientCompatMode:                  proxy.ClientCompatModePreserve,
-			CodexMinCLIVersion:                "0.153.3",
+			CodexMinCLIVersion:                "0.160.0",
 			UsageLogMode:                      database.UsageLogModeFull,
 			UsageLogBatchSize:                 200,
 			UsageLogFlushIntervalSeconds:      5,
@@ -167,7 +167,7 @@ func main() {
 			PromptFilterCustomPatterns:        "[]",
 			PromptFilterDisabledPatterns:      "[]",
 			ClientCompatMode:                  proxy.ClientCompatModePreserve,
-			CodexMinCLIVersion:                "0.153.3",
+			CodexMinCLIVersion:                "0.160.0",
 			UsageLogMode:                      database.UsageLogModeFull,
 			UsageLogBatchSize:                 200,
 			UsageLogFlushIntervalSeconds:      5,
@@ -388,6 +388,12 @@ func main() {
 	// Responses API 渠道监控按账号启用，健康检查和倍率探测分别调度。
 	adminHandler.StartChannelMonitor(backgroundCtx)
 
+	// 版本闸与套餐闸上游同文案：版本抬升后旧版本下学到的模型不支持冷却作废（issue #793）。
+	proxy.OnCodexClientVersionRaised(func() {
+		if cleared := store.ClearModelCooldownsByReason(auth.ModelCooldownReasonUnsupported, 0); cleared > 0 {
+			log.Printf("Codex 客户端版本已抬升，清除 %d 条模型不支持冷却", cleared)
+		}
+	})
 	// 后台定时同步 Codex CLI 模拟版本（启动即拉一次，之后按设置的间隔）；
 	// 出上游新版本门槛时无需发版即可跟进。开关/间隔在设置页可调，
 	// CODEX_DISABLE_CLI_VERSION_SYNC 为硬关闭。

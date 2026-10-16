@@ -281,13 +281,15 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	e.manager.StartHeartbeat(wc)
 
 	return &WsResponse{
-		conn:        wc,
-		pendingReq:  pr,
-		sessionID:   poolSessionID,
-		manager:     e.manager,
-		apiKey:      apiKey,
-		model:       gjson.GetBytes(wsBody, "model").String(),
-		readErrChan: make(chan error, 1),
+		conn:              wc,
+		pendingReq:        pr,
+		sessionID:         poolSessionID,
+		manager:           e.manager,
+		apiKey:            apiKey,
+		model:             gjson.GetBytes(wsBody, "model").String(),
+		readErrChan:       make(chan error, 1),
+		upstreamUserAgent: wc.upstreamUserAgent,
+		upstreamVersion:   wc.upstreamVersion,
 	}, nil
 }
 
@@ -474,6 +476,9 @@ type WsResponse struct {
 	closed      bool
 	// apiKey 发起本请求的下游 API Key，用于 response_id → 连接绑定的归属校验。
 	apiKey string
+	// 承载本请求的连接在握手时发出的客户端身份。
+	upstreamUserAgent string
+	upstreamVersion   string
 	// connBroken 标记读流因上游 WS 异常(非正常关闭)或下游写入失败而终止；
 	// Close() 据此销毁坏连接而非归还连接池复用。受 mu 保护。
 	connBroken bool
@@ -830,6 +835,17 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 
 	// 连接握手的状态不是本轮上游响应；复用时不可重采集或回传旧快照。
 	resp.Header.Del("X-Codex-Turn-State")
+	// 与 HTTP 响应一样带上出站身份，供"模型不支持"区分客户端版本闸。
+	if wsResp != nil && (wsResp.upstreamUserAgent != "" || wsResp.upstreamVersion != "") {
+		outbound := make(http.Header)
+		if wsResp.upstreamUserAgent != "" {
+			outbound.Set("User-Agent", wsResp.upstreamUserAgent)
+		}
+		if wsResp.upstreamVersion != "" {
+			outbound.Set("Version", wsResp.upstreamVersion)
+		}
+		resp.Request = &http.Request{Method: http.MethodGet, Header: outbound}
+	}
 	// 设置 SSE 响应头
 	resp.Header.Set("Content-Type", "text/event-stream")
 	resp.Header.Set("Cache-Control", "no-cache")

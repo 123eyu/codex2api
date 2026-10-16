@@ -206,7 +206,7 @@ const RESPONSE_CACHE_BUDGET_KEYS = [
 const DEFAULT_CODEX_UA_CONFIG: Required<CodexUserAgentConfig> = {
   raw_user_agent: '',
   client_name: 'codex-tui',
-  client_version: '0.153.3',
+  client_version: '0.160.0',
   os_name: 'Mac OS',
   os_version: '15.5.0',
   arch: 'arm64',
@@ -2708,7 +2708,7 @@ export default function Settings() {
     prompt_filter_review_timeout_seconds: 10,
     prompt_filter_review_fail_closed: true,
     client_compat_mode: 'preserve',
-    codex_min_cli_version: '0.153.3',
+    codex_min_cli_version: '0.160.0',
     codex_images_main_model: '',
     codex_cli_version_sync_enabled: true,
     codex_cli_version_sync_interval_hours: 12,
@@ -4797,7 +4797,7 @@ export default function Settings() {
                         <Input
                           className="font-mono text-xs"
                           value={codexUserAgentConfig.raw_user_agent ?? ''}
-                          placeholder="codex-tui/0.153.3 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.153.3)"
+                          placeholder="codex-tui/0.160.0 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.160.0)"
                           onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ raw_user_agent: e.target.value })}
                           onBlur={saveCodexUserAgentConfig}
                         />
