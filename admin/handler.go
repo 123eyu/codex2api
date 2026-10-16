@@ -1707,6 +1707,7 @@ type accountResponse struct {
 	AvatarURL                     string                      `json:"avatar_url,omitempty"`
 	VerifiedEmail                 bool                        `json:"verified_email,omitempty"`
 	ProjectID                     string                      `json:"project_id,omitempty"`
+	AntigravityUserProjectID      string                      `json:"antigravity_user_project_id,omitempty"`
 	AntigravityQuota              json.RawMessage             `json:"antigravity_quota,omitempty"`
 	AntigravityPermissions        json.RawMessage             `json:"antigravity_permissions,omitempty"`
 	AntigravitySyncWarning        string                      `json:"antigravity_sync_warning,omitempty"`

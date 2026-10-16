@@ -72,6 +72,12 @@ Open **Accounts → Antigravity → Google OAuth**, start authorization, and com
 
 OAuth accounts synchronize a Google subject, project, permissions, quota snapshots, and model metadata when the upstream supplies them. A 401 may trigger one OAuth token refresh/retry. This recovery is never used for API Key accounts.
 
+### Workspace / enterprise accounts
+
+Google provisions a managed Cloud Code project only for consumer tiers (free tier, Google One AI Pro/Ultra). Workspace accounts on Gemini Code Assist Standard or Enterprise (`standard-tier`, `userDefinedCloudaicompanionProject: true`) are never given one: `onboardUser` completes without a project, the account cannot be dispatched, and quota-summary calls fail with "You do not have a valid license of this product".
+
+For these accounts, open **Edit** on the account and set **GCP project ID** to a Google Cloud project that has Gemini for Google Cloud enabled and that the account can use. Saving stores it as `antigravity_user_project_id` and immediately resyncs. The project is sent to `loadCodeAssist` and (for non-free tiers) `onboardUser`, matching Gemini CLI's `GOOGLE_CLOUD_PROJECT` behavior; Google-returned projects still take precedence. The free tier never receives the user project because naming one there fails with `FAILED_PRECONDITION`. Clear the field to return to Google-managed projects.
+
 ### Imported OAuth credentials
 
 The Antigravity account dialog accepts a single credential JSON / refresh token or multiple JSON files. Imported credentials are synchronized before normal use when possible. Account-list responses never return access tokens, refresh tokens, client secrets, or API keys.

@@ -11938,7 +11938,7 @@ func antigravityCredentialFromStoreRow(row *database.AccountRow) AntigravityCred
 		Name: row.GetCredential("name"), AvatarURL: row.GetCredential("avatar_url"),
 		ProjectID: row.GetCredential("project_id"), OAuthClientKey: row.GetCredential("oauth_client_key"),
 		ClientID: row.GetCredential("antigravity_client_id"), ClientSecret: row.GetCredential("antigravity_client_secret"),
-		Scope: row.GetCredential("oauth_scope"),
+		Scope: row.GetCredential("oauth_scope"), UserProjectID: row.GetCredential(AntigravityUserProjectIDCredentialKey),
 	}
 	credential.ExpiresAt = parseOAuthCredentialExpiry(row.GetCredential("expires_at"))
 	return credential

@@ -401,6 +401,7 @@ export interface AccountRow {
   grok_rate_limit?: GrokRateLimitSnapshot
   grok_free_quota?: GrokFreeQuotaSnapshot
   antigravity_project_id?: string
+  antigravity_user_project_id?: string
   antigravity_avatar_url?: string
   antigravity_verified_email?: boolean
   project_id?: string
@@ -1241,6 +1242,8 @@ export interface UpdateAntigravityAccountRequest {
   model_mapping?: string
   proxy_url?: string
   group_ids?: number[]
+  /** Caller-owned GCP project for Workspace / enterprise OAuth accounts; "" clears it. */
+  user_project_id?: string
 }
 
 export interface AntigravityImportRequest {
