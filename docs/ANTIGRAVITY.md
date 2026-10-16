@@ -13,15 +13,43 @@ Two credential shapes are supported:
 | Google OAuth | `cloudcode-pa.googleapis.com/v1internal:*` (with the configured fallback hosts) | `Authorization: Bearer ...` and `x-goog-user-project` | Integrated |
 | Google API Key | `generativelanguage.googleapis.com/v1beta/interactions` | `x-goog-api-key` | Experimental; dispatch disabled by default; real wire contract not yet verified |
 
-## Default models
+## Model discovery and defaults
 
-When an account has no explicit or synchronized model list, the channel exposes this conservative fallback catalog:
+OAuth model availability comes from each account's Google control-plane catalog. The gateway refreshes enabled OAuth accounts' model/quota catalogs every 30 minutes, and retains the last successful catalog when a refresh fails or returns an empty catalog. A model appearing in another account or in a reference project's static list does not grant access to it. Model discovery is not a successful generation test.
 
-- `gemini-3-pro-preview`
-- `gemini-2.5-pro`
-- `gemini-2.5-flash`
+When an account has no explicit or synchronized model list, its fallback catalog projects to these public gateway IDs:
 
-An API Key account can declare its own model list and optional model mapping. The management `models` endpoint returns the declared list or these defaults; it does not claim to have remotely verified the catalog.
+- `gemini-3.8-flash-low`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-high`
+- `gemini-3.7-flash-low`, `gemini-3.7-flash-medium`, `gemini-3.7-flash-high`
+- `gemini-3.6-flash-low`, `gemini-3.6-flash-medium`, `gemini-3.6-flash-high`
+- `gemini-3.1-pro-low`, `gemini-3.1-pro-high`
+- `gpt-oss-120b-medium`
+
+These defaults are compatibility fallbacks, not a statement of current plan entitlements. Argon and Claude are intentionally absent from the fallback. Claude 5.5 Opus/Sonnet low, medium, and high tiers, and the older Claude 4.6 IDs, are published only when their backing models exist in the account catalog. Older Gemini mappings remain available for accounts whose catalogs still contain them; updating the static catalog in another project does not remove those mappings here.
+
+An API Key account can declare its own model list and optional model mapping. Its management `models` endpoint returns the declared list or these defaults without claiming remote verification. Frontend model selectors prefer the account-derived channel catalog over their static fallback.
+
+### Gemini 4 Argon
+
+An OAuth account must discover the backing model `gemini-4-argon-high` before the gateway publishes these fixed-tier IDs:
+
+| Public model ID | Upstream model ID | `thinkingLevel` |
+| --- | --- | --- |
+| `gemini-4-argon-low` | `gemini-4-argon-high` | `LOW` |
+| `gemini-4-argon-medium` | `gemini-4-argon-high` | `MEDIUM` |
+| `gemini-4-argon-high` | `gemini-4-argon-high` | `HIGH` |
+
+Low and medium are gateway tier names, not separately discovered upstream models. For Responses requests, the bare alias `gemini-4-argon` accepts `reasoning.effort` values `low`, `medium`, and `high`, defaulting to `high` when omitted. An administrator's model redirect can override the bare alias; a fixed-tier suffix takes precedence over a conflicting Responses effort. Chat Completions and Messages use the same conversion path. Native Gemini requests preserve an explicit `generationConfig.thinkingConfig`; only when absent does the gateway supply the requested tier's `thinkingLevel`.
+
+Disabled placeholders such as `gemini-4-argon-disabled` remain visible in the account's model list with a disabled overlay. Connection-test model selectors hide disabled placeholders, and automatic tests do not select them. Models without quota metadata show an unknown quota rather than an invented remaining percentage. Disabled state is derived from the current ID's `disabled` segment, not persisted separately: when a later catalog replaces the placeholder with a normal model ID, the overlay disappears and the new model appears as a normal test choice, even before quota metadata arrives. Placeholders are not advertised as callable models through the public inference API and cannot enter ordinary scheduling.
+
+The Codex model manifest folds available Argon tiers into one `gemini-4-argon` choice with separate reasoning controls and a 1,048,576-token context window. The named levels and context metadata follow [CPA v8.0.28's Argon registry entry](https://github.com/router-for-me/CLIProxyAPI/commit/866d84d086749c1c1e8b32dac93f46230a5d43a0). The manifest advertises text input to match the gateway's Responses adapter; this does not claim image-input support on that path.
+
+As of 2026-10-14, [Google's model availability documentation](https://antigravity.google/docs/models/) lists Argon for Google AI Ultra and Enterprise, and Claude 5.5 for non-trial Google AI Pro subscriptions, Ultra, and Enterprise. Actual routing still requires the account's discovered backing model. Argon generation against a real upstream has not yet been verified by this project; the available local validation accounts are Pro accounts whose refreshed catalogs contain the disabled placeholder rather than the callable Argon backing.
+
+### Model pricing
+
+There is no verified Argon-specific built-in tariff. A custom or synchronized pricing entry for the billed model ID can override the gateway's default; without one, Argon uses the generic fallback estimate. Do not interpret that estimate as Google's published Argon price. After discovery, the model appears in the model-pricing page where an operator can configure its price.
 
 ## Adding accounts
 
@@ -85,7 +113,7 @@ Requirements and behavior:
 
 - **OAuth only.** API Key / Interactions accounts are rejected; bind a downstream key to the `antigravity` upstream channel (or use an `auto` key whose scoped catalog includes Antigravity models).
 - **Authentication.** Send the Codex2API downstream key as `Authorization: Bearer <key>`, `x-api-key: <key>`, or `x-goog-api-key: <key>`. The last form is what the `google-genai` SDK, ADK, and the Gemini channel of aggregator gateways send by default, so pointing their base URL at Codex2API works without a custom header. The `?key=` query-string form is not accepted (the key would land in URLs and access logs).
-- **Model IDs** match the published Antigravity catalog (`gemini-3.7-flash-high`, `gemini-3.8-flash-low`, Claude tiers exposed by the channel, and so on), not raw Google wire IDs.
+- **Model IDs** match the published Antigravity catalog (`gemini-3.7-flash-high`, `gemini-3.8-flash-low`, `gemini-4-argon-high`, Claude tiers exposed by the channel, and so on), not raw Google wire IDs.
 - **Tool schemas** are normalized before upstream dispatch: orphan `required` entries are dropped, `anyOf` / `oneOf` / `allOf` unions are flattened, invalid function names are sanitized with response-name restore, and schemas are sent as `parametersJsonSchema` (Cloud Code expectation).
 - **Multi-turn tools:** `functionResponse` turns are regrouped for the adapter; leading `inlineData` parts in the same user turn are attached under the matching `functionResponse.parts`.
 - **Thinking:** client-supplied `generationConfig.thinkingConfig` is preserved; when absent, the gateway applies the tier default for the requested public model.
@@ -117,7 +145,7 @@ Not yet implemented on this surface: batch/embed APIs, Imagen `predict`, and ful
 
 ## Function tools
 
-Responses function tools are bridged into Gemini `functionDeclarations`. Dropping them is not a safe degradation: the upstream still receives the system instruction describing those tools, answers with a call it was never allowed to declare, and terminates the turn as `MALFORMED_FUNCTION_CALL`. Built-in Codex tools (web search, image generation, computer use) have no `v1internal` equivalent and are still ignored. Operators can pin the bridge off for diagnostics, which makes a `tool_choice` that forces a function fail closed with a 400 instead:
+Responses function tools are bridged into Gemini `functionDeclarations`. Dropping them is not a safe degradation: the upstream still receives the system instruction describing those tools, answers with a call it was never allowed to declare, and terminates the turn as `MALFORMED_FUNCTION_CALL`. Built-in Codex tools (web search, image generation, computer use) are not translated by this adapter and are still ignored. Adding Argon or discovering a model with upstream search support does not enable Responses `web_search` in the gateway. Operators can pin the bridge off for diagnostics, which makes a `tool_choice` that forces a function fail closed with a 400 instead:
 
 ```bash
 ANTIGRAVITY_FUNCTION_TOOLS_ENABLED=false

@@ -1110,7 +1110,7 @@ export interface AntigravityModelQuota {
   model?: string
   model_id?: string
   name?: string
-  remaining_fraction: number
+  remaining_fraction?: number
   remaining_percent?: number
   reset_time?: string
   display_name?: string
@@ -1140,6 +1140,7 @@ export interface AntigravityQuotaGroup {
 
 export interface AntigravityQuotaSnapshot {
   models: Record<string, AntigravityModelQuota> | AntigravityModelQuota[]
+  catalog_model_ids?: string[]
   quota_groups?: AntigravityQuotaGroup[]
   groups?: AntigravityQuotaGroup[]
   subscription_tier?: string

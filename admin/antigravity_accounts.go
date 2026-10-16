@@ -92,7 +92,7 @@ func antigravityModelsForPersistence(models []string) []string {
 }
 
 func antigravityPublishedModels(rawModels []string) []string {
-	return proxy.AntigravityPublishedModelIDs(auth.NormalizeAccountModels(rawModels))
+	return proxy.AntigravityAdminModelIDs(auth.NormalizeAccountModels(rawModels))
 }
 
 func antigravityPublishedModelsOrDefault(rawModels []string) []string {
@@ -126,9 +126,9 @@ func antigravityPublishedModelForObservation(model string, publishedModels []str
 	return "", false
 }
 
-// antigravityPublishedQuota clones a persisted raw quota snapshot into the
-// public model namespace. A logical model may be backed by several provider
-// wire models, but the admin response exposes exactly one quota entry for it.
+// antigravityPublishedQuota projects persisted quota into the admin catalog.
+// Disabled placeholders remain visible, but a catalog-only model never gains
+// an invented quota entry. Explicit provider-internal IDs stay hidden.
 func antigravityPublishedQuota(raw auth.AntigravityQuotaSnapshot) auth.AntigravityQuotaSnapshot {
 	projected := raw
 	projected.CatalogModelIDs = antigravityPublishedModels(auth.AntigravityDiscoveredModels(raw))
@@ -140,9 +140,13 @@ func antigravityPublishedQuota(raw auth.AntigravityQuotaSnapshot) auth.Antigravi
 
 	rawModels := make([]string, 0, len(raw.Models))
 	byWireID := make(map[string]auth.AntigravityModelQuota, len(raw.Models))
+	internal := make(map[string]bool, len(raw.InternalModelIDs))
+	for _, model := range raw.InternalModelIDs {
+		internal[strings.ToLower(strings.TrimSpace(model))] = true
+	}
 	for _, model := range raw.Models {
 		wireID := strings.ToLower(strings.TrimSpace(model.ModelID))
-		if wireID == "" {
+		if wireID == "" || internal[wireID] {
 			continue
 		}
 		rawModels = append(rawModels, wireID)

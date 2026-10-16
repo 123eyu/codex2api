@@ -285,6 +285,11 @@ func resolveAnthropicModelForRoute(model string, dynamicMappingJSON string, supp
 	if mapped, ok := resolveConfiguredModelMapping(model, dynamicMappingJSON, supportedModels); ok {
 		return mapped
 	}
+	// Logical Antigravity names are callable even though discovery lists their
+	// fixed tiers. Preserve a directly served name before any Codex fallback.
+	if _, logical := antigravityLogicalCompatibilityModel(model); logical && servedDirectly != nil && servedDirectly(model) {
+		return model
+	}
 
 	// 2. 尝试默认映射。默认表只是"没有账号能服务 Claude 模型"时的 Codex 兜底：
 	// 请求的 ID 若有账号以原名服务（如 Antigravity 发布的 claude-sonnet-4-6），

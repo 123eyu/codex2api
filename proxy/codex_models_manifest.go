@@ -244,10 +244,10 @@ func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
 			for _, level := range available {
 				item.SupportedReasoningLevels = append(item.SupportedReasoningLevels, codexReasoningLevel{Effort: level, Description: "Antigravity " + level + " reasoning"})
 			}
-			item.DefaultReasoningLevel = available[0]
+			item.DefaultReasoningLevel = antigravityModelChoiceDefaultLevel(slug, available)
 			item.SupportsReasoningSummaries = true
 		}
-		if slug == "gemini-3.8-flash" {
+		if slug == "gemini-3.8-flash" || (slug == "gemini-4-argon" && len(levels[slug]) > 0) {
 			item.ContextWindow = 1048576
 			// The current OAuth adapter accepts text parts only, even though the
 			// upstream model itself has vision. Advertise the gateway contract.

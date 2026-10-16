@@ -10,7 +10,7 @@ import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
 import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, CodexClientVersionSyncResult, CodexClientVersionTarget, CodexUserAgentCatalog, CodexUserAgentPreview, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
-import { ANTIGRAVITY_DEFAULT_MODELS } from '../lib/antigravityModels'
+import { ANTIGRAVITY_DEFAULT_MODELS, isAntigravityDisabledModel } from '../lib/antigravityModels'
 import { countPayloadRules, PAYLOAD_RULE_GROUPS } from './PayloadRules'
 import { getErrorMessage } from '../utils/error'
 import { DEFAULT_CLAUDE_MODEL_MAP } from '../lib/modelMapping'
@@ -861,7 +861,9 @@ function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'cl
     const list = current && !base.includes(current) ? [current, ...base] : base
     return [
       { value: '', label: t('settings.channelTest.autoModel') },
-      ...list.map((model) => ({ value: model, label: model })),
+      ...list
+        .filter((model) => channel !== 'antigravity' || !isAntigravityDisabledModel(model))
+        .map((model) => ({ value: model, label: model })),
     ]
   }, [catalogChoices, channel, settings?.test_model, t])
 
@@ -875,7 +877,7 @@ function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'cl
         <div className={SETTINGS_FIELD_GRID}>
           <SettingField label={t('settings.testModelLabel')} description={t('settings.channelTest.modelHint')}>
             <Select
-              value={settings?.test_model ?? ''}
+              value={channel === 'antigravity' && isAntigravityDisabledModel(settings?.test_model ?? '') ? '' : settings?.test_model ?? ''}
               onValueChange={(value) => void save({ test_model: value })}
               options={modelChoices}
               disabled={settings === null || saving}
