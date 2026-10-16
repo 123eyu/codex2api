@@ -931,10 +931,13 @@ func antigravityFunctionOutput(raw any) (string, []any, error) {
 	return string(encoded), nil, nil
 }
 
+// The replay stub covers the whole Gemini family, including backings first
+// seen through raw catalog pass-through: a model that does not validate
+// signatures ignores it, while a missing stub fails every tool loop on one
+// that does. It is a replay field, not a capability claim, so a new version
+// name is no reason to withhold it. Claude and GPT-OSS backings never get it.
 func antigravityGeminiNeedsToolSignature(model string) bool {
-	name := strings.ToLower(strings.TrimSpace(model))
-	return name == "gemini-4-argon-high" ||
-		strings.Contains(name, "gemini") && (strings.Contains(name, "flash") || strings.Contains(name, "pro") || strings.Contains(name, "thinking"))
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gemini-")
 }
 
 func antigravityGeminiSupportsFunctionTools(model string) bool {

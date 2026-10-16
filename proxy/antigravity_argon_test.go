@@ -126,24 +126,39 @@ func TestAntigravityArgonThoughtVisibility(t *testing.T) {
 
 func TestAntigravityArgonToolReplayUsesGeminiSignatureFallback(t *testing.T) {
 	body := []byte(`{"input":[{"role":"user","content":"lookup"},{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"found"}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`)
-	for _, model := range []string{"gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"} {
+	replayedCall := func(model string) (map[string]any, map[string]any) {
+		t.Helper()
 		payload, err := responsesToGeminiInternal(body, "project", model)
 		if err != nil {
 			t.Fatal(err)
 		}
 		request := payload["request"].(map[string]any)
 		contents := request["contents"].([]any)
-		call := contents[1].(map[string]any)["parts"].([]any)[0].(map[string]any)
+		return payload, contents[1].(map[string]any)["parts"].([]any)[0].(map[string]any)
+	}
+	for _, model := range []string{"gemini-4-argon", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"} {
+		payload, call := replayedCall(model)
 		if call["thoughtSignature"] != antigravityGeminiSkipThoughtSignature || call["thought_signature"] != antigravityGeminiSkipThoughtSignature {
 			t.Fatalf("Argon tool replay lacks signature fallback: %v", call)
 		}
-		if _, exists := request["tools"]; !exists {
+		if _, exists := payload["request"].(map[string]any)["tools"]; !exists {
 			t.Fatal("Argon function declarations were dropped")
 		}
 	}
+	// Raw pass-through models keep their own wire ID; the replay stub must not
+	// depend on the gateway recognizing the name (issue #792).
 	for _, model := range []string{"gemini-4-future", "gemini-4-argon-next"} {
+		payload, call := replayedCall(model)
+		if payload["model"] != model {
+			t.Fatalf("%q was not passed through: wire model %v", model, payload["model"])
+		}
+		if call["thoughtSignature"] != antigravityGeminiSkipThoughtSignature || call["thought_signature"] != antigravityGeminiSkipThoughtSignature {
+			t.Fatalf("Gemini pass-through %q tool replay lacks signature fallback: %v", model, call)
+		}
+	}
+	for _, model := range []string{"claude-sonnet-4-6", "claude-opus-5-5-high", "gpt-oss-120b-medium"} {
 		if antigravityGeminiNeedsToolSignature(model) {
-			t.Fatalf("Argon signature handling leaked to unknown model %q", model)
+			t.Fatalf("Gemini signature stub leaked to non-Gemini model %q", model)
 		}
 	}
 }
