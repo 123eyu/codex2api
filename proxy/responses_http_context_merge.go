@@ -3,8 +3,10 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 
 	"github.com/codex2api/api"
+	"github.com/codex2api/proxy/internal/jsonbody"
 	"github.com/tidwall/gjson"
 )
 
@@ -15,7 +17,7 @@ func responsesHTTPContextEnvelopeError(raw []byte) *api.APIError {
 	if !gjson.ValidBytes(raw) {
 		return nil // The normal request validator owns malformed JSON errors.
 	}
-	root := gjson.ParseBytes(raw)
+	root := jsonbody.View(raw)
 	if !root.IsObject() {
 		return nil
 	}
@@ -27,7 +29,7 @@ func responsesHTTPContextEnvelopeError(raw []byte) *api.APIError {
 			return true
 		}
 		if seen[name] {
-			duplicate = name
+			duplicate = strings.Clone(name)
 			return false
 		}
 		seen[name] = true

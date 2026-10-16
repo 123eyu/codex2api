@@ -16,6 +16,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
+	"github.com/codex2api/proxy/internal/jsonbody"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -151,9 +152,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 	// 握手头在复用连接上不会重发；每轮必须把最终状态同步到 response.create。
 	if state := headers.Get("X-Codex-Turn-State"); state != "" {
-		wsBody, _ = sjson.SetBytes(wsBody, "client_metadata.x-codex-turn-state", state)
+		wsBody = jsonbody.SetString(wsBody, "client_metadata.x-codex-turn-state", state)
 	} else {
-		wsBody, _ = sjson.DeleteBytes(wsBody, "client_metadata.x-codex-turn-state")
+		wsBody = jsonbody.DeletePath(wsBody, "client_metadata.x-codex-turn-state")
 	}
 	// Record the attempted handshake UA immediately so failed handshakes are
 	// still auditable. A reused connection replaces this below with the UA that
@@ -326,12 +327,12 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 	}
 
 	// 2. 清理多余字段（prompt_cache_retention 上游不接受，会返回 400 Unsupported parameter，必须删除）
-	wsBody, _ = sjson.DeleteBytes(wsBody, "prompt_cache_retention")
-	wsBody, _ = sjson.DeleteBytes(wsBody, "safety_identifier")
-	wsBody, _ = sjson.DeleteBytes(wsBody, "disable_response_storage")
+	wsBody = jsonbody.DeletePath(wsBody, "prompt_cache_retention")
+	wsBody = jsonbody.DeletePath(wsBody, "safety_identifier")
+	wsBody = jsonbody.DeletePath(wsBody, "disable_response_storage")
 	// Downstream named lanes are multiplexed locally onto independent leases.
 	// Their routing envelope must not reach the single-response Codex socket.
-	wsBody, _ = sjson.DeleteBytes(wsBody, "stream_id")
+	wsBody = jsonbody.DeletePath(wsBody, "stream_id")
 
 	// 3. 注入 prompt_cache_key
 	// stateless sessionID 只是连接池隔离用的一次性随机 ID，注入它会让上游
@@ -339,14 +340,14 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 	//（由 proxy.ExecuteRequest 注入或客户端自带）。
 	existingCacheKey := strings.TrimSpace(gjson.GetBytes(wsBody, "prompt_cache_key").String())
 	if sessionID != "" && !proxy.IsStatelessWebsocketSessionID(sessionID) {
-		wsBody, _ = sjson.SetBytes(wsBody, "prompt_cache_key", sessionID)
+		wsBody = jsonbody.SetString(wsBody, "prompt_cache_key", sessionID)
 	} else if existingCacheKey != "" {
-		wsBody, _ = sjson.SetBytes(wsBody, "prompt_cache_key", existingCacheKey)
+		wsBody = jsonbody.SetString(wsBody, "prompt_cache_key", existingCacheKey)
 	}
 
 	// 4. 设置请求类型和 stream
-	wsBody, _ = sjson.SetBytes(wsBody, "type", "response.create")
-	wsBody, _ = sjson.SetBytes(wsBody, "stream", true)
+	wsBody = jsonbody.SetString(wsBody, "type", "response.create")
+	wsBody = jsonbody.SetBool(wsBody, "stream", true)
 
 	return wsBody
 }

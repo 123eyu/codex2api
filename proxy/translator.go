@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/codex2api/proxy/internal/jsonbody"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -2107,7 +2108,7 @@ func ValidateResponsesFunctionNames(rawBody []byte) error {
 	// 无效 JSON 时 gjson 查询返回空结果、校验直接通过（与旧版 Unmarshal 失败即
 	// 放行一致），无需先做一次全量 ValidBytes 扫描。
 	var funcErr error
-	gjson.GetBytes(rawBody, "input").ForEach(func(idx, item gjson.Result) bool {
+	jsonbody.GetView(rawBody, "input").ForEach(func(idx, item gjson.Result) bool {
 		if strings.TrimSpace(item.Get("type").String()) != "function_call" {
 			return true
 		}
@@ -3071,29 +3072,28 @@ func normalizeServiceTierField(body []byte) []byte {
 	if tier == "" {
 		return body
 	}
-	body, _ = sjson.SetBytes(body, "service_tier", tier)
-	body, _ = sjson.DeleteBytes(body, "serviceTier")
+	body = jsonbody.SetString(body, "service_tier", tier)
+	body = jsonbody.DeletePath(body, "serviceTier")
 	return body
 }
 
 func sanitizeServiceTierForUpstream(body []byte) []byte {
 	tier := strings.TrimSpace(gjson.GetBytes(body, "service_tier").String())
 	if tier == "" {
-		body, _ = sjson.DeleteBytes(body, "serviceTier")
-		return body
+		return jsonbody.DeletePath(body, "serviceTier")
 	}
 	switch tier {
 	case "auto", "default", "flex", "priority", "scale", "fast", "ultrafast":
-		body, _ = sjson.DeleteBytes(body, "serviceTier")
+		body = jsonbody.DeletePath(body, "serviceTier")
 		if upstreamTier, ok := upstreamServiceTier(tier); ok {
-			body, _ = sjson.SetBytes(body, "service_tier", upstreamTier)
+			body = jsonbody.SetString(body, "service_tier", upstreamTier)
 		} else {
-			body, _ = sjson.DeleteBytes(body, "service_tier")
+			body = jsonbody.DeletePath(body, "service_tier")
 		}
 		return body
 	default:
-		body, _ = sjson.DeleteBytes(body, "service_tier")
-		body, _ = sjson.DeleteBytes(body, "serviceTier")
+		body = jsonbody.DeletePath(body, "service_tier")
+		body = jsonbody.DeletePath(body, "serviceTier")
 		return body
 	}
 }

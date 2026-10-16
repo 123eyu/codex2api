@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,6 +127,9 @@ func newLargeBodyResponsesEngine(tb testing.TB) *gin.Engine {
 //
 //	GOMAXPROCS=1 go test ./proxy -run '^$' -bench ResponsesLargeCodexBody -benchmem
 func BenchmarkResponsesLargeCodexBody(b *testing.B) {
+	previousLogOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	b.Cleanup(func() { log.SetOutput(previousLogOutput) })
 	for _, target := range []int{1 << 20, 10 << 20} {
 		b.Run(fmt.Sprintf("%dMiB", target>>20), func(b *testing.B) {
 			engine := newLargeBodyResponsesEngine(b)

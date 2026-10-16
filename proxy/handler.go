@@ -27,6 +27,7 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
+	"github.com/codex2api/proxy/internal/jsonbody"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -1864,7 +1865,7 @@ func requestCompactionMetaForHTTP(c *gin.Context, body []byte) requestCompaction
 // content, tool output, or arbitrary stringified JSON.
 func requestBodyCompactionMeta(body []byte) requestCompactionMeta {
 	meta := requestCompactionMeta{}
-	input := gjson.GetBytes(body, "input")
+	input := jsonbody.GetView(body, "input")
 	inspect := func(item gjson.Result) {
 		switch {
 		case gjsonResultIsCompactionTrigger(item):
