@@ -1638,6 +1638,10 @@ func (a *Account) quotaAutoPause5hGuardConcurrencyLimitLocked(limit int64, now t
 	if limit <= 1 || a.AutoPause5hDisabled || a.effectiveAutoPause5h <= 0 || !a.UsagePercent5hValid || a.autoPause5hGuardBandPercent <= 0 || a.autoPause5hGuardConcurrency <= 0 {
 		return limit
 	}
+	// 积分顶替时自动暂停不生效（见 quotaAutoPausedLocked），护栏带也随之让位。
+	if a.creditSkipsUsageWindowLocked() {
+		return limit
+	}
 	if !a.Reset5hAt.IsZero() && !now.Before(a.Reset5hAt) {
 		return limit
 	}
@@ -1698,6 +1702,9 @@ func (a *Account) quotaAutoPause5hGuardDispatchPenaltyLocked(now time.Time) floa
 	if a.AutoPause5hDisabled || a.effectiveAutoPause5h <= 0 || !a.UsagePercent5hValid || a.autoPause5hGuardBandPercent <= 0 || a.autoPause5hGuardConcurrency <= 0 {
 		return 0
 	}
+	if a.creditSkipsUsageWindowLocked() {
+		return 0
+	}
 	if !a.Reset5hAt.IsZero() && !now.Before(a.Reset5hAt) {
 		return 0
 	}
@@ -1711,6 +1718,12 @@ func (a *Account) quotaAutoPause5hGuardDispatchPenaltyLocked(now time.Time) floa
 }
 
 func (a *Account) quotaAutoPausedLocked(now time.Time) bool {
+	// 积分顶替限流开着且当下确有积分时，自动暂停让位：阈值最高只到 100%，照常按阈值
+	// 停调度的话，窗口永远走不到「打满后改扣积分」那一步，账号级开关形同虚设（issue #791）。
+	// 积分归零或工作区 hard-stop 后 creditSkipsUsageWindowLocked 转 false，阈值恢复生效。
+	if a.creditSkipsUsageWindowLocked() {
+		return false
+	}
 	if quotaAutoPausedByWindow(a.UsagePercent5h, a.UsagePercent5hValid, a.Reset5hAt, a.effectiveAutoPause5h, a.AutoPause5hDisabled, now) {
 		return true
 	}
@@ -1906,11 +1919,17 @@ func (a *Account) rawUsageExhaustedLocked() bool {
 // 两者共用 "rate_limited" 这个 reason，光看 reason 分不开。可靠的区分点是判罚时长：
 // MarkUsage7dRateLimited 直接把 CooldownUtil 设成 Reset7dAt，而上游 429 的冷却时长
 // 来自 Retry-After / 限流决策，不会正好落在 7d 重置时刻上。留 2s 容差吸收计算抖动。
+//
+// premium 5h 判罚（rate_limited_5h）只由响应头 / WHAM 观测落下——/responses 真 429 的
+// 5h 冷却记的是 ResponsesRateLimitedCooldownReason——所以按 reason 即可认定为本地判罚。
+// 漏掉它时，Plus/Pro 先撞 5h 再开积分开关，就得干等到 5h 重置（issue #791）。
 func (a *Account) usageWindowCooldownLocked() bool {
 	if a.Status != StatusCooldown {
 		return false
 	}
 	switch a.CooldownReason {
+	case premium5hCooldownReason:
+		return true
 	case "rate_limited", "rate_limited_7d", "usage_limited", "usage_limit":
 	default:
 		return false
@@ -1970,7 +1989,7 @@ func (a *Account) usageLimitContinuationEligibleLocked(now time.Time) bool {
 	// Responses turn. A real upstream 429 is authoritative evidence that a new
 	// request is rejected, so it must not be bypassed.
 	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
-		if a.CooldownReason == premium5hCooldownReason || a.usageWindowCooldownLocked() {
+		if a.usageWindowCooldownLocked() {
 			return true
 		}
 		return false
@@ -10594,7 +10613,8 @@ func (s *Store) ClearCooldown(acc *Account) {
 // 对已经在 cooldown 里的账号无效。而用户最自然的用法恰恰是「发现账号限流了才去开开关」，
 // 那时判罚已经落下，不主动释放就得干等到窗口重置——开关看起来完全没用。
 //
-// 只释放本地用量判罚（usageWindowCooldownLocked 用判罚时长与 Reset7dAt 对齐来识别），
+// 只释放本地用量判罚（usageWindowCooldownLocked：7d 按判罚时长对齐 Reset7dAt 识别，
+// premium 5h 按 rate_limited_5h reason 识别），
 // 上游 429 的冷却不动。万一识别错放行了，上游会再拒一次并重新进入冷却，代价是一个请求。
 // 返回是否真的释放了。
 func (s *Store) ReleaseUsageWindowCooldownForCredits(acc *Account) bool {
