@@ -217,7 +217,14 @@ func shouldRecyclePooledClient(err error) bool {
 }
 
 func recyclePooledClient(account *auth.Account, proxyURL string) {
+	recyclePooledClientForRoute(account, proxyURL, false)
+}
+
+func recyclePooledClientForRoute(account *auth.Account, proxyURL string, accountBound bool) {
 	key := clientPoolKey(account, proxyURL, codexTransportModeFromEnv())
+	if accountBound {
+		key = "account-bound|" + key
+	}
 	if v, ok := clientPool.LoadAndDelete(key); ok {
 		releaseEvictedClient(v.(*poolEntry).client)
 	}
@@ -317,15 +324,27 @@ func logCodexFingerprintDebug(kind string, account *auth.Account, proxyURL strin
 
 // getPooledClient 获取或创建连接池中的 HTTP Client（按账号隔离，TTL 自动淘汰）
 func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
+	return getPooledClientForRoute(account, proxyURL, false)
+}
+
+func getPooledClientForRoute(account *auth.Account, proxyURL string, accountBound bool) *http.Client {
 	transportMode := codexTransportModeFromEnv()
 	key := clientPoolKey(account, proxyURL, transportMode)
+	if accountBound {
+		key = "account-bound|" + key
+	}
 	if v, ok := clientPool.Load(key); ok {
 		entry := v.(*poolEntry)
 		entry.touch()
 		return entry.client
 	}
 
-	transport := newCodexTransport(proxyURL)
+	var transport http.RoundTripper
+	if accountBound {
+		transport = newAccountBoundTransport(proxyURL)
+	} else {
+		transport = newCodexTransport(proxyURL)
+	}
 
 	entry := &poolEntry{
 		createdAt: time.Now().UnixNano(),
@@ -647,6 +666,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if proxyOverride != "" {
 		proxyURL = proxyOverride
 	}
+	proxyURL = requestProxyURL(ctx, proxyURL)
 
 	isAgentIdentity := account.IsCodexAgentIdentity()
 	// Agent Identity 无 access_token，鉴权靠 AgentAssertion；请求前确保 task 已注册。
@@ -781,7 +801,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
-				recyclePooledClient(account, proxyURL)
+				recycleRequestClient(ctx, account, proxyURL)
 			}
 			return nil, ErrUpstream(0, "请求上游失败", err)
 		}
@@ -829,6 +849,7 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 	if proxyOverride != "" {
 		proxyURL = proxyOverride
 	}
+	proxyURL = requestProxyURL(ctx, proxyURL)
 	if baseURL == "" || apiKey == "" {
 		return nil, ErrNoAvailableAccount()
 	}
@@ -858,7 +879,7 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 	requestBody, _ = sjson.DeleteBytes(requestBody, "type")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "stream_id")
 
-	client := getPooledClient(account, proxyURL)
+	client := getRequestClient(ctx, account, proxyURL)
 	send := func(body []byte) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
@@ -873,7 +894,7 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
-				recyclePooledClient(account, proxyURL)
+				recycleRequestClient(ctx, account, proxyURL)
 			}
 			return nil, ErrUpstream(0, "请求 OpenAI Responses API 失败", err)
 		}

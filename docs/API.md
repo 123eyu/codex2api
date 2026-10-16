@@ -16,6 +16,7 @@
 - [管理 API](#管理-api)
   - [统计接口](#统计接口)
   - [账号管理](#账号管理) — 添加 RT / AT 账号、批量导入、导出、迁移
+  - [降智检测](#降智检测) — 固定账号检测、自动处置和逐次历史
   - [Claude OAuth 与原生 Messages](#claude-oauth-与原生-messages) — 导入、采样、模型与指纹配置
   - [用量统计](#用量统计)
   - [API Key 管理](#api-key-管理)
@@ -620,6 +621,34 @@ Codex 的流式 remote compact v2（`POST /v1/responses`，`stream:true`，`inpu
   "total": 10
 }
 ```
+
+### 降智检测
+
+管理页面为 `/admin/intelligence-check`。接口沿用 Admin Secret 鉴权；完整配置、
+判定及自动处置说明见 [降智检测](INTELLIGENCE_CHECK.md)。
+
+| 方法 | 路径 | 请求与响应 |
+| --- | --- | --- |
+| GET | `/api/admin/intelligence-check/settings` | 返回当前配置和题库，含 `revision` |
+| PUT | `/api/admin/intelligence-check/settings` | 提交完整配置及读取到的 `revision`；返回新配置，版本冲突为 409 |
+| GET | `/api/admin/intelligence-check/accounts` | 分页账号状态；支持 `account_id`、`search`、`channel`、`status` 筛选 |
+| PATCH | `/api/admin/intelligence-check/accounts` | `{ "account_ids": [1], "enabled": true }`，返回 `{ "updated": 1 }` |
+| POST | `/api/admin/intelligence-check/runs` | `{ "account_ids": [1] }`，返回 202 和 `{ "runs": [...] }`；同账号已有活动任务时复用 |
+| GET | `/api/admin/intelligence-check/runs` | 分页历史；支持与账号列表相同的筛选参数 |
+| GET | `/api/admin/intelligence-check/runs/:id` | 返回 `{ "run": {...} }`，不存在为 404 |
+| GET | `/api/admin/intelligence-check/bars?account_ids=1,2` | 返回 `{ "bars": { "1": {...}, "2": {...} } }` |
+
+分页使用 `page`（默认 1）和 `page_size`（默认 20，最多 100），响应为
+`{ "items": [...], "total": 0, "page": 1, "page_size": 20 }`。
+账号开关及手动检测每次最多提交 200 个账号，状态条每次最多读取 500 个账号。
+`channel` 使用 `codex` 或 `claude`。任务 `status` 为 `queued`、`running`、
+`normal`、`degraded`、`error`、`interrupted`；未检测账号的 `latest_status` 为 `unknown`。
+
+任务详情包含配置版本、题目快照、请求及响应模型、推理强度、判定模式、最终输出、
+耗时、token 用量、错误、发起来源及自动处置。`source` 为 `manual` 或 `automatic`，
+时间使用 RFC3339。状态条只返回最近 20 条终态摘要及 `enabled`、`quality_paused`、
+`action`，存在运行中或当前可执行的排队任务时附带 `active_run_id` 和 `active_status`。
+关闭自动检测后，不可执行的自动排队任务不占用按钮的活动状态，仍可提交手动检测。
 
 ### 账号管理
 

@@ -488,6 +488,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 		if err := db.ensureCodexRefreshSchema(ctx); err != nil {
 			return nil, fmt.Errorf("初始化 Codex 刷新保护表失败: %w", err)
 		}
+		if err := db.ensureIntelligenceCheckSchema(ctx); err != nil {
+			return nil, fmt.Errorf("initialize intelligence checks: %w", err)
+		}
 		if err := db.ensureChannelMonitorSchema(ctx); err != nil {
 			return nil, fmt.Errorf("初始化渠道监控表失败: %w", err)
 		}
@@ -7568,6 +7571,12 @@ func (db *DB) UpdateAccountSchedulerMetadata(ctx context.Context, id int64, scor
 		}
 		defer tx.Rollback()
 
+		if groupIDs.Set {
+			if err := db.intelligenceManualMutationTx(ctx, tx, []int64{id}, false); err != nil {
+				return err
+			}
+		}
+
 		query := `SELECT credentials FROM accounts WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
 		if db.isSQLite() {
 			query = `SELECT credentials FROM accounts WHERE id = ? AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
@@ -7685,6 +7694,12 @@ func (db *DB) BatchUpdateAccountMetadata(ctx context.Context, ids []int64, updat
 			return err
 		}
 		defer tx.Rollback()
+
+		if update.Enabled.Set || update.GroupIDs.Set {
+			if err := db.intelligenceManualMutationTx(ctx, tx, ids, update.Enabled.Set); err != nil {
+				return err
+			}
+		}
 
 		credentialUpdates := cloneCredentialUpdates(update.CredentialUpdates)
 		if update.AllowedAPIKeyIDs.Set {
@@ -7916,18 +7931,23 @@ func nullableInt64Value(v sql.NullInt64) interface{} {
 
 // SetAccountEnabled 设置账号是否参与调度选择
 func (db *DB) SetAccountEnabled(ctx context.Context, id int64, enabled bool) error {
-	res, err := db.conn.ExecContext(ctx, `UPDATE accounts SET enabled = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, enabled, id)
-	if err != nil {
-		return err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+	return db.withWriteTx(ctx, func(tx *sql.Tx) error {
+		if err := db.intelligenceManualMutationTx(ctx, tx, []int64{id}, true); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE accounts SET enabled = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, enabled, id)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
 }
 
 // SetAccountLocked 设置账号的锁定状态

@@ -198,7 +198,7 @@
     "streamInterrupted": "The stream ended without a successful completion event."
   },
   "nav": {
-    "qualityTest": "Quality check",
+    "qualityTest": "Quality test",
     "dashboard": "Dashboard",
     "accounts": "Accounts",
     "grokAccounts": "Grok",
@@ -214,7 +214,8 @@
     "images": "Images",
     "promptFilter": "Prompt Filter",
     "modelPricing": "Model Pricing",
-    "payloadRules": "Payload Rules"
+    "payloadRules": "Payload Rules",
+    "intelligenceCheck": "Intelligence checks"
   },
   "antigravity": {
     "pageTitle": "Antigravity Accounts",
@@ -2892,7 +2893,9 @@
     "mediaUnitsImage": "{{count}} images",
     "mediaUnitsVideo": "{{count}} s of video",
     "videoSettlesOnDone": "Settles on completion",
-    "mediaUnpricedHint": "This media model has no upstream unit cost; set one on the model pricing page"
+    "mediaUnpricedHint": "This media model has no upstream unit cost; set one on the model pricing page",
+    "internalIntelligenceCheck": "Intelligence check",
+    "internalIntelligenceCheckTooltip": "Internal request using saved intelligence check settings"
   },
   "promptFilter": {
     "title": "Prompt Filter",
