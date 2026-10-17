@@ -1753,6 +1753,10 @@ HTTP `/v1/*` 响应的 `X-Codex2API-Request-ID` 对应下方可检索的 `reques
 
 `upstream_turn_state` 是上游响应回带的 `X-Codex-Turn-State`（HTTP 取响应头，WebSocket 取流内 metadata 帧），空串表示没有。`injected_turn_state` 与 `turn_state_overridden` 只保留给更早版本写入的用量记录。
 
+`first_token_ms` 对 Responses 上游使用宽松口径：从本次上游尝试开始，到 `response.created` / `response.in_progress` 之外的首个非终态响应事件，包含没有可见文本的结构帧。它不是首个正文字符的时间，也不包含尝试开始前的入站处理和调度等待，不能直接与客户端会话日志推算的首字时间比较。
+
+`ws_acquire_ms` 包含 WebSocket 取连的排队、探活和握手耗时。默认计入 `first_token_ms`；开启 `first_token_excludes_ws_acquire` 后，两列相加可恢复含取连的首响应时间。`output_tokens` 包含推理等不可见输出，比较正文显示速度时还需核对 `reasoning_tokens`、推理强度和实际首个内容帧的时间，不能只用不同来源的平均首字值归因。
+
 #### GET /api/admin/usage/chart-data
 
 获取图表聚合数据。

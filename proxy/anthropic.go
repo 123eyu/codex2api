@@ -1241,6 +1241,19 @@ func (t *anthropicStreamTranslator) translateEvent(eventData []byte) []anthropic
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		return t.handleThinkingDelta(eventData)
 
+	case "response.reasoning_summary_part.added":
+		if gjson.GetBytes(eventData, "part.type").String() != "summary_text" {
+			return nil
+		}
+		events := t.ensureThinkingBlock()
+		if text := gjson.GetBytes(eventData, "part.text").String(); text != "" {
+			events = append(events, t.contentBlockDelta(anthropicDelta{Type: "thinking_delta", Thinking: text})...)
+		}
+		return events
+	case "response.reasoning_summary_part.done":
+		// The full part text repeats deltas; keep the block open for the item's signature.
+		return nil
+
 	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 		return t.handleToolInputDelta(eventData)
 	case "response.custom_tool_call_input.done":
@@ -1430,6 +1443,14 @@ func (t *anthropicStreamTranslator) handleThinkingDelta(data []byte) []anthropic
 		return nil
 	}
 
+	events := t.ensureThinkingBlock()
+	return append(events, t.contentBlockDelta(anthropicDelta{
+		Type:     "thinking_delta",
+		Thinking: delta,
+	})...)
+}
+
+func (t *anthropicStreamTranslator) ensureThinkingBlock() []anthropicStreamEvent {
 	var events []anthropicStreamEvent
 	if !t.messageStartSent {
 		events = append(events, t.handleCreated()...)
@@ -1445,10 +1466,6 @@ func (t *anthropicStreamTranslator) handleThinkingDelta(data []byte) []anthropic
 		})...)
 	}
 
-	events = append(events, t.contentBlockDelta(anthropicDelta{
-		Type:     "thinking_delta",
-		Thinking: delta,
-	})...)
 	return events
 }
 

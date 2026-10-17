@@ -1565,9 +1565,8 @@ func (h *Handler) Messages(c *gin.Context) {
 					payloadString := payload.String()
 					// 首个真实内容帧之前的所有帧（结构帧 output_item.added /
 					// content_part.added 也算）一律先缓冲：一旦写出任何字节，首包前
-					// 静默换号重试窗口就永久关闭（issue #435）。内容帧到达（含思考
-					// delta，几乎紧跟结构帧，不违反 issue #207 的思考及时性）即整段
-					// flush，之后不再缓冲。
+					// 静默换号重试窗口就永久关闭（issue #435）。真实内容到达（含思考
+					// delta）即整段 flush，之后不再缓冲。
 					shouldDefer := !contentStarted && !gotTerminal
 					if shouldDefer {
 						pendingFirstTokenEvents.WriteString(payloadString)
