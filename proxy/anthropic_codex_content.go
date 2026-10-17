@@ -93,7 +93,7 @@ func validateAnthropicCodexBlocks(blocks []anthropicContentBlock, role string) e
 			allowed = role == "user" || role == "tool_result"
 		case "tool_result":
 			allowed = role == "user"
-		case "tool_use", "thinking", "server_tool_use", "web_search_tool_result":
+		case "tool_use", "thinking", "redacted_thinking", "server_tool_use", "web_search_tool_result":
 			allowed = role == "assistant"
 		}
 		if !allowed {

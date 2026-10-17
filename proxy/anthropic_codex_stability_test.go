@@ -177,6 +177,65 @@ func TestAnthropicCodexPreservesUserImage(t *testing.T) {
 	}
 }
 
+func TestAnthropicCodexAcceptsRedactedThinkingHistory(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[
+			{"role":"user","content":"Inspect the project."},
+			{"role":"assistant","content":[
+				{"type":"redacted_thinking","data":"opaque-claude-reasoning"},
+				{"type":"text","text":"I will inspect the project."},
+				{"type":"tool_use","id":"toolu_a","name":"read","input":{"path":"README.md"}}
+			]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"Project instructions."}]}
+		]
+	}`)
+	original := bytes.Clone(raw)
+	out, _, err := TranslateAnthropicToCodex(raw, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"input.#":                "4",
+		"input.0.content.0.text": "Inspect the project.",
+		"input.1.role":           "assistant",
+		"input.1.content.0.text": "I will inspect the project.",
+		"input.2.type":           "function_call",
+		"input.2.call_id":        "fc_toolu_a",
+		"input.2.name":           "read",
+		"input.2.arguments":      `{"path":"README.md"}`,
+		"input.3.type":           "function_call_output",
+		"input.3.call_id":        "fc_toolu_a",
+		"input.3.output":         "Project instructions.",
+	} {
+		if got := gjson.GetBytes(out, path).String(); got != want {
+			t.Errorf("%s = %q, want %q: %s", path, got, want, out)
+		}
+	}
+	if strings.Contains(string(out), "redacted_thinking") || strings.Contains(string(out), "opaque-claude-reasoning") {
+		t.Fatalf("Claude-only encrypted reasoning reached Codex: %s", out)
+	}
+	if !bytes.Equal(original, raw) {
+		t.Fatal("translation mutated ingress bytes")
+	}
+}
+
+func TestAnthropicCodexRejectsNonAssistantRedactedThinking(t *testing.T) {
+	block := `{"type":"redacted_thinking","data":"opaque-claude-reasoning"}`
+	for _, role := range []string{"user", "system", "developer", "tool_result"} {
+		t.Run(role, func(t *testing.T) {
+			messages := fmt.Sprintf(`[{"role":%q,"content":[%s]}]`, role, block)
+			if role == "tool_result" {
+				messages = `[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"read","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":[` + block + `]}]}]`
+			}
+			out, _, err := TranslateAnthropicToCodex([]byte(`{"model":"claude-sonnet-4-6","messages":`+messages+`}`), "")
+			if err == nil || out != nil || !strings.Contains(err.Error(), "unsupported content block") {
+				t.Fatalf("non-assistant redacted thinking must fail explicitly: err=%v body=%s", err, out)
+			}
+		})
+	}
+}
+
 func TestAnthropicCodexRejectsInvalidMessageRoles(t *testing.T) {
 	for _, role := range []string{"", "tool", "unexpected_role"} {
 		t.Run(role, func(t *testing.T) {
