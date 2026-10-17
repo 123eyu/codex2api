@@ -289,7 +289,7 @@ func (h *Handler) hasNativeClaudeAccountMatching(c *gin.Context, model string, a
 		// native route before the final selector runs.
 		rawBody, _ := rawRequestBodyFromContext(c)
 		rawBody = ingressRequestBody(c, rawBody)
-		identity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
+		identity := resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody)
 		accountFilter = applyAffinityGroupRouting(c, identity, accountFilter)
 	}
 	for _, account := range h.store.Accounts() {
@@ -393,7 +393,7 @@ func (h *Handler) hasDirectMessagesModelAccountMatching(c *gin.Context, model st
 	if c != nil && c.Request != nil {
 		rawBody, _ := rawRequestBodyFromContext(c)
 		rawBody = ingressRequestBody(c, rawBody)
-		groupFilter = applyAffinityGroupRouting(c, resolveRequestSessionIdentity(c.Request.Header, rawBody), nil)
+		groupFilter = applyAffinityGroupRouting(c, resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody), nil)
 	}
 	now := time.Now()
 	for _, account := range h.store.Accounts() {
@@ -695,10 +695,8 @@ func (h *Handler) Messages(c *gin.Context) {
 	reasoningEffort := extractReasoningEffort(routingBody)
 	serviceTier := extractServiceTier(routingBody)
 	ruleIdentity := h.payloadRuleIdentity(c)
-	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
-	if nativeClaudeRoute {
-		sessionIdentity = resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody)
-	}
+	// 会话属于入站 Messages 协议，与选中的上游渠道无关。
+	sessionIdentity := resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody)
 	var codexTranslation anthropicCodexTranslation
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)

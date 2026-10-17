@@ -78,6 +78,8 @@ type anthropicContentBlock struct {
 	Content      json.RawMessage        `json:"content,omitempty"`
 	IsError      bool                   `json:"is_error,omitempty"`
 	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+	Title        string                 `json:"title,omitempty"`
+	Context      string                 `json:"context,omitempty"`
 }
 
 type anthropicCacheControl struct {
@@ -97,6 +99,8 @@ func (b anthropicContentBlock) MarshalJSON() ([]byte, error) {
 		ToolUseID string                `json:"tool_use_id,omitempty"`
 		Content   json.RawMessage       `json:"content,omitempty"`
 		IsError   bool                  `json:"is_error,omitempty"`
+		Title     string                `json:"title,omitempty"`
+		Context   string                `json:"context,omitempty"`
 	}
 
 	out := contentBlock{
@@ -109,6 +113,8 @@ func (b anthropicContentBlock) MarshalJSON() ([]byte, error) {
 		ToolUseID: b.ToolUseID,
 		Content:   b.Content,
 		IsError:   b.IsError,
+		Title:     b.Title,
+		Context:   b.Context,
 	}
 	if b.Type == "text" || b.Text != "" {
 		out.Text = &b.Text
@@ -390,6 +396,11 @@ func translateAnthropicToResponses(rawJSON []byte, modelMappingJSON string, supp
 
 	originalModel := req.Model
 	codexModel := resolveAnthropicModelForRoute(req.Model, modelMappingJSON, supportedModels, servedDirectly)
+	if !preserveControls {
+		if err := validateAnthropicCodexContent(req.Messages); err != nil {
+			return nil, originalModel, err
+		}
+	}
 	if err := validateAnthropicToolReferences(req.Messages); err != nil {
 		return nil, originalModel, err
 	}
@@ -604,6 +615,10 @@ func appendTranslatedMessages(input []any, messages []anthropicMessage) []any {
 			input = appendUserBlocks(input, blocks)
 		case "assistant":
 			input = appendAssistantBlocks(input, blocks)
+		case "system", "developer":
+			if text := parseAnthropicSystem(msg.Content); text != "" {
+				input = append(input, grokDeveloperMessage(text))
+			}
 		}
 	}
 	return input
@@ -651,7 +666,9 @@ func parseAnthropicSystem(raw json.RawMessage) string {
 	var parts []string
 	for _, block := range parseAnthropicSystemBlocks(raw) {
 		if block.Type == "text" && block.Text != "" {
-			parts = append(parts, block.Text)
+			if text := stripClaudeCodeSystemMetadata(block.Text); text != "" {
+				parts = append(parts, text)
+			}
 		}
 	}
 	return strings.Join(parts, "\n\n")
@@ -722,7 +739,11 @@ func appendUserBlocks(input []any, blocks []anthropicContentBlock) []any {
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			contentParts = append(contentParts, map[string]any{"type": "input_text", "text": b.Text})
+			if text := normalizeClaudeCodeTransportReminder(b.Text); text != "" || b.Text == "" {
+				contentParts = append(contentParts, map[string]any{"type": "input_text", "text": text})
+			}
+		case "document":
+			contentParts = append(contentParts, map[string]any{"type": "input_text", "text": anthropicTextDocument(b)})
 		case "image":
 			if b.Source != nil {
 				dataURI := fmt.Sprintf("data:%s;base64,%s", b.Source.MediaType, b.Source.Data)
@@ -781,6 +802,11 @@ func appendAssistantBlocks(input []any, blocks []anthropicContentBlock) []any {
 		switch b.Type {
 		case "text":
 			textParts = append(textParts, map[string]any{"type": "output_text", "text": b.Text})
+		case "server_tool_use":
+			// Hosted search history is context, not a client tool to execute again.
+			textParts = append(textParts, map[string]any{"type": "output_text", "text": fmt.Sprintf("[Previous server_tool_use %q, id %q]\n%s", b.Name, b.ID, b.Input)})
+		case "web_search_tool_result":
+			textParts = append(textParts, map[string]any{"type": "output_text", "text": fmt.Sprintf("[Previous web_search_tool_result for %q]\n%s", b.ToolUseID, b.Content)})
 		case "tool_use":
 			// 先把已有文本作为 message 输出
 			if len(textParts) > 0 {
@@ -889,6 +915,8 @@ func extractToolResultText(b anthropicContentBlock) string {
 		for _, cb := range blocks {
 			if cb.Type == "text" && cb.Text != "" {
 				parts = append(parts, cb.Text)
+			} else if cb.Type == "document" {
+				parts = append(parts, anthropicTextDocument(cb))
 			}
 		}
 		return strings.Join(parts, "\n")
