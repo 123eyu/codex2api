@@ -103,8 +103,8 @@ func TestRequestMemoryDoesNotPrepayDeclaredLength(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	if budget.UsedBytes != 0 {
-		t.Fatalf("declared Content-Length was prepaid: used=%d", budget.UsedBytes)
+	if used := budget.snapshot().UsedBytes; used != 0 {
+		t.Fatalf("declared Content-Length was prepaid: used=%d", used)
 	}
 
 	_, _ = pw.Write([]byte("x"))
@@ -114,8 +114,8 @@ func TestRequestMemoryDoesNotPrepayDeclaredLength(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("request did not finish")
 	}
-	if budget.UsedBytes != 0 || budget.ActiveReservations != 0 {
-		t.Fatalf("reservation leaked: %+v", budget.RequestMemorySnapshot)
+	if snap := budget.snapshot(); snap.UsedBytes != 0 || snap.ActiveReservations != 0 {
+		t.Fatalf("reservation leaked: %+v", snap)
 	}
 }
 
