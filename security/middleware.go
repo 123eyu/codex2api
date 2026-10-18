@@ -15,6 +15,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// contentSecurityPolicy is kept in a constant so a unit test can verify that
+// every inline script in frontend/index.html is covered by its hash.
+const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'sha256-8jI3h1oN0D7cJ3eKd/Mjk+hKunZV0rZrmg9g4u/5+Nk='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; media-src 'self' data: blob: https: http:; font-src 'self'; connect-src 'self' https://api.github.com;"
+
 // Security headers middleware
 func SecurityHeadersMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -26,8 +30,8 @@ func SecurityHeadersMiddleware() gin.HandlerFunc {
 
 		// Content Security Policy
 		// script-src 内联哈希对应 frontend/index.html 中的主题恢复脚本（在 React 挂载前同步 localStorage 主题到 <html>，避免刷新闪烁）。
-		// 如修改该脚本，请同步更新此处哈希（浏览器控制台报错会给出新哈希）。
-		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'sha256-WBkfMfl2yQ2pGMyfjGOlZU/dKJRErT3nin/t7BPNjn0='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; media-src 'self' data: blob: https: http:; font-src 'self'; connect-src 'self' https://api.github.com;")
+		// 如修改该脚本，请同步更新 contentSecurityPolicy（security/csp_test.go 会检查）。
+		c.Header("Content-Security-Policy", contentSecurityPolicy)
 
 		// Strict Transport Security (HTTPS only)
 		// c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
@@ -80,7 +84,10 @@ func requestSizeLimiterWithMemory(maxSize int64, budget *requestMemoryBudget) gi
 			}})
 			return
 		}
-		prepaid := max(c.Request.ContentLength, 0)
+		// Charge the budget as bytes actually arrive. Reserving the declared
+		// Content-Length up front lets a client declare 47MB, send nothing, and
+		// pin the global budget; an empty body must reserve zero.
+		prepaid := int64(0)
 		reservation, admitted := budget.acquire(prepaid)
 		if !admitted {
 			rejectRequestMemory(c)

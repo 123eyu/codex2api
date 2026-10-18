@@ -195,7 +195,7 @@ func main() {
 		}
 	} else {
 		log.Printf("已加载持久化业务设置: ProxyURL=%s, MaxConcurrency=%d, GlobalRPM=%d, PgMaxConns=%d, RedisPoolSize=%d",
-			settings.ProxyURL, settings.MaxConcurrency, settings.GlobalRPM, settings.PgMaxConns, settings.RedisPoolSize)
+			security.MaskURLCredentials(settings.ProxyURL), settings.MaxConcurrency, settings.GlobalRPM, settings.PgMaxConns, settings.RedisPoolSize)
 	}
 	modelCooldownCtx, modelCooldownCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	modelCooldownSettings, modelCooldownErr := db.GetModelCooldownSettings(modelCooldownCtx)
@@ -655,9 +655,12 @@ func main() {
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: r,
-		// ReadHeaderTimeout 防 Slowloris 慢速攻击；IdleTimeout 回收空闲 keep-alive 连接。
+		// ReadHeaderTimeout 防 Slowloris 慢速攻击；ReadTimeout 限制整个请求体读取，
+		// 防止“声明大 Content-Length 但不发 body”长期占用连接/内存预算；
+		// IdleTimeout 回收空闲 keep-alive 连接。
 		// 注意：WriteTimeout 必须保持 0 —— LLM 流式响应可持续数分钟，任何固定写超时都会中途切断长回答。
 		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       10 * time.Minute,
 		IdleTimeout:       120 * time.Second,
 	}
 	go func() {
