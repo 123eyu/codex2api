@@ -135,7 +135,7 @@ CODEX_MULTI_AGENT_V2_COMPAT=true
 
 默认路径只处理父请求的 schema 和响应 namespace 还原，不处理 `agent_message`。子请求通常由上游网关直接转发给第三方模型。
 
-子侧是否可用取决于该网关：本仓自带的 Responses→Chat 转换目前不识别 `agent_message`，会返回 `cannot be represented by Chat Completions`；只有子侧网关原生支持 `agent_message`，或显式接线 `rewriteCodexAgentMessageInput` 后才成立。真实链路验证表明，部分第三方网关（例如 NewAPI）会忽略 `agent_message`，需要子侧做等价转换。
+子侧是否可用取决于该网关：本仓自带的 Responses→Chat 转换目前不识别 `agent_message`，会返回 `cannot be represented by Chat Completions`；只有子侧网关原生支持 `agent_message`，或显式接线 `rewriteCodexAgentMessageInput` 后才成立。早期验证中的 NewAPI 会忽略该项；后续子侧规范化修复已合入 [NewAPI fork PR #259](https://github.com/DeliciousBuding/new-api/pull/259)，配合本兼容层完成了端到端验收。其他子网关仍需检查自己的处理能力。
 
 如果接线适配器，它只接受全明文 `input_text`；密文、混合内容和空文本都会拒绝。适配器不是解密层。
 
@@ -145,7 +145,7 @@ CODEX_MULTI_AGENT_V2_COMPAT=true
 
 开启兼容层后，父模型的 `spawn_agent` 调用被补全为 `encrypted_function_args: []`，子请求的 `agent_message` 只包含明文 `input_text`，正文与父模型发出的任务一致。
 
-子侧仍有一个独立依赖：第三方子 Agent 请求通常不经过本仓。目标子网关（例如 NewAPI）当前忽略 `agent_message`，所以模型仍读不到任务；把同一条子请求里的 `agent_message` 改成普通 `message` + `role=user` 后，模型返回了正确结果。本兼容层解决父侧加密边界，子侧网关还需要做等价转换。
+子侧是独立依赖：第三方子 Agent 请求通常不经过本仓。早期验证确认，未转换 `agent_message` 时模型读不到任务；后续接入全明文规范化后，GPT v2 父 → DeepSeek 子的初始派发、同一子 Agent 的 `followup_task` 及两次只读工具调用通过，原生 GPT 子 Agent 回归通过。父调用的 `encrypted_function_args=[]`，子消息只包含 `input_text`。这次验收没有单独覆盖 `send_message`，也不覆盖第三方父模型强制 v2。
 
 单元与集成测试覆盖：
 
@@ -176,20 +176,24 @@ python scripts/repro-codex-multi-agent-v2.py --codex-exe /path/to/codex --child-
 
 仓库 `.gitignore` 忽略 `scripts/`，该脚本需要随 PR 以 `git add -f scripts/repro-codex-multi-agent-v2.py` 加入，否则新克隆无法按本文复现。
 
-真实上游验收结果（2026-10-18）：
+初次真实上游验证（2026-10-18，子侧修复前）：
 
 - 父请求已切换到明文协作工具，上游 `spawn_agent` 返回的调用被补全 `encrypted_function_args: []`；
 - 子请求 `agent_message` 只包含 `input_text`，正文与父模型发出的任务一致；
 - 子侧网关（NewAPI）未把 `agent_message` 转成普通 user message，模型仍读不到任务；同一条请求改成 `message` + `role=user` 后返回正确结果；
-- 因此父侧边界已通过真实链路验证，子侧转换仍是独立阻塞项。
+- 因此当时父侧边界已通过验证，子侧转换是独立阻塞项。
 
-真实上游验收清单（子侧修复后复验）：
+后续端到端验收（2026-10-18，子侧修复后）：
 
-- GPT v2 父 → 第三方子的 `spawn_agent`、`followup_task`、`send_message`；
-- 一次真实只读工具调用；
-- 子请求 `agent_message` 不含 `encrypted_content`；
-- 子侧网关把 `agent_message` 转成普通 user message，模型返回任务结果；
-- 上游没有新增 4xx，账号状态正常。
+- GPT v2 父 → DeepSeek 子的 `spawn_agent` 与同一子 Agent 的 `followup_task` 均返回正确任务结果；
+- 子 Agent 完成两次只读工具调用，原生 GPT 子 Agent 回归通过；
+- 父两次协作调用的 `encrypted_function_args=[]`，子两条 `agent_message` 均仅含 `input_text`；
+- 上述结果依赖父侧兼容与子侧规范化共同生效，不表示任意子网关都已兼容。
+
+额外验收清单：
+
+- `send_message` 的独立真实调用及其他客户端/子网关组合；
+- 升级上游或客户端后，复验任务正文、后续派发、工具调用与上游错误。
 
 ## 已知限制
 
@@ -202,7 +206,8 @@ python scripts/repro-codex-multi-agent-v2.py --codex-exe /path/to/codex --child-
 - 上游错误体不还原；客户端可能看到临时命名空间。
 - 请求历史中的 `function_call` 记录保持原 namespace；真实账号已接受该历史，上游策略变化时需要复验。
 - User-Agent 判断不是安全边界。
-- 子侧网关必须把 `agent_message` 转成普通 user message；本仓的 `rewriteCodexAgentMessageInput` 提供该转换，但当前子请求不经过本仓。真实链路已确认：不转换时第三方模型读不到任务，转换后正常。
+- 子侧网关需支持全明文 `agent_message` 或做等价转换；本仓的 `rewriteCodexAgentMessageInput` 提供该转换，但当前默认未接线。已修复的 NewAPI fork 组合验收通过，其他组合需自行验证。
+- 第三方父模型强制 v2 不在本兼容层覆盖范围；已验收的选择是第三方父模型使用 v1、GPT 父模型使用 v2。
 
 ## 回滚
 
