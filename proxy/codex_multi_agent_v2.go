@@ -497,6 +497,21 @@ func restoreCodexMultiAgentV2Item(updated []byte, path string, item gjson.Result
 		}
 		return updated, nil
 	}
+	if itemType == "allowed_tools" {
+		tools := item.Get("tools")
+		if tools.IsArray() {
+			for index, child := range tools.Array() {
+				var err error
+				updated, err = restoreCodexMultiAgentV2Item(
+					updated, fmt.Sprintf("%s.tools.%d", path, index), child, state,
+				)
+				if err != nil {
+					return updated, err
+				}
+			}
+		}
+		return updated, nil
+	}
 	// 部分响应会回显工具定义或 tool_choice；扁平工具在请求侧被改成
 	// collaboration-optimize.<tool>，返回客户端前恢复原前缀。
 	if itemType == "function" || itemType == "custom" {

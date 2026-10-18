@@ -322,15 +322,17 @@ func TestPrepareCodexMultiAgentV2RequestRewritesAllowedToolsChoice(t *testing.T)
 func TestRestoreCodexMultiAgentV2ResponseRestoresToolChoice(t *testing.T) {
 	payload := []byte(`{
 		"tool_choice":{"type":"function","namespace":"collaboration-optimize","name":"spawn_agent"},
-		"response":{"tool_choice":{"type":"function","namespace":"collaboration-optimize","name":"send_message"}}
+		"response":{"tool_choice":{"type":"allowed_tools","tools":[
+			{"type":"function","namespace":"collaboration-optimize","name":"followup_task"}
+		]}}
 	}`)
 
 	got := restoreCodexMultiAgentV2Response(payload, nil)
 	if ns := gjson.GetBytes(got, "tool_choice.namespace").String(); ns != codexCollaborationNamespace {
 		t.Fatalf("tool_choice.namespace = %q", ns)
 	}
-	if ns := gjson.GetBytes(got, "response.tool_choice.namespace").String(); ns != codexCollaborationNamespace {
-		t.Fatalf("response.tool_choice.namespace = %q", ns)
+	if ns := gjson.GetBytes(got, "response.tool_choice.tools.0.namespace").String(); ns != codexCollaborationNamespace {
+		t.Fatalf("response.tool_choice.tools.0.namespace = %q", ns)
 	}
 }
 
