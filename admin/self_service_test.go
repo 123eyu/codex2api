@@ -180,6 +180,28 @@ func TestUpsertSelfServiceAccountPendingAndNotScheduled(t *testing.T) {
 	}
 }
 
+func TestSelfServiceRollbackAllowsRetry(t *testing.T) {
+	handler, db := newSelfServiceHandler(t, true)
+	ctx := context.Background()
+	seed := tokenCredentialSeed{
+		refreshToken: "rt-rb",
+		accessToken:  "at-rb",
+		email:        "rollback@example.com",
+		accountID:    "acct-rb",
+		workspaceID:  "workspace-rb",
+	}
+
+	id, err := db.InsertDisabledAccountWithCredentials(ctx, "rollback@example.com", handler.newCodexAccountCredentials(seed), "")
+	if err != nil {
+		t.Fatalf("InsertDisabledAccountWithCredentials: %v", err)
+	}
+	handler.rollbackSelfServiceAccountInsert(ctx, id)
+
+	if _, err := handler.upsertSelfServiceAccount(ctx, "rollback@example.com", "", seed, "c@x.com"); err != nil {
+		t.Fatalf("回滚后同一身份应可重新提交, got %v", err)
+	}
+}
+
 func TestApproveSelfServiceAccountLoadsIntoPool(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler, db := newSelfServiceHandler(t, true)

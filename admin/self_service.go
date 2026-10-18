@@ -258,11 +258,15 @@ func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL s
 		return 0, err
 	}
 	// 待审核：插入时即 disabled；备注/标签失败时账号仍保持禁用，不会进调度池。
+	// 但仍需回滚半成品：否则同一身份重试会命中重复检查，提交者收到"已在系统中"
+	// 的成功语义，而账号永远缺少联系人/标签等待审核信息。
 	note := "自助提交联系人: " + contactEmail
 	if err := h.db.UpdateAccountNote(ctx, id, note); err != nil {
+		h.rollbackSelfServiceAccountInsert(ctx, id)
 		return 0, err
 	}
 	if err := h.db.SetAccountTags(ctx, id, []string{selfServiceTag}); err != nil {
+		h.rollbackSelfServiceAccountInsert(ctx, id)
 		return 0, err
 	}
 	h.db.InsertAccountEventAsync(id, "added", selfServiceSource)
@@ -271,4 +275,14 @@ func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL s
 	h.invalidateAccountSnapshotCaches()
 	log.Printf("自助门户新增待审核账号 %d (%s, 联系人 %s)", id, name, contactEmail)
 	return id, nil
+}
+
+// rollbackSelfServiceAccountInsert 软删本次插入但未完成待审核设置的账号，
+// 使同一身份可以重新提交。软删失败时账号保持 disabled，仍不会进调度池。
+func (h *Handler) rollbackSelfServiceAccountInsert(ctx context.Context, id int64) {
+	if err := h.db.SoftDeleteAccount(ctx, id); err != nil {
+		log.Printf("回滚未完成的自助账号 %d 失败: %v", id, err)
+		return
+	}
+	h.invalidateAccountSnapshotCaches()
 }

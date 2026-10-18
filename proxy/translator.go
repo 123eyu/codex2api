@@ -1797,6 +1797,28 @@ func (c *requestCache) put(key [32]byte, req openAIRequest, size int) {
 	}
 }
 
+// 解析后常驻堆的开销估算：除原始 JSON 外，还需计入切片本身。
+// 20000 条短消息的 JSON 只有约 60KB，但 []openAIMessage 的后备数组就占 ~1.5MB。
+const (
+	parsedRequestSizeCeiling = requestCacheMaxEntryBytes + 1
+	parsedMessageOverhead    = 128 // openAIMessage 结构体 + 切片增长余量
+	parsedToolCallOverhead   = 128 // openAIToolCall 结构体 + 切片增长余量
+	parsedRawJSONOverhead    = 32  // json.RawMessage 头部
+)
+
+func estimateParsedRequestSize(rawJSON []byte, req *openAIRequest) int {
+	size := int64(len(rawJSON)) * 3
+	size += int64(cap(req.Messages)) * parsedMessageOverhead
+	for i := range req.Messages {
+		size += int64(cap(req.Messages[i].ToolCalls)) * parsedToolCallOverhead
+	}
+	size += int64(cap(req.Tools)) * parsedRawJSONOverhead
+	if size > parsedRequestSizeCeiling {
+		return parsedRequestSizeCeiling
+	}
+	return int(size)
+}
+
 // cachedOrParse 从缓存获取或解析请求，返回结构体（Unmarshal 至多一次）
 func cachedOrParse(rawJSON []byte) openAIRequest {
 	if len(rawJSON) == 0 {
@@ -1809,9 +1831,10 @@ func cachedOrParse(rawJSON []byte) openAIRequest {
 	var req openAIRequest
 	_ = json.Unmarshal(rawJSON, &req)
 	// The parsed request retains more than the raw JSON (message slices,
-	// RawMessage copies, tool structs). Charge a conservative multiplier so the
-	// byte budget bounds retained heap, not just wire bytes.
-	globalRequestCache.put(key, req, len(rawJSON)*3)
+	// RawMessage copies, tool structs). Charge a conservative multiplier plus
+	// per-slice overhead so the byte budget bounds retained heap, not just wire
+	// bytes.
+	globalRequestCache.put(key, req, estimateParsedRequestSize(rawJSON, &req))
 	return req
 }
 
