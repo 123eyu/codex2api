@@ -201,7 +201,9 @@ func MaskSensitiveData(input string) string {
 	return result
 }
 
-var embeddedURLCredentials = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s]*@`)
+// On malformed URLs prefer over-redaction: a slash can be part of the intended
+// userinfo, and cannot be treated as a trustworthy authority boundary.
+var embeddedURLCredentials = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^\s]*@`)
 
 // MaskURLCredentials masks userinfo in URLs, including URLs embedded in labels.
 func MaskURLCredentials(input string) string {

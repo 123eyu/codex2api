@@ -13,7 +13,7 @@ const (
 )
 
 // adminAuthThrottle 记录按 IP 的管理端鉴权失败次数。
-// 只在失败时计数，成功请求不受影响；窗口内失败达到阈值后阻断一段时间。
+// 只在失败时计数；达到阈值后在密钥比较前阻断该 IP 的所有认证尝试。
 type adminAuthThrottle struct {
 	mu      sync.Mutex
 	entries map[string]*adminAuthThrottleEntry

@@ -1442,6 +1442,15 @@ func (h *Handler) adminAuthMiddleware() gin.HandlerFunc {
 		}
 
 		clientIP := c.ClientIP()
+		// Check the block before comparing any candidate. Accepting a correct
+		// candidate during a block would leave an unlimited password oracle.
+		if retry := h.adminAuthThrottle.retryAfter(clientIP, time.Now()); retry > 0 {
+			c.Header("Retry-After", strconv.Itoa(int((retry+time.Second-1)/time.Second)))
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"error": "认证失败次数过多，请稍后再试",
+			})
+			return
+		}
 
 		// 清理输入
 		adminKey = security.SanitizeInput(adminKey)
@@ -1450,15 +1459,6 @@ func (h *Handler) adminAuthMiddleware() gin.HandlerFunc {
 		if !security.SecureCompare(adminKey, adminSecret) {
 			// 记录安全审计日志
 			security.SecurityAuditLog("ADMIN_AUTH_FAILED", fmt.Sprintf("path=%s ip=%s source=%s", c.Request.URL.Path, security.SanitizeLog(clientIP), source))
-			// 阻断只针对失败尝试；正确密钥仍可通过，避免攻击者用共享出口 IP 锁死管理员。
-			if retry := h.adminAuthThrottle.retryAfter(clientIP, time.Now()); retry > 0 {
-				c.Header("Retry-After", strconv.Itoa(int((retry+time.Second-1)/time.Second)))
-				c.JSON(http.StatusTooManyRequests, gin.H{
-					"error": "认证失败次数过多，请稍后再试",
-				})
-				c.Abort()
-				return
-			}
 			if blocked := h.adminAuthThrottle.recordFailure(clientIP, time.Now()); blocked > 0 {
 				c.Header("Retry-After", strconv.Itoa(int((blocked+time.Second-1)/time.Second)))
 				c.JSON(http.StatusTooManyRequests, gin.H{

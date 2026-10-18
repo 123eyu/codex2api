@@ -272,6 +272,9 @@ func (h *Handler) enforceAPIKeyLimitsChecks(c *gin.Context, model string, reserv
 	// 缓存窗口内的并发突发；这里按实际请求数原子递增后再放行。
 	if reserve {
 		if allowed, reason := h.admissionLimiter().allow(row.ID, limits.RPM, limits.RPD, 1, time.Now()); !allowed {
+			if reason == "capacity" {
+				return http.StatusServiceUnavailable, "API key admission capacity exhausted; retry later"
+			}
 			if reason == "rpd" {
 				return http.StatusTooManyRequests,
 					fmt.Sprintf("API key rate limit exceeded: %d requests per day", limits.RPD)
@@ -348,6 +351,9 @@ func SendAPIKeyLimitError(c *gin.Context, status int, msg string) {
 	}
 	if status == http.StatusBadRequest {
 		errType, errCode = api.ErrorTypeInvalidRequest, api.ErrCodeInvalidParameter
+	}
+	if status == http.StatusServiceUnavailable {
+		errType, errCode = api.ErrorTypeServer, api.ErrCodeServiceUnavailable
 	}
 	api.SendErrorWithStatus(c, api.NewAPIError(errCode, msg, errType), status)
 }

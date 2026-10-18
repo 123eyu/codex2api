@@ -2,10 +2,33 @@ package proxy
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 )
+
+func TestRejectAmbiguousJSONFieldNames(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	many := strings.TrimSuffix(strings.Repeat(`{},`, maxChatCompletionMessages+1), ",")
+	for _, body := range []string{
+		`{"messages":[{"role":"user","content":"hi"}],"Messages":[` + many + `]}`,
+		`{"Messages":[]}`,
+		`{"messages":[],"mESSages":[]}`,
+		`{"input":[],"Input":[]}`,
+		`{"input":[],"\u0069nput":[]}`,
+	} {
+		field := "messages"
+		if strings.Contains(body, `"input"`) {
+			field = "input"
+		}
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		if !rejectDuplicateJSONField(c, []byte(body), field) || recorder.Code != 400 {
+			t.Errorf("ambiguous %s accepted (body length %d)", field, len(body))
+		}
+	}
+}
 
 func TestRejectDuplicateJSONField(t *testing.T) {
 	gin.SetMode(gin.TestMode)

@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1057,7 +1058,7 @@ func newGrokNamespaceReverser(body io.ReadCloser, streaming bool, aliases map[st
 	go func() {
 		defer body.Close()
 		if !streaming {
-			data, err := io.ReadAll(body)
+			data, err := readAllLimitedWithContinuousRetryKeepalive(context.Background(), body, maxUpstreamResponseBodyBytes)
 			if err != nil {
 				_ = pw.CloseWithError(err)
 				return

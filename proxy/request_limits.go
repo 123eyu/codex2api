@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -11,8 +12,9 @@ import (
 )
 
 // rejectDuplicateJSONField rejects duplicate top-level array fields before the
-// item-count guard. gjson selects the first duplicate, while encoding/json
-// decodes the last one, so a small first array could hide a massive second one.
+// item-count guard. Reject case variants too: gjson is case-sensitive whereas
+// encoding/json matches struct fields case-insensitively. Both parsers must
+// agree on the single canonical field before it is counted or decoded.
 func rejectDuplicateJSONField(c *gin.Context, rawBody []byte, field string) bool {
 	if c == nil || len(rawBody) == 0 || !gjson.ValidBytes(rawBody) {
 		return false
@@ -23,9 +25,15 @@ func rejectDuplicateJSONField(c *gin.Context, rawBody []byte, field string) bool
 	}
 	seen := false
 	duplicate := false
+	nonCanonical := false
 	root.ForEach(func(key, _ gjson.Result) bool {
-		if key.String() != field {
+		name := key.String()
+		if !strings.EqualFold(name, field) {
 			return true
+		}
+		if name != field {
+			nonCanonical = true
+			return false
 		}
 		if seen {
 			duplicate = true
@@ -34,12 +42,16 @@ func rejectDuplicateJSONField(c *gin.Context, rawBody []byte, field string) bool
 		seen = true
 		return true
 	})
-	if !duplicate {
+	if !duplicate && !nonCanonical {
 		return false
+	}
+	message := fmt.Sprintf("duplicate top-level field %q is not allowed", field)
+	if nonCanonical {
+		message = fmt.Sprintf("top-level field %q must use its canonical spelling", field)
 	}
 	api.SendError(c, api.NewAPIError(
 		api.ErrCodeInvalidRequest,
-		fmt.Sprintf("duplicate top-level field %q is not allowed", field),
+		message,
 		api.ErrorTypeInvalidRequest,
 	))
 	return true

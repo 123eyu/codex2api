@@ -4433,7 +4433,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 				}
 				retryAfter := normalizedRetryAfter(resp.Header.Get("Retry-After"))
-				errBody, _ := readAllWithContinuousRetryKeepalive(readCtx, resp.Body)
+				errBody, _ := readUpstreamErrorBody(readCtx, resp.Body)
 				rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 				resp.Body.Close()
 				if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -4826,7 +4826,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 			} else {
 				var respBody []byte
-				respBody, readErr = readAllWithContinuousRetryKeepalive(readCtx, resp.Body)
+				respBody, readErr = readAllLimitedWithContinuousRetryKeepalive(readCtx, resp.Body, maxUpstreamResponseBodyBytes)
 				if readErr == nil {
 					if isEmptyIncompleteResponseBody(respBody) {
 						respBody = synthesizeEmptyIncompleteFailureBody(respBody)
@@ -5189,7 +5189,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 			}
 			retryAfter := normalizedRetryAfter(resp.Header.Get("Retry-After"))
-			errBody, _ := readAllWithContinuousRetryKeepalive(readCtx, resp.Body)
+			errBody, _ := readUpstreamErrorBody(readCtx, resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -6270,7 +6270,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
+				errBody, _ := readUpstreamErrorBody(c.Request.Context(), resp.Body)
 				rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 				resp.Body.Close()
 				if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -6348,7 +6348,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				return
 			}
 
-			respBody, readErr := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
+			respBody, readErr := readAllLimitedWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, maxUpstreamResponseBodyBytes)
 			resp.Body.Close()
 			if readErr != nil {
 				totalDuration := int(time.Since(start).Milliseconds())
@@ -6521,7 +6521,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
+			errBody, _ := readUpstreamErrorBody(c.Request.Context(), resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -6607,7 +6607,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		if compactViaResponses {
 			respBody, compactFailedPayload, readErr = collectCompactResponsesSSEWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 		} else {
-			respBody, readErr = readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
+			respBody, readErr = readAllLimitedWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, maxUpstreamResponseBodyBytes)
 		}
 		resp.Body.Close()
 		if readErr != nil {
@@ -7251,7 +7251,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/chat/completions", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 			}
-			errBody, _ := readAllWithContinuousRetryKeepalive(readCtx, resp.Body)
+			errBody, _ := readUpstreamErrorBody(readCtx, resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolChat) {

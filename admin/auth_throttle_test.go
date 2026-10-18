@@ -88,8 +88,17 @@ func TestAdminAuthMiddlewareThrottlesFailedAttempts(t *testing.T) {
 	} else if rec.Header().Get("Retry-After") == "" {
 		t.Fatal("429 response missing Retry-After")
 	}
+	if rec := request("admin-secret"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct key during block returned %d, want 429 (no password oracle)", rec.Code)
+	}
+	// Expiry must allow normal authentication again, including no-store headers.
+	handler.adminAuthThrottle.mu.Lock()
+	for _, entry := range handler.adminAuthThrottle.entries {
+		entry.blockedUntil = time.Now().Add(-time.Second)
+	}
+	handler.adminAuthThrottle.mu.Unlock()
 	if rec := request("admin-secret"); rec.Code != http.StatusOK {
-		t.Fatalf("correct key during block returned %d, want 200", rec.Code)
+		t.Fatalf("correct key after expiry returned %d, want 200", rec.Code)
 	} else if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("admin response Cache-Control = %q, want no-store", got)
 	}

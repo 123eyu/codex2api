@@ -87,7 +87,20 @@ func TestAPIKeyAdmissionLimiterEnforcesRPD(t *testing.T) {
 	}
 }
 
-func TestAPIKeyAdmissionLimiterKeepsNewKeyWhenFull(t *testing.T) {
+func TestAPIKeyAdmissionLimiterRPDDoesNotResetRecentUsage(t *testing.T) {
+	limiter := newAPIKeyAdmissionLimiter()
+	now := time.Unix(1_700_000_000, 0)
+	admissionAllow(limiter, 1, 0, 2, 1, now)
+	admissionAllow(limiter, 1, 0, 2, 1, now.Add(23*time.Hour))
+	if !admissionAllow(limiter, 1, 0, 2, 1, now.Add(24*time.Hour)) {
+		t.Fatal("oldest request should have expired")
+	}
+	if admissionAllow(limiter, 1, 0, 2, 1, now.Add(24*time.Hour)) {
+		t.Fatal("23h request must still count in the sliding 24h window")
+	}
+}
+
+func TestAPIKeyAdmissionLimiterPreservesLiveCountersWhenFull(t *testing.T) {
 	limiter := newAPIKeyAdmissionLimiter()
 	now := time.Unix(1_700_000_000, 0)
 	for i := 1; i <= apiKeyAdmissionMaxKeys; i++ {
@@ -96,14 +109,33 @@ func TestAPIKeyAdmissionLimiterKeepsNewKeyWhenFull(t *testing.T) {
 		}
 	}
 	newKey := int64(apiKeyAdmissionMaxKeys + 1)
-	if !admissionAllow(limiter, newKey, 1, 0, 1, now) {
-		t.Fatal("new key rejected when the map is full")
+	if ok, reason := limiter.allow(newKey, 1, 0, 1, now); ok || reason != "capacity" {
+		t.Fatalf("full table admission=(%v,%q), want capacity rejection", ok, reason)
 	}
-	if _, ok := limiter.entries[newKey]; !ok {
-		t.Fatal("new key was evicted immediately after insertion")
+	if admissionAllow(limiter, 1, 1, 0, 1, now) {
+		t.Fatal("existing live counter was evicted or reset")
 	}
-	if got := len(limiter.entries); got > apiKeyAdmissionMaxKeys+1 {
-		t.Fatalf("entries = %d, want <= %d", got, apiKeyAdmissionMaxKeys+1)
+	if !admissionAllow(limiter, newKey, 1, 0, 1, now.Add(apiKeyAdmissionIdleTTL+time.Second)) {
+		t.Fatal("expired entries should make room for a new key")
+	}
+	if got := len(limiter.entries); got > apiKeyAdmissionMaxKeys {
+		t.Fatalf("entries = %d, want <= %d", got, apiKeyAdmissionMaxKeys)
+	}
+}
+
+func TestAPIKeyAdmissionLimiterCoalescesRPDConservatively(t *testing.T) {
+	l := newAPIKeyAdmissionLimiter()
+	now := time.Unix(1_700_000_040, 0) // start of a minute
+	admissionAllow(l, 1, 0, 2, 1, now)
+	admissionAllow(l, 1, 0, 2, 1, now.Add(59*time.Second))
+	if len(l.entries[1].rpdBuckets) != 1 {
+		t.Fatal("same-minute requests should share a bucket")
+	}
+	if admissionAllow(l, 1, 0, 2, 1, now.Add(24*time.Hour)) {
+		t.Fatal("must not expire the last request in a coalesced bucket early")
+	}
+	if !admissionAllow(l, 1, 0, 2, 1, now.Add(24*time.Hour+59*time.Second)) {
+		t.Fatal("coalesced bucket should expire after its last request ages out")
 	}
 }
 

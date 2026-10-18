@@ -24,9 +24,14 @@ type apiKeyAdmissionLimiter struct {
 type apiKeyAdmissionEntry struct {
 	rpmBuckets [apiKeyAdmissionRPMSlots]int64
 	rpmSecond  int64
-	rpdStart   time.Time
+	rpdBuckets []apiKeyAdmissionDayBucket
 	rpdCount   int64
 	lastSeen   time.Time
+}
+
+type apiKeyAdmissionDayBucket struct {
+	lastNanos int64
+	count     int64
 }
 
 func newAPIKeyAdmissionLimiter() *apiKeyAdmissionLimiter {
@@ -59,6 +64,9 @@ func (l *apiKeyAdmissionLimiter) allow(keyID int64, rpm, rpd, requests int, now 
 	if entry == nil {
 		// 先清理再插入，否则满表时新键会被自己的淘汰逻辑删掉。
 		l.evictLocked(now)
+		if len(l.entries) >= apiKeyAdmissionMaxKeys {
+			return false, "capacity"
+		}
 		entry = &apiKeyAdmissionEntry{}
 		l.entries[keyID] = entry
 	}
@@ -68,10 +76,7 @@ func (l *apiKeyAdmissionLimiter) allow(keyID int64, rpm, rpd, requests int, now 
 		return false, "rpm"
 	}
 	if rpd > 0 {
-		if entry.rpdStart.IsZero() || now.Sub(entry.rpdStart) >= apiKeyRPDWindow {
-			entry.rpdStart = now
-			entry.rpdCount = 0
-		}
+		entry.expireRPD(now)
 		if entry.rpdCount+int64(requests) > int64(rpd) {
 			return false, "rpd"
 		}
@@ -82,9 +87,37 @@ func (l *apiKeyAdmissionLimiter) allow(keyID int64, rpm, rpd, requests int, now 
 		entry.rpmBuckets[now.Unix()%apiKeyAdmissionRPMSlots] += int64(requests)
 	}
 	if rpd > 0 {
-		entry.rpdCount += int64(requests)
+		entry.recordRPD(now, int64(requests))
 	}
 	return true, ""
+}
+
+// Minute-coalesced admissions keep the last 24h without one allocation per
+// request. A bucket expires 24h after its last admission, so rounding can only
+// retain counts for less than one extra minute, never reset recent usage early.
+func (e *apiKeyAdmissionEntry) expireRPD(now time.Time) {
+	cutoff := now.Add(-apiKeyRPDWindow).UnixNano()
+	expired := 0
+	for expired < len(e.rpdBuckets) && e.rpdBuckets[expired].lastNanos <= cutoff {
+		e.rpdCount -= e.rpdBuckets[expired].count
+		expired++
+	}
+	if expired > 0 {
+		copy(e.rpdBuckets, e.rpdBuckets[expired:])
+		e.rpdBuckets = e.rpdBuckets[:len(e.rpdBuckets)-expired]
+	}
+}
+
+func (e *apiKeyAdmissionEntry) recordRPD(now time.Time, count int64) {
+	nanos := now.UnixNano()
+	if n := len(e.rpdBuckets); n > 0 && nanos/int64(time.Minute) <= e.rpdBuckets[n-1].lastNanos/int64(time.Minute) {
+		bucket := &e.rpdBuckets[n-1]
+		bucket.lastNanos = max(bucket.lastNanos, nanos)
+		bucket.count += count
+	} else {
+		e.rpdBuckets = append(e.rpdBuckets, apiKeyAdmissionDayBucket{lastNanos: nanos, count: count})
+	}
+	e.rpdCount += count
 }
 
 // rpmUsed 推进秒级桶并返回最近 60 秒的计数，不写入本次请求。
@@ -108,22 +141,15 @@ func (e *apiKeyAdmissionEntry) rpmUsed(now time.Time) int64 {
 }
 
 func (l *apiKeyAdmissionLimiter) evictLocked(now time.Time) {
-	if len(l.entries) <= apiKeyAdmissionMaxKeys {
+	if len(l.entries) < apiKeyAdmissionMaxKeys {
 		return
 	}
 	for key, entry := range l.entries {
-		if now.Sub(entry.lastSeen) > apiKeyAdmissionIdleTTL && now.Sub(entry.rpdStart) >= apiKeyRPDWindow {
+		entry.expireRPD(now)
+		if now.Sub(entry.lastSeen) > apiKeyAdmissionIdleTTL && entry.rpdCount == 0 {
 			delete(l.entries, key)
 		}
 	}
-	for len(l.entries) > apiKeyAdmissionMaxKeys {
-		var oldestKey int64
-		var oldest time.Time
-		for key, entry := range l.entries {
-			if oldestKey == 0 || entry.lastSeen.Before(oldest) {
-				oldestKey, oldest = key, entry.lastSeen
-			}
-		}
-		delete(l.entries, oldestKey)
-	}
+	// Never evict live quota history to admit another key: doing so would
+	// reset its counters. New keys fail closed until an idle entry expires.
 }

@@ -1654,6 +1654,13 @@ func normalizeImageStudioModel(model string) string {
 }
 
 func normalizeImageJobUpscale(model, size, upscale string) (string, error) {
+	// Validate explicit physical targets before any network or queue work.
+	// An oversized target must not silently disable the strict-size promise.
+	if strings.Contains(strings.ToLower(size), "x") {
+		if _, _, ok := imageupscale.ParseSize(size); !ok {
+			return "", fmt.Errorf("size must be positive WIDTHxHEIGHT, at most 16384 per side and 40000000 pixels")
+		}
+	}
 	rawUpscale := strings.ToLower(strings.TrimSpace(upscale))
 	// An absent value means "decide from the model and size"; "none" is the
 	// explicit opt-out that suppresses that inference, so a caller can take the
