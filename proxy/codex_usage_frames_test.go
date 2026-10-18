@@ -180,6 +180,40 @@ func TestSyncCodexUsageStateMarks100PercentOnlyWhenPersisting(t *testing.T) {
 	}
 }
 
+func TestCodexUsageFramesPreserveLongerResponsesCooldown(t *testing.T) {
+	for _, idle := range []bool{false, true} {
+		for _, kind := range []string{"codex.rate_limits", "codex.response.metadata"} {
+			t.Run(fmt.Sprintf("idle=%v/%s", idle, kind), func(t *testing.T) {
+				store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
+				t.Cleanup(store.Stop)
+				acc := newUsageFrameTestAccount()
+				until := time.Now().Add(6 * time.Hour)
+				acc.Status, acc.CooldownUtil, acc.CooldownReason = auth.StatusCooldown, until, auth.ResponsesRateLimitedCooldownReason
+				acc.FailureStreak = 4
+				store.AddAccount(acc)
+				payload := `{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":100,"window_minutes":300,"reset_after_seconds":3600},"secondary":{"used_percent":100,"window_minutes":10080,"reset_after_seconds":7200}}}`
+				if kind == "codex.response.metadata" {
+					payload = `{"type":"codex.response.metadata","headers":{"x-codex-primary-used-percent":"100","x-codex-primary-window-minutes":"300","x-codex-primary-reset-after-seconds":"3600","x-codex-secondary-used-percent":"100","x-codex-secondary-window-minutes":"10080","x-codex-secondary-reset-after-seconds":"7200"}}`
+				}
+				if idle {
+					ApplyCodexIdleUsageFrame(store, acc, kind, []byte(payload))
+				} else {
+					ApplyCodexUsageEventFrame(store, acc, kind, gjson.Parse(payload), time.Now())
+				}
+				if acc.Status != auth.StatusCooldown || !acc.CooldownUtil.Equal(until) || acc.GetCooldownReason() != auth.ResponsesRateLimitedCooldownReason || acc.FailureStreak != 4 {
+					t.Fatalf("frame weakened the Responses cooldown: status=%v until=%v reason=%q streak=%d", acc.Status, acc.CooldownUtil, acc.GetCooldownReason(), acc.FailureStreak)
+				}
+				if pct, ok := acc.GetUsagePercent5h(); !ok || pct != 100 {
+					t.Fatalf("5h usage = %v valid=%v, want 100", pct, ok)
+				}
+				if pct, ok := acc.GetUsagePercent7d(); !ok || pct != 100 {
+					t.Fatalf("7d usage = %v valid=%v, want 100", pct, ok)
+				}
+			})
+		}
+	}
+}
+
 func TestApplyCodexRateLimitsFrameProPrimaryWeekly(t *testing.T) {
 	acc := newUsageFrameTestAccount()
 	acc.PlanType = "pro"

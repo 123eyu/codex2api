@@ -330,43 +330,40 @@ func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.
 		resetAt = now.Add(premium5hFallbackWindow)
 	}
 
-	// Re-observing the same exhausted window must not write the cooldown again.
-	acc.mu.RLock()
-	alreadyLimited := acc.Status == StatusCooldown &&
-		acc.CooldownReason == cooldownReason &&
-		now.Before(acc.CooldownUtil) &&
-		cooldownMatchesReset(acc.CooldownUtil, resetAt)
-	acc.mu.RUnlock()
-	if alreadyLimited {
-		return
-	}
-
 	acc.mu.Lock()
+	snapshotChanged := !acc.UsagePercent5hValid || acc.UsagePercent5h != 100 || !acc.Reset5hAt.Equal(resetAt)
 	acc.UsagePercent5h = 100
 	acc.UsagePercent5hValid = true
 	acc.Reset5hAt = resetAt
 	acc.UsageUpdatedAt5h = now
-	acc.LastRateLimitedAt = now
-	acc.Status = StatusCooldown
-	acc.CooldownUtil = resetAt
-	acc.CooldownReason = cooldownReason
-	if acc.HealthTier != HealthTierBanned {
-		acc.HealthTier = HealthTierRisky
+	until, reason, cooldownChanged := acc.usageCooldownTargetLocked(now, resetAt, cooldownReason)
+	if cooldownChanged {
+		acc.LastRateLimitedAt = now
+		acc.Status = StatusCooldown
+		acc.CooldownUtil = until
+		acc.CooldownReason = reason
+		if acc.HealthTier != HealthTierBanned {
+			acc.HealthTier = HealthTierRisky
+		}
 	}
 	acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
 	acc.mu.Unlock()
 
 	s.fastSchedulerUpdate(acc)
-	s.setCachedAccountCooldown(acc.DBID, cooldownReason, resetAt)
+	if cooldownChanged {
+		s.setCachedAccountCooldown(acc.DBID, reason, until)
+	}
 
-	if s.db == nil {
+	if s.db == nil || (!cooldownChanged && !snapshotChanged) {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.db.SetCooldown(ctx, acc.DBID, cooldownReason, resetAt); err != nil {
-		log.Printf("[账号 %d] 持久化 premium 5h 限流冷却状态失败: %v", acc.DBID, err)
+	if cooldownChanged {
+		if err := s.db.SetCooldown(ctx, acc.DBID, reason, until); err != nil {
+			log.Printf("[账号 %d] 持久化 premium 5h 限流冷却状态失败: %v", acc.DBID, err)
+		}
 	}
 	if err := s.withUsageSnapshotWrite(func() error {
 		return s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, 100, resetAt, now)

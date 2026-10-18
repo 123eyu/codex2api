@@ -2370,44 +2370,92 @@ func cooldownMatchesReset(cooldownUntil, resetAt time.Time) bool {
 	return diff <= time.Minute
 }
 
+// usageCooldownTargetLocked keeps passive quota observations from weakening an
+// active cooldown. Preserve every existing reason rather than maintaining an
+// incomplete list of authoritative errors. A real Responses 429 also upgrades a
+// local usage cooldown so IgnoreUsageLimitStatus cannot bypass that rejection.
+// Authentication failures retain the higher priority used by the runtime cache.
+// The caller must hold a.mu.
+func (a *Account) usageCooldownTargetLocked(now, resetAt time.Time, reason string) (time.Time, string, bool) {
+	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
+		if reason == ResponsesRateLimitedCooldownReason && a.usageWindowCooldownLocked() {
+			if resetAt.Before(a.CooldownUtil) {
+				resetAt = a.CooldownUtil
+			}
+			return resetAt, reason, true
+		}
+		if !resetAt.After(a.CooldownUtil) ||
+			(a.CooldownReason == reason && cooldownMatchesReset(a.CooldownUtil, resetAt)) {
+			return a.CooldownUtil, a.CooldownReason, false
+		}
+		if reason != ResponsesRateLimitedCooldownReason || a.CooldownReason == "unauthorized" {
+			reason = a.CooldownReason
+		}
+	}
+	return resetAt, reason, true
+}
+
 // MarkUsage7dRateLimited marks an account as rate-limited when its active 7d
 // usage window is exhausted. A future reset time is preferred; missing reset
 // metadata falls back to a full 7d cooldown, while stale reset times are ignored.
 func (s *Store) MarkUsage7dRateLimited(acc *Account) bool {
-	if s == nil || acc == nil || acc.IsBanned() {
+	if s == nil || acc == nil {
 		return false
 	}
-	if acc.SkipsUsageWindowLimits() {
+	acc.mu.Lock()
+	if acc.healthTierLocked() == HealthTierBanned || acc.skipsUsageWindowLimitsLocked() {
+		acc.mu.Unlock()
 		return false
 	}
 
-	pct, ok := acc.GetUsagePercent7d()
-	if !ok || pct < 100 {
+	if !acc.UsagePercent7dValid || acc.UsagePercent7d < 100 {
+		acc.mu.Unlock()
 		return false
 	}
 
 	now := time.Now()
-	duration := 7 * 24 * time.Hour
-	resetAt := acc.GetReset7dAt()
-	if !resetAt.IsZero() {
-		untilReset := resetAt.Sub(now)
-		if untilReset <= 0 {
-			return false
-		}
-		duration = untilReset
+	resetAt := acc.Reset7dAt
+	if resetAt.IsZero() {
+		resetAt = now.Add(7 * 24 * time.Hour)
+	} else if !resetAt.After(now) {
+		acc.mu.Unlock()
+		return false
 	}
 
-	acc.mu.RLock()
-	alreadyLimited := acc.Status == StatusCooldown &&
-		(acc.CooldownReason == "rate_limited" || acc.CooldownReason == "rate_limited_7d") &&
-		now.Before(acc.CooldownUtil) &&
-		cooldownMatchesReset(acc.CooldownUtil, resetAt)
-	acc.mu.RUnlock()
-	if alreadyLimited {
+	activeCooldown := acc.Status == StatusCooldown && now.Before(acc.CooldownUtil)
+	// With no reset metadata, an active cooldown already fences this account.
+	// Do not slide the fallback window forward on every observation.
+	if activeCooldown && acc.Reset7dAt.IsZero() {
+		acc.mu.Unlock()
+		return true
+	}
+	until, reason, changed := acc.usageCooldownTargetLocked(now, resetAt, "rate_limited")
+	if !changed {
+		acc.mu.Unlock()
 		return true
 	}
 
-	s.MarkCooldown(acc, duration, "rate_limited")
+	if activeCooldown {
+		acc.CooldownUtil = until
+	} else {
+		acc.LastRateLimitedAt = now
+		acc.LastFailureAt = now
+		acc.FailureStreak++
+		acc.SuccessStreak = 0
+		acc.setCooldownUntilLocked(until, reason)
+	}
+	acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
+	acc.mu.Unlock()
+
+	s.fastSchedulerUpdate(acc)
+	s.setCachedAccountCooldown(acc.DBID, reason, until)
+	if s.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.db.SetCooldown(ctx, acc.DBID, reason, until); err != nil {
+			log.Printf("[账号 %d] 持久化 7d 限流冷却状态失败: %v", acc.DBID, err)
+		}
+	}
 	return true
 }
 

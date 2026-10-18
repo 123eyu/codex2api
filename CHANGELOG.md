@@ -8,6 +8,8 @@
 
 ### Fixes
 
+- **Quota observations cannot shorten an active account cooldown.** The 5h and 7d usage paths keep a longer existing cooldown and its reason, including an authoritative Responses 429 or authentication error. Later resets extend the cooldown without replacing that reason or counting another failure. A real Responses 429 can upgrade a local usage cooldown to `responses_rate_limited` without shortening it, so `ignore_usage_limit_status` cannot bypass an actual rejection; a stronger authentication failure retains priority. Usage snapshots still update when the cooldown is unchanged, and repeated observations do not write the cooldown again.
+
 - **Account page copy matches the actual quota and cleanup behavior.** The auto-pause threshold hint now says blank or 0 inherits the group/global threshold and that the switch above disables that window, instead of claiming 0 disables it. The rate-limited cleanup dialog and result toast say accounts move to the recycle bin and that auto-paused accounts appear in the cleanup when their runtime status is rate-limited or `usage_exhausted`, instead of saying status flags are cleared.
 
 ## v3.1.1 - 2026-10-17
