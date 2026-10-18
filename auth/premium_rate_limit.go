@@ -342,6 +342,7 @@ func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.
 		acc.Status = StatusCooldown
 		acc.CooldownUtil = until
 		acc.CooldownReason = reason
+		acc.usageCooldownPersistPending = true
 		if acc.HealthTier != HealthTierBanned {
 			acc.HealthTier = HealthTierRisky
 		}
@@ -353,6 +354,7 @@ func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.
 	if cooldownChanged {
 		s.setCachedAccountCooldown(acc.DBID, reason, until)
 	}
+	s.persistUsageCooldown(acc)
 
 	if s.db == nil || (!cooldownChanged && !snapshotChanged) {
 		return
@@ -360,11 +362,6 @@ func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if cooldownChanged {
-		if err := s.db.SetCooldown(ctx, acc.DBID, reason, until); err != nil {
-			log.Printf("[账号 %d] 持久化 premium 5h 限流冷却状态失败: %v", acc.DBID, err)
-		}
-	}
 	if err := s.withUsageSnapshotWrite(func() error {
 		return s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, 100, resetAt, now)
 	}); err != nil {

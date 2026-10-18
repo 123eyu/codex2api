@@ -279,11 +279,13 @@ type Account struct {
 	// 客户端压缩阈值。仅内存保留：值只能在收到响应后才知道，落库也救不了首个请求。
 	grokContextWindow int64
 	// grokFreeQuota 是免费额度耗尽 429 解析出的权威用量快照，随 credentials 落库。
-	grokFreeQuota  *GrokFreeQuotaSnapshot
-	Status         AccountStatus
-	CooldownUtil   time.Time
-	CooldownReason string // rate_limited / rate_limited_5h / responses_rate_limited / unauthorized / 空
-	ErrorMsg       string
+	grokFreeQuota               *GrokFreeQuotaSnapshot
+	Status                      AccountStatus
+	CooldownUtil                time.Time
+	CooldownReason              string // rate_limited / rate_limited_5h / responses_rate_limited / unauthorized / 空
+	usageCooldownPersistMu      sync.Mutex
+	usageCooldownPersistPending bool
+	ErrorMsg                    string
 
 	// 用量进度（从 Codex 响应头被动解析）
 	UsagePercent7d      float64 // 7d 窗口使用率 0-100+
@@ -2427,11 +2429,13 @@ func (s *Store) MarkUsage7dRateLimited(acc *Account) bool {
 	// Do not slide the fallback window forward on every observation.
 	if activeCooldown && acc.Reset7dAt.IsZero() {
 		acc.mu.Unlock()
+		s.persistUsageCooldown(acc)
 		return true
 	}
 	until, reason, changed := acc.usageCooldownTargetLocked(now, resetAt, "rate_limited")
 	if !changed {
 		acc.mu.Unlock()
+		s.persistUsageCooldown(acc)
 		return true
 	}
 
@@ -2445,17 +2449,12 @@ func (s *Store) MarkUsage7dRateLimited(acc *Account) bool {
 		acc.setCooldownUntilLocked(until, reason)
 	}
 	acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
+	acc.usageCooldownPersistPending = true
 	acc.mu.Unlock()
 
 	s.fastSchedulerUpdate(acc)
 	s.setCachedAccountCooldown(acc.DBID, reason, until)
-	if s.db != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := s.db.SetCooldown(ctx, acc.DBID, reason, until); err != nil {
-			log.Printf("[账号 %d] 持久化 7d 限流冷却状态失败: %v", acc.DBID, err)
-		}
-	}
+	s.persistUsageCooldown(acc)
 	return true
 }
 
@@ -2626,6 +2625,9 @@ func (a *Account) MarkUsageFrameObserved(kind string, at time.Time) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if at.Before(a.usageFrameLastAt) {
+		return
+	}
 	a.usageFrameLastAt = at
 	a.usageFrameLastKind = strings.TrimSpace(kind)
 }

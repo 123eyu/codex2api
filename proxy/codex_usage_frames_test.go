@@ -749,6 +749,32 @@ func TestApplyCodexUsageEventFrameIgnoresOlderObservation(t *testing.T) {
 	}
 }
 
+func TestCodexUsageFramesOrderCreditsAndFreshnessWithUsage(t *testing.T) {
+	for _, creditsOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("creditsOnly=%v", creditsOnly), func(t *testing.T) {
+			acc := newUsageFrameTestAccount()
+			at := time.Now()
+			newer := gjson.Parse(`{"rate_limits":{"primary":{"used_percent":60,"window_minutes":300}},"credits":{"has_credits":false,"unlimited":false,"balance":"0"}}`)
+			older := `{"rate_limits":{"primary":{"used_percent":10,"window_minutes":300}},"credits":{"has_credits":true,"unlimited":false,"balance":"100"}}`
+			if creditsOnly {
+				older = `{"credits":{"has_credits":true,"unlimited":false,"balance":"100"}}`
+			}
+			ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", newer, at)
+			ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", gjson.Parse(older), at.Add(-time.Second))
+			credits, valid := acc.GetCreditBalance()
+			snap := acc.GetAccountLiveUsageSnapshot()
+			if !valid || credits.HasCredits || snap.UsagePercent5h != 60 || !snap.UsageFrameLastAt.Equal(at) {
+				t.Fatalf("older frame applied: credits=%+v valid=%v snapshot=%+v", credits, valid, snap)
+			}
+			ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", gjson.Parse(`{"credits":{"has_credits":true,"unlimited":false,"balance":"100"}}`), at.Add(time.Second))
+			credits, valid = acc.GetCreditBalance()
+			if !valid || !credits.HasCredits || !acc.GetAccountLiveUsageSnapshot().UsageFrameLastAt.Equal(at.Add(time.Second)) {
+				t.Fatal("newer credits-only observation was not applied")
+			}
+		})
+	}
+}
+
 func TestCodexUsageFramePersistenceRespectsThrottle(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "usage-frame.db")

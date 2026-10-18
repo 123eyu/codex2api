@@ -170,3 +170,68 @@ func TestUsageCooldownNeverShortensActiveCooldown(t *testing.T) {
 		})
 	}
 }
+
+func TestUsageCooldownRetriesFailedPersistence(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cooldown-retry.db")
+	db, err := database.New("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	store := NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1})
+	t.Cleanup(store.Stop)
+	for _, source := range []string{"5h", "7d", "responses"} {
+		t.Run(source, func(t *testing.T) {
+			id, err := db.InsertAccountWithCredentials(ctx, "cooldown-retry", map[string]interface{}{"plan_type": "plus"}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			reset := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+			acc := newPremium5hTestAccount("plus", reset)
+			acc.DBID = id
+			acc.UsagePercent7d, acc.UsagePercent7dValid, acc.Reset7dAt = 100, true, reset
+			mark := func() {
+				switch source {
+				case "5h":
+					store.MarkPremium5hRateLimited(acc, reset)
+				case "7d":
+					store.MarkUsage7dRateLimited(acc)
+				case "responses":
+					store.MarkResponsesPremium5hRateLimited(acc, reset)
+				}
+			}
+			if _, err := conn.Exec(`CREATE TRIGGER fail_cooldown BEFORE UPDATE OF cooldown_until ON accounts BEGIN SELECT RAISE(FAIL, 'synthetic transient failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+			mark()
+			streak := acc.FailureStreak
+			row, err := db.GetAccountByID(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.CooldownUntil.Valid {
+				t.Fatal("fault injection did not reject the cooldown write")
+			}
+			if _, err := conn.Exec(`DROP TRIGGER fail_cooldown`); err != nil {
+				t.Fatal(err)
+			}
+			mark()
+			row, err = db.GetAccountByID(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !row.CooldownUntil.Valid || !row.CooldownUntil.Time.Equal(reset) || row.CooldownReason != acc.GetCooldownReason() {
+				t.Fatalf("cooldown was not retried after recovery: %+v", row.CooldownUntil)
+			}
+			if acc.FailureStreak != streak {
+				t.Fatal("persistence retry counted another failure")
+			}
+		})
+	}
+}

@@ -231,20 +231,16 @@ func applyCodexUsageHeaders(store *auth.Store, account *auth.Account, headers ht
 	// the shared sync treats an absent value as "not reached" (correct for HTTP
 	// response headers). Preserve the last workspace hard stop instead of
 	// clearing it; only WHAM or an explicit metadata header may clear it.
-	if headers.Get("x-codex-rate-limit-reached-type") == "" {
-		if current := account.GetRateLimitReachedType(); current != "" {
-			headers.Set("x-codex-rate-limit-reached-type", current)
-		}
-	}
 	resp := &http.Response{Header: headers}
 	// A per-turn frame may omit one window; never let it erase a valid snapshot.
 	// WHAM probes remain the authority for window presence/absence. The persist
 	// decision runs inside ApplyUsageObservation so a stale/out-of-order frame
 	// cannot advance the throttling state without being applied.
 	return syncCodexUsageState(store, account, resp, observedAt, codexUsageSyncOptions{
-		persistUsageSnapshot: true,
-		clearAbsent5h:        false,
-		asyncPersist:         true,
+		persistUsageSnapshot:   true,
+		clearAbsent5h:          false,
+		asyncPersist:           true,
+		preserveAbsentHardStop: true,
 		shouldPersistUsage: func(pct5h float64, has5h bool, pct7d float64, has7d bool) bool {
 			return account.ShouldPersistUsageFrame(observedAt, pct5h, has5h, pct7d, has7d, codexUsageFramePersistInterval())
 		},

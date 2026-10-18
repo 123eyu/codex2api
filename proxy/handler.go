@@ -8760,6 +8760,9 @@ type codexUsageSyncOptions struct {
 	// worker. The upstream read path only applies memory/scheduler state, so a
 	// slow or locked database cannot stall a streaming response.
 	asyncPersist bool
+	// preserveAbsentHardStop is used by partial WS quota frames, which cannot
+	// clear a workspace stop unless they explicitly carry that field.
+	preserveAbsentHardStop bool
 }
 
 func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Response, observedAt time.Time, opts codexUsageSyncOptions) CodexUsageSyncResult {
@@ -8770,51 +8773,54 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 	if observedAt.IsZero() {
 		observedAt = time.Now()
 	}
-	if store != nil {
-		planHeader := resp.Header.Get("x-codex-plan-type")
-		store.UpdateAccountPlanType(account, planHeader)
-		// 权威付费 plan_type 与「订阅已过期」互斥，借每次响应校正陈旧到期时间。(issue #360)
-		if planHeader != "" {
-			store.ClearStaleSubscriptionExpiresAt(account)
-		}
-	}
-
 	observation := parseCodexUsageHeaderObservation(resp)
+	hasCredits, unlimited, creditsObserved := parseCodexCreditsFlagHeaders(resp)
 	rateLimitReachedType := strings.TrimSpace(resp.Header.Get("x-codex-rate-limit-reached-type"))
-	result.RateLimitReachedType = rateLimitReachedType
-	if hasCredits, unlimited, ok := parseCodexCreditsFlagHeaders(resp); ok {
-		result.CreditsObserved = true
-		var balPtr *string
-		if trimmed := strings.TrimSpace(resp.Header.Get("x-codex-credits-balance")); trimmed != "" {
-			balPtr = &trimmed
-		}
-		var overagePtr *bool
-		if raw := strings.TrimSpace(resp.Header.Get("x-codex-credits-overage-reached")); raw != "" {
-			if ov, err := strconv.ParseBool(raw); err == nil {
-				overagePtr = &ov
+	apply := func() {
+		if store != nil {
+			planHeader := resp.Header.Get("x-codex-plan-type")
+			store.UpdateAccountPlanType(account, planHeader)
+			// 权威付费 plan_type 与「订阅已过期」互斥，借每次响应校正陈旧到期时间。(issue #360)
+			if planHeader != "" {
+				store.ClearStaleSubscriptionExpiresAt(account)
 			}
 		}
-		if store != nil {
-			store.PersistSparseCreditObservation(account, hasCredits, unlimited, balPtr, overagePtr, rateLimitReachedType)
-		} else {
-			account.ApplySparseCreditsHeaders(hasCredits, unlimited, balPtr, overagePtr, rateLimitReachedType)
-		}
-	} else if rateLimitReachedType != "" || observation.authoritative {
-		// reached-type 是逐响应字段：带用量头的响应没有它就是「未触达」，要把旧的
-		// workspace hard-stop 清掉，否则工作区充值后积分顶替永远回不来。
-		if store != nil {
-			store.PersistRateLimitReachedType(account, rateLimitReachedType)
-		} else {
-			account.SetRateLimitReachedType(rateLimitReachedType)
-		}
-	}
 
-	result.UsageWindowLimitsIgnored = account.SkipsUsageWindowLimits()
+		if opts.preserveAbsentHardStop && rateLimitReachedType == "" {
+			rateLimitReachedType = account.GetRateLimitReachedType()
+		}
+		result.RateLimitReachedType = rateLimitReachedType
+		if creditsObserved {
+			result.CreditsObserved = true
+			var balPtr *string
+			if trimmed := strings.TrimSpace(resp.Header.Get("x-codex-credits-balance")); trimmed != "" {
+				balPtr = &trimmed
+			}
+			var overagePtr *bool
+			if raw := strings.TrimSpace(resp.Header.Get("x-codex-credits-overage-reached")); raw != "" {
+				if ov, err := strconv.ParseBool(raw); err == nil {
+					overagePtr = &ov
+				}
+			}
+			if store != nil {
+				store.PersistSparseCreditObservation(account, hasCredits, unlimited, balPtr, overagePtr, rateLimitReachedType)
+			} else {
+				account.ApplySparseCreditsHeaders(hasCredits, unlimited, balPtr, overagePtr, rateLimitReachedType)
+			}
+		} else if rateLimitReachedType != "" || observation.authoritative {
+			// reached-type 是逐响应字段：带用量头的响应没有它就是「未触达」，要把旧的
+			// workspace hard-stop 清掉，否则工作区充值后积分顶替永远回不来。
+			if store != nil {
+				store.PersistRateLimitReachedType(account, rateLimitReachedType)
+			} else {
+				account.SetRateLimitReachedType(rateLimitReachedType)
+			}
+		}
 
-	result.Used5hHeaders = observation.w5h.valid
-	usageApplied := false
-	if observation.authoritative {
-		usageApplied = account.ApplyUsageObservation(observedAt, func() {
+		result.UsageWindowLimitsIgnored = account.SkipsUsageWindowLimits()
+
+		result.Used5hHeaders = observation.w5h.valid
+		if observation.authoritative {
 			parsed := applyCodexUsageHeaderObservation(store, account, observation, observedAt, opts.clearAbsent5h)
 			result.UsagePct7d = parsed.usagePct7d
 			result.HasUsage7d = parsed.hasUsage7d
@@ -8866,8 +8872,13 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 				pct7d, has7d := account.GetUsagePercent7d()
 				account.MarkUsageFramePersisted(observedAt, pct5h, has5h, pct7d, has7d)
 			}
-		})
+		}
 	}
+	applied := false
+	if observation.authoritative || creditsObserved || rateLimitReachedType != "" || resp.Header.Get("x-codex-plan-type") != "" {
+		applied = account.ApplyUsageObservation(observedAt, apply)
+	}
+	usageApplied := applied && observation.authoritative
 
 	result.UsagePct5h, result.Reset5hAt, result.HasUsage5h = account.GetUsageSnapshot5h()
 	if usageApplied && store != nil && result.HasUsage5h {
@@ -8886,7 +8897,7 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 		}
 	}
 
-	result.Applied = usageApplied || result.CreditsObserved
+	result.Applied = applied && (usageApplied || result.CreditsObserved)
 	return result
 }
 
