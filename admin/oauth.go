@@ -22,6 +22,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
+	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 )
 
@@ -776,6 +777,50 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		idToken:      tokenResp.IDToken,
 		expiresIn:    tokenResp.ExpiresIn,
 	})
+
+	// 公开自助门户发起的会话必须走「待审核」入库，不能因为 state 被带到公开
+	// /auth/callback 就绕过 SubmitAccountPortalCode 的 enabled=false 分支。
+	if sess.SelfService {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+		defer cancel()
+		name := seed.email
+		if name == "" {
+			name = "self-service-account"
+		}
+		id, err := h.upsertSelfServiceAccount(ctx, name, proxyURL, seed, sess.ContactEmail)
+		if err == errDuplicateOAuthIdentity {
+			globalOAuthStore.delete(sessionID)
+			sess.ExchangeResult = &oauthExchangeResult{
+				Success: true,
+				Message: "该账号已在系统中，无需重复提交",
+			}
+			c.String(http.StatusOK, oauthCallbackPage("提交成功", "该账号已在系统中，无需重复提交。", true))
+			return
+		}
+		if err != nil {
+			sess.ExchangeResult = &oauthExchangeResult{
+				Success: false,
+				Error:   "账号写入数据库失败: " + err.Error(),
+			}
+			c.String(http.StatusOK, oauthCallbackPage("授权失败", "写入数据库失败: "+err.Error(), false))
+			return
+		}
+		globalOAuthStore.delete(sessionID)
+		email := seed.email
+		if accountInfo != nil && accountInfo.Email != "" {
+			email = accountInfo.Email
+		}
+		security.SecurityAuditLog("ACCOUNT_PORTAL_SUBMITTED", "ip="+security.SanitizeLog(c.ClientIP())+" contact="+security.SanitizeLog(sess.ContactEmail)+" account="+security.SanitizeLog(email))
+		sess.ExchangeResult = &oauthExchangeResult{
+			Success: true,
+			Message: "账号已提交，等待管理员审核",
+			ID:      id,
+			Email:   email,
+		}
+		log.Printf("自助门户回调新增待审核账号: id=%d email=%s", id, email)
+		c.String(http.StatusOK, oauthCallbackPage("提交成功", "已提交，等待管理员审核后生效。感谢你的贡献！", true))
+		return
+	}
 
 	// 自动添加账号
 	name := ""
