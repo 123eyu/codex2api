@@ -138,14 +138,14 @@ func (s *Store) PersistUsageSnapshot5hOnly(acc *Account) {
 
 // PublishUsageSnapshot5hOnly updates the in-memory 5h snapshot and scheduler.
 // persist=false skips the DB write for the throttled WS frame path.
-func (s *Store) PublishUsageSnapshot5hOnly(acc *Account, observedAt time.Time, persist bool) {
+func (s *Store) PublishUsageSnapshot5hOnly(acc *Account, observedAt time.Time, persist bool) bool {
 	if acc == nil || s == nil {
-		return
+		return false
 	}
 
 	pct5h, reset5hAt, ok := acc.GetUsageSnapshot5h()
 	if !ok {
-		return
+		return false
 	}
 
 	if observedAt.IsZero() {
@@ -158,14 +158,16 @@ func (s *Store) PublishUsageSnapshot5hOnly(acc *Account, observedAt time.Time, p
 	s.fastSchedulerUpdate(acc)
 
 	if !persist || s.db == nil {
-		return
+		return false
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, pct5h, reset5hAt, observedAt); err != nil {
 		log.Printf("[账号 %d] 持久化 5h 用量快照失败: %v", acc.DBID, err)
+		return false
 	}
+	return true
 }
 
 // Persist5hWindowActivated 把「已为哪个 Reset5hAt 发过开窗请求」写入 credentials，重启后不重复打。
@@ -321,6 +323,17 @@ func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.
 	}
 	if resetAt.IsZero() || !resetAt.After(now) {
 		resetAt = now.Add(premium5hFallbackWindow)
+	}
+
+	// Re-observing the same exhausted window must not write the cooldown again.
+	acc.mu.RLock()
+	alreadyLimited := acc.Status == StatusCooldown &&
+		acc.CooldownReason == cooldownReason &&
+		now.Before(acc.CooldownUtil) &&
+		cooldownMatchesReset(acc.CooldownUtil, resetAt)
+	acc.mu.RUnlock()
+	if alreadyLimited {
+		return
 	}
 
 	acc.mu.Lock()

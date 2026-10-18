@@ -29,6 +29,21 @@ var codexUsageFramePersistIntervalNanos = func() *atomic.Int64 {
 	return value
 }()
 
+// codexUsageFrameIngestEnabled is the deployment-level kill switch for WS
+// quota ingestion. When disabled, usage falls back to WHAM probes and HTTP
+// response headers without rebuilding the image.
+var codexUsageFrameIngestEnabled = func() *atomic.Bool {
+	value := &atomic.Bool{}
+	value.Store(true)
+	return value
+}()
+
+// SetCodexUsageFrameIngestEnabled overrides the WS frame ingestion switch.
+// Call before serving traffic.
+func SetCodexUsageFrameIngestEnabled(enabled bool) {
+	codexUsageFrameIngestEnabled.Store(enabled)
+}
+
 // SetCodexUsageFramePersistInterval overrides the frame persistence cadence.
 // Values <= 0 restore the default. Call before serving traffic.
 func SetCodexUsageFramePersistInterval(interval time.Duration) {
@@ -49,7 +64,7 @@ func codexUsageFramePersistInterval() time.Duration {
 // already on the wire (the gateway forwards them downstream), so this adds no
 // upstream requests and no new request headers.
 func ApplyCodexUsageEventFrame(store *auth.Store, account *auth.Account, eventType string, frame gjson.Result, observedAt time.Time) {
-	if account == nil {
+	if account == nil || !codexUsageFrameIngestEnabled.Load() {
 		return
 	}
 	switch strings.ToLower(strings.TrimSpace(eventType)) {
@@ -69,15 +84,16 @@ func applyCodexRateLimitsFrame(store *auth.Store, account *auth.Account, frame g
 	if len(headers) == 0 {
 		return
 	}
+	account.MarkUsageFrameObserved(codexRateLimitsFrameType, observedAt)
 	applyCodexUsageHeaders(store, account, headers, observedAt)
 }
 
 func codexRateLimitsHeaders(frame gjson.Result, observedAt time.Time) http.Header {
-	if name := firstCodexFrameString(frame, "metered_limit_name", "limit_name"); name != "" && !isDefaultCodexLimitName(name) {
+	if name := firstCodexFrameString(frame, "metered_limit_name", "limit_name", "limit_id"); name != "" && !isDefaultCodexLimitName(name) {
 		return nil
 	}
 	headers := make(http.Header)
-	if plan := strings.TrimSpace(frame.Get("plan_type").String()); plan != "" {
+	if plan, ok := codexFrameText(frame.Get("plan_type").String(), 32); ok {
 		headers.Set("x-codex-plan-type", plan)
 	}
 	setCodexFrameWindow(headers, "x-codex-primary-", frame.Get("rate_limits.primary"), observedAt)
@@ -91,7 +107,7 @@ func codexRateLimitsHeaders(frame gjson.Result, observedAt time.Time) http.Heade
 		if hasCredits.Exists() && unlimited.Exists() {
 			headers.Set("x-codex-credits-has-credits", hasCredits.String())
 			headers.Set("x-codex-credits-unlimited", unlimited.String())
-			if balance := strings.TrimSpace(credits.Get("balance").String()); balance != "" {
+			if balance, ok := codexFrameText(credits.Get("balance").String(), 128); ok {
 				headers.Set("x-codex-credits-balance", balance)
 			}
 		}
@@ -99,15 +115,33 @@ func codexRateLimitsHeaders(frame gjson.Result, observedAt time.Time) http.Heade
 	return headers
 }
 
-// applyCodexResponseMetadataFrame adopts the x-codex-* headers embedded in a
-// codex.response.metadata frame. Other headers are intentionally dropped: some
-// upstream metadata frames also carry cookies or request identifiers that must
-// not be persisted or logged.
+// codexFrameText validates free-text values copied from an upstream frame.
+// These values can reach plain-text logs or persistence, so reject control
+// characters that could forge a line.
+func codexFrameText(value string, maxLen int) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maxLen {
+		return "", false
+	}
+	for _, char := range value {
+		if char < 0x20 || char == 0x7f {
+			return "", false
+		}
+	}
+	return value, true
+}
+
+// applyCodexResponseMetadataFrame adopts the quota headers embedded in a
+// codex.response.metadata frame. The same frame also carries protocol routing
+// data (x-codex-turn-state) and model catalog hints (x-models-etag); only the
+// explicit quota-header allowlist below is copied, so routing or model metadata
+// never reaches the usage sync or its persistence path.
 func applyCodexResponseMetadataFrame(store *auth.Store, account *auth.Account, frame gjson.Result, observedAt time.Time) {
 	headers := codexResponseMetadataHeaders(frame, observedAt)
 	if len(headers) == 0 {
 		return
 	}
+	account.MarkUsageFrameObserved(codexResponseMetadataFrameType, observedAt)
 	applyCodexUsageHeaders(store, account, headers, observedAt)
 }
 
@@ -115,7 +149,22 @@ func codexResponseMetadataHeaders(frame gjson.Result, observedAt time.Time) http
 	headers := make(http.Header)
 	frame.Get("headers").ForEach(func(key, value gjson.Result) bool {
 		name := strings.ToLower(strings.TrimSpace(key.String()))
-		if !strings.HasPrefix(name, "x-codex-") {
+		if !isCodexUsageFrameHeader(name) {
+			return true
+		}
+		// The official client accepts header values that are arrays and reads the
+		// first element (json_value_as_string). Mirror that so a wrapped value
+		// does not silently drop the whole window.
+		if value.IsArray() {
+			items := value.Array()
+			if len(items) == 0 {
+				return true
+			}
+			value = items[0]
+		}
+		switch value.Type {
+		case gjson.String, gjson.Number, gjson.True, gjson.False:
+		default:
 			return true
 		}
 		// Convert the absolute reset form to the relative form using the frame's
@@ -134,15 +183,47 @@ func codexResponseMetadataHeaders(frame gjson.Result, observedAt time.Time) http
 			}
 			return true
 		}
-		headers.Set(name, value.String())
+		raw, ok := codexFrameText(value.String(), 256)
+		if !ok {
+			return true
+		}
+		headers.Set(name, raw)
 		return true
 	})
 	return headers
 }
 
+// isCodexUsageFrameHeader lists the headers consumed by the synthetic HTTP
+// response. The metadata frame also carries routing and model fields in the
+// same object; an explicit allowlist keeps those out of the usage path even if
+// the sync later starts persisting more header fields.
+func isCodexUsageFrameHeader(name string) bool {
+	switch name {
+	case "x-codex-plan-type",
+		"x-codex-primary-used-percent", "x-codex-primary-window-minutes",
+		"x-codex-primary-reset-at", "x-codex-primary-reset-after-seconds",
+		"x-codex-secondary-used-percent", "x-codex-secondary-window-minutes",
+		"x-codex-secondary-reset-at", "x-codex-secondary-reset-after-seconds",
+		"x-codex-credits-has-credits", "x-codex-credits-unlimited",
+		"x-codex-credits-balance", "x-codex-credits-overage-reached",
+		"x-codex-rate-limit-reached-type":
+		return true
+	}
+	return false
+}
+
 func applyCodexUsageHeaders(store *auth.Store, account *auth.Account, headers http.Header, observedAt time.Time) {
 	if len(headers) == 0 {
 		return
+	}
+	// WS frames do not carry the per-response rate_limit_reached_type field, and
+	// the shared sync treats an absent value as "not reached" (correct for HTTP
+	// response headers). Preserve the last workspace hard stop instead of
+	// clearing it; only WHAM or an explicit metadata header may clear it.
+	if headers.Get("x-codex-rate-limit-reached-type") == "" {
+		if current := account.GetRateLimitReachedType(); current != "" {
+			headers.Set("x-codex-rate-limit-reached-type", current)
+		}
 	}
 	resp := &http.Response{Header: headers}
 	// A per-turn frame may omit one window; never let it erase a valid snapshot.
@@ -181,15 +262,21 @@ func setCodexFrameWindow(headers http.Header, prefix string, window gjson.Result
 func codexFrameResetSeconds(window gjson.Result, observedAt time.Time) string {
 	for _, key := range []string{"resets_in_seconds", "reset_after_seconds"} {
 		if value := window.Get(key); value.Exists() {
-			if n := codexFrameInt64(value); n > 0 {
+			if n, ok := codexFrameInt64Value(value); ok {
+				// Zero/negative means "resets now", matching the absolute form
+				// where a past epoch is clamped to zero. Only a missing or
+				// unparseable field keeps the previous reset.
+				if n < 0 {
+					n = 0
+				}
 				return strconv.FormatInt(n, 10)
 			}
 		}
 	}
 	for _, key := range []string{"reset_at", "resets_at"} {
 		if value := window.Get(key); value.Exists() {
-			epoch := codexFrameInt64(value)
-			if epoch <= 0 {
+			epoch, ok := codexFrameInt64Value(value)
+			if !ok || epoch <= 0 {
 				continue
 			}
 			seconds := epoch - observedAt.Unix()
@@ -202,14 +289,19 @@ func codexFrameResetSeconds(window gjson.Result, observedAt time.Time) string {
 	return ""
 }
 
-func codexFrameInt64(value gjson.Result) int64 {
+func codexFrameInt64Value(value gjson.Result) (int64, bool) {
 	if value.Type == gjson.Number {
-		return value.Int()
+		return value.Int(), true
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(value.String()), 10, 64)
 	if err != nil {
-		return 0
+		return 0, false
 	}
+	return n, true
+}
+
+func codexFrameInt64(value gjson.Result) int64 {
+	n, _ := codexFrameInt64Value(value)
 	return n
 }
 
@@ -222,9 +314,10 @@ func firstCodexFrameString(frame gjson.Result, paths ...string) string {
 	return ""
 }
 
+var codexLimitNameSeparators = strings.NewReplacer("_", "-", " ", "-")
+
 func isDefaultCodexLimitName(name string) bool {
-	normalized := strings.NewReplacer("_", "-", " ", "-").Replace(strings.ToLower(strings.TrimSpace(name)))
-	return normalized == "codex" || normalized == "gpt-codex"
+	return codexLimitNameSeparators.Replace(strings.ToLower(strings.TrimSpace(name))) == "codex"
 }
 
 // ApplyCodexIdleUsageFrame is the observer for connection-level metadata frames
@@ -235,19 +328,26 @@ func isDefaultCodexLimitName(name string) bool {
 // paths; this path exists to shrink the window between a turn finishing and
 // the scheduler seeing its consumption.
 func ApplyCodexIdleUsageFrame(account *auth.Account, eventType string, payload []byte) {
-	if account == nil || len(payload) == 0 {
+	if account == nil || len(payload) == 0 || !codexUsageFrameIngestEnabled.Load() {
 		return
 	}
+	normalizedType := strings.ToLower(strings.TrimSpace(eventType))
+	switch normalizedType {
+	case codexRateLimitsFrameType, codexResponseMetadataFrameType, responseMetadataFrameType:
+	default:
+		return
+	}
+	// Only quota-bearing frames are parsed. The read pump also forwards
+	// responsesapi.* telemetry frames here; skipping them before gjson keeps
+	// the sole raw reader cheap.
 	observedAt := time.Now()
 	frame := gjson.ParseBytes(payload)
 	var headers http.Header
-	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	switch normalizedType {
 	case codexRateLimitsFrameType:
 		headers = codexRateLimitsHeaders(frame, observedAt)
-	case codexResponseMetadataFrameType, responseMetadataFrameType:
-		headers = codexResponseMetadataHeaders(frame, observedAt)
 	default:
-		return
+		headers = codexResponseMetadataHeaders(frame, observedAt)
 	}
 	if len(headers) == 0 {
 		return
@@ -257,6 +357,7 @@ func ApplyCodexIdleUsageFrame(account *auth.Account, eventType string, payload [
 		return
 	}
 	account.TryApplyUsageObservation(observedAt, func() {
+		account.MarkUsageFrameObserved(normalizedType, observedAt)
 		// Never clear an absent 5h window from a partial connection-level frame.
 		applyCodexUsageHeaderObservation(nil, account, observation, observedAt, false)
 	})

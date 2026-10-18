@@ -180,15 +180,19 @@ type usageLimitDetails struct {
 }
 
 type CodexUsageSyncResult struct {
-	UsagePct7d               float64
-	HasUsage7d               bool
-	Usage7dRateLimited       bool
-	UsagePct5h               float64
-	Reset5hAt                time.Time
-	HasUsage5h               bool
-	Used5hHeaders            bool
-	Persisted5hOnly          bool
-	Premium5hRateLimited     bool
+	UsagePct7d         float64
+	HasUsage7d         bool
+	Usage7dRateLimited bool
+	UsagePct5h         float64
+	Reset5hAt          time.Time
+	HasUsage5h         bool
+	Used5hHeaders      bool
+	Persisted5hOnly    bool
+	// Premium5hRateLimited 表示本次同步把账号标记为 premium 5h 限流。
+	Premium5hRateLimited bool
+	// PersistUsage 表示节流策略允许本次观察落库。WS 帧路径可能只更新内存
+	// 快照；100% 冷却标记只跟着允许落库的观察执行，避免每帧重复写库。
+	PersistUsage             bool
 	UsageWindowLimitsIgnored bool
 	// Cleared5h 表示本次同步因上游未返回 5h 窗口而清除了本地陈旧 5h 快照（issue #382）。
 	Cleared5h bool
@@ -8154,6 +8158,11 @@ func parseCodexWindowUsage(usedStr, windowStr, resetStr string) codexWindowUsage
 	if _, err := fmt.Sscanf(usedStr, "%f", &usedPct); err != nil {
 		return codexWindowUsage{}
 	}
+	// Reject out-of-range percentages instead of pacing an account on a
+	// malformed observation; keep the previous snapshot until the next probe.
+	if usedPct < 0 || usedPct > 100 {
+		return codexWindowUsage{}
+	}
 	if _, err := fmt.Sscanf(windowStr, "%f", &windowMin); err != nil || windowMin <= 0 {
 		return codexWindowUsage{}
 	}
@@ -8807,14 +8816,24 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 					observation.w7d.valid,
 				)
 			}
+			result.PersistUsage = persistUsage
+			persistedUsage := false
 			if result.HasUsage7d {
-				store.PublishUsageSnapshot(account, result.UsagePct7d, observedAt, persistUsage)
-				if result.UsagePct7d >= 100 {
+				persistedUsage = store.PublishUsageSnapshot(account, result.UsagePct7d, observedAt, persistUsage)
+				if result.UsagePct7d >= 100 && persistUsage {
 					result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
 				}
 			} else if result.Used5hHeaders {
-				store.PublishUsageSnapshot5hOnly(account, observedAt, persistUsage)
+				persistedUsage = store.PublishUsageSnapshot5hOnly(account, observedAt, persistUsage)
 				result.Persisted5hOnly = persistUsage
+			}
+			if persistUsage && persistedUsage {
+				// Advance the frame throttle only after the write succeeded so a
+				// failed write is retried on the next frame instead of sleeping
+				// through the interval.
+				pct5h, has5h := account.GetUsagePercent5h()
+				pct7d, has7d := account.GetUsagePercent7d()
+				account.MarkUsageFramePersisted(observedAt, pct5h, has5h, pct7d, has7d)
 			}
 		})
 	}
@@ -8826,7 +8845,11 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 	}
 	if usageApplied && result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
 		if store != nil {
-			result.Premium5hRateLimited = store.MarkPremium5hRateLimitedAt(account, result.Reset5hAt, observedAt)
+			// The per-frame path may decide not to persist this observation; a
+			// repeated 100% frame must not issue another cooldown write.
+			if result.PersistUsage {
+				result.Premium5hRateLimited = store.MarkPremium5hRateLimitedAt(account, result.Reset5hAt, observedAt)
+			}
 		} else {
 			result.Premium5hRateLimited = true
 		}
@@ -8926,26 +8949,64 @@ func parseCodexUsageHeaderObservation(resp *http.Response) codexUsageHeaderObser
 func applyCodexUsageHeaderObservation(store *auth.Store, account *auth.Account, observation codexUsageHeaderObservation, observedAt time.Time, clearAbsent5h bool) codexUsageHeaderParseResult {
 	out := codexUsageHeaderParseResult{}
 	if observation.w5h.valid {
-		resetAt := account.GetReset5hAt()
+		existingReset := account.GetReset5hAt()
+		existingPct, existingValid := account.GetUsagePercent5h()
+		resetAt := existingReset
 		if observation.w5h.hasReset {
 			resetAt = observedAt.Add(time.Duration(observation.w5h.resetSec) * time.Second)
+		} else if resetAt.IsZero() {
+			// A partial frame without reset must not create a zero reset that
+			// never expires; bound the pause to one window length instead.
+			resetAt = observedAt.Add(time.Duration(observation.w5h.windowMin) * time.Minute)
 		}
-		account.SetUsageSnapshot5hAt(observation.w5h.usedPct, resetAt, observedAt)
+		pct := observation.w5h.usedPct
+		if existingValid && sameUsageResetWindow(existingReset, resetAt) && pct < existingPct {
+			// Within one window usage only increases. A late frame from an
+			// earlier concurrent turn must not roll the snapshot back and
+			// temporarily un-pause the account.
+			pct = existingPct
+		}
+		account.SetUsageSnapshot5hAt(pct, resetAt, observedAt)
 	} else if observation.authoritative && clearAbsent5h {
 		out.cleared5h = store.ClearAbsentUsageSnapshot5hAt(account, observedAt)
 	}
 
 	if observation.w7d.valid {
+		existingReset := account.GetReset7dAt()
+		existingPct, existingValid := account.GetUsagePercent7d()
+		resetAt := existingReset
 		if observation.w7d.hasReset {
-			resetAt := observedAt.Add(time.Duration(observation.w7d.resetSec) * time.Second)
+			resetAt = observedAt.Add(time.Duration(observation.w7d.resetSec) * time.Second)
+			account.SetReset7dAt(resetAt)
+		} else if resetAt.IsZero() {
+			resetAt = observedAt.Add(time.Duration(observation.w7d.windowMin) * time.Minute)
 			account.SetReset7dAt(resetAt)
 		}
+		pct := observation.w7d.usedPct
+		if existingValid && sameUsageResetWindow(existingReset, resetAt) && pct < existingPct {
+			pct = existingPct
+		}
 		account.SetWindow7dSeconds(int64(observation.w7d.windowMin * 60))
-		account.SetUsagePercent7d(observation.w7d.usedPct)
-		out.usagePct7d = observation.w7d.usedPct
+		account.SetUsagePercent7d(pct)
+		out.usagePct7d = pct
 		out.hasUsage7d = true
 	}
 	return out
+}
+
+// sameUsageResetWindow reports whether two observations describe the same
+// rolling window. Relative reset headers are recomputed against the receipt
+// time, so allow a small tolerance while still distinguishing the next
+// (hours later) window.
+func sameUsageResetWindow(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	diff := a.Sub(b)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= time.Minute
 }
 
 // ParseCodexUsageHeaders 从响应头提取并更新账号用量信息

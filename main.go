@@ -453,6 +453,12 @@ func main() {
 			proxy.SetCodexUsageFramePersistInterval(time.Duration(seconds) * time.Second)
 		}
 	}
+	// 帧摄入的部署级逃生阀；false 时回退到 WHAM 探针与 HTTP 响应头。
+	if raw := strings.TrimSpace(os.Getenv("CODEX_WS_USAGE_FRAME_INGEST")); raw != "" {
+		if enabled, err := strconv.ParseBool(raw); err == nil {
+			proxy.SetCodexUsageFrameIngestEnabled(enabled)
+		}
+	}
 
 	// 注册 Agent Identity task 确保函数（proxy 无 Store 引用，启动时注入）
 	proxy.EnsureCodexAgentIdentityTaskFunc = store.EnsureCodexAgentIdentityTask

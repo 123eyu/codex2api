@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
 	"github.com/tidwall/gjson"
 )
 
@@ -95,9 +96,29 @@ func TestApplyCodexResponseMetadataFrameAdoptsUsageHeaders(t *testing.T) {
 			"x-codex-primary-used-percent":"33",
 			"x-codex-primary-window-minutes":"300",
 			"x-codex-primary-reset-at":"1700000900",
+			"x-codex-turn-state":"ts-must-not-be-used",
+			"x-codex-safety-buffering-enabled":"true",
+			"x-models-etag":"etag-must-not-be-used",
+			"authorization":"Bearer must-not-be-used",
 			"set-cookie":"must-not-be-used"
 		}
 	}`)
+
+	headers := codexResponseMetadataHeaders(frame, observedAt)
+	if got := headers.Get("x-codex-primary-used-percent"); got != "33" {
+		t.Fatalf("quota header = %q, want 33", got)
+	}
+	for _, name := range []string{
+		"x-codex-turn-state",
+		"x-codex-safety-buffering-enabled",
+		"x-models-etag",
+		"authorization",
+		"set-cookie",
+	} {
+		if got := headers.Get(name); got != "" {
+			t.Fatalf("%s leaked into synthetic usage headers: %q", name, got)
+		}
+	}
 
 	ApplyCodexUsageEventFrame(nil, acc, "codex.response.metadata", frame, observedAt)
 
@@ -107,6 +128,120 @@ func TestApplyCodexResponseMetadataFrameAdoptsUsageHeaders(t *testing.T) {
 	}
 	if want := observedAt.Add(15 * time.Minute); !acc.GetReset5hAt().Equal(want) {
 		t.Fatalf("Reset5hAt = %v, want %v", acc.GetReset5hAt(), want)
+	}
+}
+
+func TestSyncCodexUsageStateMarks100PercentOnlyWhenPersisting(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
+	t.Cleanup(store.Stop)
+	observedAt := time.Now()
+
+	newFullResponse := func() *http.Response {
+		resp := &http.Response{Header: http.Header{}}
+		resp.Header.Set("x-codex-primary-used-percent", "100")
+		resp.Header.Set("x-codex-primary-window-minutes", "300")
+		resp.Header.Set("x-codex-primary-reset-after-seconds", "3600")
+		resp.Header.Set("x-codex-secondary-used-percent", "100")
+		resp.Header.Set("x-codex-secondary-window-minutes", "10080")
+		resp.Header.Set("x-codex-secondary-reset-after-seconds", "86400")
+		return resp
+	}
+
+	throttled := newUsageFrameTestAccount()
+	store.AddAccount(throttled)
+	result := syncCodexUsageState(store, throttled, newFullResponse(), observedAt, codexUsageSyncOptions{
+		persistUsageSnapshot: true,
+		shouldPersistUsage:   func(float64, bool, float64, bool) bool { return false },
+	})
+	if result.Usage7dRateLimited || result.Premium5hRateLimited {
+		t.Fatalf("throttled frame marked cooldowns: 7d=%v 5h=%v", result.Usage7dRateLimited, result.Premium5hRateLimited)
+	}
+	if throttled.Status == auth.StatusCooldown {
+		t.Fatal("throttled 100% frame put the account into cooldown")
+	}
+
+	persisted := newUsageFrameTestAccount()
+	persisted.DBID = 2
+	store.AddAccount(persisted)
+	result = syncCodexUsageState(store, persisted, newFullResponse(), observedAt, codexUsageSyncOptions{
+		persistUsageSnapshot: true,
+		shouldPersistUsage:   func(float64, bool, float64, bool) bool { return true },
+	})
+	if !result.Usage7dRateLimited || !result.Premium5hRateLimited {
+		t.Fatalf("persisted 100%% marks = 7d:%v 5h:%v, want both", result.Usage7dRateLimited, result.Premium5hRateLimited)
+	}
+}
+
+func TestApplyCodexRateLimitsFrameProPrimaryWeekly(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	acc.PlanType = "pro"
+	now := time.Unix(1_700_000_000, 0)
+	acc.SetUsageSnapshot5hAt(12, now.Add(time.Hour), now.Add(-time.Minute))
+	// Shape captured from a live CLIProxyAPI fixture: a Pro plan can carry the
+	// weekly window in primary and leave secondary null.
+	frame := gjson.Parse(`{
+		"type":"codex.rate_limits",
+		"plan_type":"pro",
+		"rate_limits":{
+			"allowed":true,
+			"limit_reached":false,
+			"primary":{"used_percent":81,"window_minutes":10080,"reset_after_seconds":137160,"reset_at":1700137160},
+			"secondary":null
+		},
+		"credits":{"has_credits":false,"unlimited":false,"balance":"0"}
+	}`)
+
+	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", frame, now)
+
+	if pct, ok := acc.GetUsagePercent7d(); !ok || pct != 81 {
+		t.Fatalf("7d usage = %v valid=%v, want 81", pct, ok)
+	}
+	if pct, ok := acc.GetUsagePercent5h(); !ok || pct != 12 {
+		t.Fatalf("primary weekly frame cleared 5h snapshot: usage=%v valid=%v", pct, ok)
+	}
+	if got, want := acc.GetReset7dAt(), now.Add(137160*time.Second); !got.Equal(want) {
+		t.Fatalf("Reset7dAt = %v, want %v", got, want)
+	}
+}
+
+func TestParseCodexWindowUsageRejectsOutOfRangePercent(t *testing.T) {
+	for _, used := range []string{"101", "-1"} {
+		if got := parseCodexWindowUsage(used, "300", "60"); got.valid {
+			t.Fatalf("used_percent %s accepted: %+v", used, got)
+		}
+	}
+	if got := parseCodexWindowUsage("100", "300", "60"); !got.valid {
+		t.Fatal("used_percent 100 rejected")
+	}
+}
+
+func TestCodexUsageFrameIngestKillSwitch(t *testing.T) {
+	SetCodexUsageFrameIngestEnabled(false)
+	t.Cleanup(func() { SetCodexUsageFrameIngestEnabled(true) })
+
+	acc := newUsageFrameTestAccount()
+	frame := gjson.Parse(`{"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`)
+	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", frame, time.Now())
+	ApplyCodexIdleUsageFrame(acc, "codex.rate_limits", []byte(`{"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`))
+
+	if pct, ok := acc.GetUsagePercent5h(); ok {
+		t.Fatalf("disabled ingestion updated usage to %v", pct)
+	}
+}
+
+func TestApplyCodexUsageEventFrameRecordsFrameFreshness(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	observedAt := time.Unix(1_700_000_000, 0)
+	frame := gjson.Parse(`{"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`)
+
+	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", frame, observedAt)
+
+	snapshot := acc.GetAccountLiveUsageSnapshot()
+	if !snapshot.UsageFrameLastAt.Equal(observedAt) {
+		t.Fatalf("frame time = %v, want %v", snapshot.UsageFrameLastAt, observedAt)
+	}
+	if snapshot.UsageFrameLastKind != "codex.rate_limits" {
+		t.Fatalf("frame kind = %q, want codex.rate_limits", snapshot.UsageFrameLastKind)
 	}
 }
 
@@ -259,5 +394,169 @@ func TestParseCodexUsageHeaderObservationAcceptsResetAt(t *testing.T) {
 	}
 	if observation.w5h.resetSec < 14*60 || observation.w5h.resetSec > 16*60 {
 		t.Fatalf("resetSec = %v, want about 900", observation.w5h.resetSec)
+	}
+}
+
+func TestApplyCodexRateLimitsFramePreservesWorkspaceHardStop(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	acc.SetRateLimitReachedType("workspace_member_credits_depleted")
+	frame := gjson.Parse(`{
+		"type":"codex.rate_limits",
+		"plan_type":"plus",
+		"rate_limits":{
+			"primary":{"used_percent":42,"window_minutes":300,"reset_at":1700000900},
+			"secondary":{"used_percent":8,"window_minutes":10080,"reset_at":1700604800}
+		},
+		"credits":{"has_credits":true,"unlimited":false,"balance":"10"}
+	}`)
+
+	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", frame, time.Unix(1_700_000_000, 0))
+
+	if got := acc.GetRateLimitReachedType(); got != "workspace_member_credits_depleted" {
+		t.Fatalf("frame cleared workspace hard stop: %q", got)
+	}
+}
+
+func TestApplyCodexMetadataFramePreservesWorkspaceHardStop(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	acc.SetRateLimitReachedType("workspace_member_credits_depleted")
+	frame := gjson.Parse(`{
+		"type":"codex.response.metadata",
+		"headers":{"x-codex-primary-used-percent":"33","x-codex-primary-window-minutes":"300"}
+	}`)
+
+	ApplyCodexUsageEventFrame(nil, acc, "codex.response.metadata", frame, time.Unix(1_700_000_000, 0))
+
+	if got := acc.GetRateLimitReachedType(); got != "workspace_member_credits_depleted" {
+		t.Fatalf("metadata frame cleared workspace hard stop: %q", got)
+	}
+}
+
+func TestCodexResponseMetadataHeadersUnwrapsArrayValues(t *testing.T) {
+	observedAt := time.Unix(1_700_000_000, 0)
+	frame := gjson.Parse(`{"headers":{
+		"x-codex-primary-used-percent":["42"],
+		"x-codex-primary-window-minutes":["300"],
+		"x-codex-primary-reset-at":[1700000900],
+		"x-codex-credits-has-credits":["true"],
+		"x-codex-turn-state":["ts-must-not-be-used"]
+	}}`)
+
+	headers := codexResponseMetadataHeaders(frame, observedAt)
+	if got := headers.Get("x-codex-primary-used-percent"); got != "42" {
+		t.Fatalf("array header = %q, want 42", got)
+	}
+	if got := headers.Get("x-codex-primary-reset-after-seconds"); got != "900" {
+		t.Fatalf("array reset = %q, want 900", got)
+	}
+	if got := headers.Get("x-codex-credits-has-credits"); got != "true" {
+		t.Fatalf("array credits = %q, want true", got)
+	}
+	if got := headers.Get("x-codex-turn-state"); got != "" {
+		t.Fatalf("turn state leaked into quota headers: %q", got)
+	}
+}
+
+func TestCodexFrameRejectsControlCharacters(t *testing.T) {
+	observedAt := time.Unix(1_700_000_000, 0)
+	frame := gjson.Parse(`{
+		"plan_type":"plus\r\nX-Injected: 1",
+		"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}},
+		"credits":{"has_credits":true,"unlimited":false,"balance":"10\n20"}
+	}`)
+
+	headers := codexRateLimitsHeaders(frame, observedAt)
+	if got := headers.Get("x-codex-plan-type"); got != "" {
+		t.Fatalf("control characters in plan type were accepted: %q", got)
+	}
+	if got := headers.Get("x-codex-credits-balance"); got != "" {
+		t.Fatalf("control characters in balance were accepted: %q", got)
+	}
+	if got := headers.Get("x-codex-primary-used-percent"); got != "42" {
+		t.Fatalf("valid window was discarded: %q", got)
+	}
+
+	metadata := codexResponseMetadataHeaders(gjson.Parse(`{"headers":{
+		"x-codex-plan-type":"plus\r\nX-Injected: 1"
+	}}`), observedAt)
+	if got := metadata.Get("x-codex-plan-type"); got != "" {
+		t.Fatalf("control characters in metadata header were accepted: %q", got)
+	}
+}
+
+func TestCodexRateLimitsFrameTreatsZeroRelativeResetAsNow(t *testing.T) {
+	observedAt := time.Unix(1_700_000_000, 0)
+	frame := gjson.Parse(`{"rate_limits":{"primary":{
+		"used_percent":50,"window_minutes":300,"resets_in_seconds":0
+	}}}`)
+
+	headers := codexRateLimitsHeaders(frame, observedAt)
+	if got := headers.Get("x-codex-primary-reset-after-seconds"); got != "0" {
+		t.Fatalf("relative zero reset = %q, want 0", got)
+	}
+}
+
+func TestApplyCodexRateLimitsFrameIgnoresGPTCodexMeteredLimit(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	now := time.Now()
+	acc.SetUsageSnapshot5hAt(55, now.Add(time.Hour), now)
+	frame := gjson.Parse(`{
+		"type":"codex.rate_limits",
+		"limit_name":"gpt-codex",
+		"rate_limits":{"primary":{"used_percent":99,"window_minutes":300,"reset_at":1700000900}}
+	}`)
+
+	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", frame, now)
+
+	pct, ok := acc.GetUsagePercent5h()
+	if !ok || pct != 55 {
+		t.Fatalf("metered gpt-codex frame overwrote main window: usage=%v valid=%v", pct, ok)
+	}
+}
+
+func TestApplyCodexUsageHeaderObservationKeepsHigherUsageWithinSameWindow(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	t0 := time.Unix(1_700_000_000, 0)
+	first := codexUsageHeaderObservation{
+		w5h:           codexWindowUsage{usedPct: 50, resetSec: 3600, windowMin: 300, valid: true, hasReset: true},
+		authoritative: true,
+	}
+	applyCodexUsageHeaderObservation(nil, acc, first, t0, false)
+
+	second := first
+	second.w5h.usedPct = 40
+	second.w5h.resetSec = 3590 // t0+10s+3590s is the same absolute reset.
+	applyCodexUsageHeaderObservation(nil, acc, second, t0.Add(10*time.Second), false)
+	if pct, _ := acc.GetUsagePercent5h(); pct != 50 {
+		t.Fatalf("out-of-order frame rolled 5h usage back to %v, want 50", pct)
+	}
+
+	third := first
+	third.w5h.usedPct = 10
+	third.w5h.resetSec = 18000 // next window.
+	applyCodexUsageHeaderObservation(nil, acc, third, t0.Add(20*time.Second), false)
+	if pct, _ := acc.GetUsagePercent5h(); pct != 10 {
+		t.Fatalf("new window usage = %v, want 10", pct)
+	}
+}
+
+func TestApplyCodexUsageHeaderObservationBoundsMissingReset(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	t0 := time.Unix(1_700_000_000, 0)
+
+	applyCodexUsageHeaderObservation(nil, acc, codexUsageHeaderObservation{
+		w5h:           codexWindowUsage{usedPct: 80, windowMin: 300, valid: true},
+		authoritative: true,
+	}, t0, false)
+	if got, want := acc.GetReset5hAt(), t0.Add(5*time.Hour); !got.Equal(want) {
+		t.Fatalf("5h reset fallback = %v, want %v", got, want)
+	}
+
+	applyCodexUsageHeaderObservation(nil, acc, codexUsageHeaderObservation{
+		w7d:           codexWindowUsage{usedPct: 90, windowMin: 10080, valid: true},
+		authoritative: true,
+	}, t0, false)
+	if got, want := acc.GetReset7dAt(), t0.Add(7*24*time.Hour); !got.Equal(want) {
+		t.Fatalf("7d reset fallback = %v, want %v", got, want)
 	}
 }

@@ -304,6 +304,10 @@ type Account struct {
 	usageFramePersistedAt time.Time
 	usageFramePersisted5h float64
 	usageFramePersisted7d float64
+	// usageFrameLastAt/Kind 记录最近一次被应用的 WS 配额帧，仅供管理端
+	// 验证帧摄入是否工作，不参与调度。
+	usageFrameLastAt   time.Time
+	usageFrameLastKind string
 	// activated5hResetAt 是已经为其发送过「开窗」最小 /responses 的那个 Reset5hAt。
 	// 每个观测到的 5h 窗口最多激活一次（issue #581）。
 	activated5hResetAt time.Time
@@ -2351,6 +2355,21 @@ func (a *Account) GetUsagePercent7d() (float64, bool) {
 	return a.UsagePercent7d, a.UsagePercent7dValid
 }
 
+// cooldownMatchesReset reports whether an existing cooldown already ends at
+// the observed window reset. Repeated observations of the same exhausted
+// window (several in-flight turns, or a WHAM probe while the cooldown is
+// active) must not issue another DB write or inflate FailureStreak.
+func cooldownMatchesReset(cooldownUntil, resetAt time.Time) bool {
+	if resetAt.IsZero() {
+		return true
+	}
+	diff := cooldownUntil.Sub(resetAt)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= time.Minute
+}
+
 // MarkUsage7dRateLimited marks an account as rate-limited when its active 7d
 // usage window is exhausted. A future reset time is preferred; missing reset
 // metadata falls back to a full 7d cooldown, while stale reset times are ignored.
@@ -2367,13 +2386,25 @@ func (s *Store) MarkUsage7dRateLimited(acc *Account) bool {
 		return false
 	}
 
+	now := time.Now()
 	duration := 7 * 24 * time.Hour
-	if resetAt := acc.GetReset7dAt(); !resetAt.IsZero() {
-		untilReset := time.Until(resetAt)
+	resetAt := acc.GetReset7dAt()
+	if !resetAt.IsZero() {
+		untilReset := resetAt.Sub(now)
 		if untilReset <= 0 {
 			return false
 		}
 		duration = untilReset
+	}
+
+	acc.mu.RLock()
+	alreadyLimited := acc.Status == StatusCooldown &&
+		(acc.CooldownReason == "rate_limited" || acc.CooldownReason == "rate_limited_7d") &&
+		now.Before(acc.CooldownUtil) &&
+		cooldownMatchesReset(acc.CooldownUtil, resetAt)
+	acc.mu.RUnlock()
+	if alreadyLimited {
+		return true
 	}
 
 	s.MarkCooldown(acc, duration, "rate_limited")
@@ -2471,13 +2502,15 @@ const usageFramePersistMinDelta = 5.0
 
 // ShouldPersistUsageFrame decides whether a WS usage-frame observation needs a
 // database write. The caller always applies the in-memory snapshot first; this
-// only throttles persistence for large pools.
+// only throttles persistence for large pools. The throttle state advances only
+// via MarkUsageFramePersisted after a successful write, so a failed write is
+// retried on the next frame instead of being suppressed for the interval.
 func (a *Account) ShouldPersistUsageFrame(now time.Time, pct5h float64, has5h bool, pct7d float64, has7d bool, interval time.Duration) bool {
 	if a == nil {
 		return false
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 
 	if interval <= 0 {
 		interval = UsageFramePersistInterval
@@ -2514,6 +2547,16 @@ func (a *Account) ShouldPersistUsageFrame(now time.Time, pct5h float64, has5h bo
 	if !force && !a.usageFramePersistedAt.IsZero() && now.Sub(a.usageFramePersistedAt) < interval {
 		return false
 	}
+	return true
+}
+
+// MarkUsageFramePersisted records a successful frame snapshot write.
+func (a *Account) MarkUsageFramePersisted(now time.Time, pct5h float64, has5h bool, pct7d float64, has7d bool) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.usageFramePersistedAt = now
 	if has5h {
 		a.usageFramePersisted5h = pct5h
@@ -2521,7 +2564,22 @@ func (a *Account) ShouldPersistUsageFrame(now time.Time, pct5h float64, has5h bo
 	if has7d {
 		a.usageFramePersisted7d = pct7d
 	}
-	return true
+}
+
+// MarkUsageFrameObserved records the last WS quota frame ingested for the
+// account. The admin live projection exposes it so operators can tell
+// frame-driven updates apart from WHAM probes; it does not affect scheduling.
+func (a *Account) MarkUsageFrameObserved(kind string, at time.Time) {
+	if a == nil {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.usageFrameLastAt = at
+	a.usageFrameLastKind = strings.TrimSpace(kind)
 }
 
 // AccountLiveUsageSnapshot is a single-lock projection for the admin live poll.
@@ -2538,6 +2596,10 @@ type AccountLiveUsageSnapshot struct {
 	UsagePercent7dValid bool
 	Reset7dAt           time.Time
 	UsageUpdatedAt      time.Time
+	// UsageFrameLastAt/Kind record the last WS quota frame ingested for this
+	// account, as opposed to snapshots that only advance on WHAM probes.
+	UsageFrameLastAt   time.Time
+	UsageFrameLastKind string
 }
 
 // GetAccountLiveUsageSnapshot returns the runtime usage/status projection used
@@ -2560,6 +2622,8 @@ func (a *Account) GetAccountLiveUsageSnapshot() AccountLiveUsageSnapshot {
 		UsagePercent7dValid: a.UsagePercent7dValid,
 		Reset7dAt:           a.Reset7dAt,
 		UsageUpdatedAt:      a.UsageUpdatedAt,
+		UsageFrameLastAt:    a.usageFrameLastAt,
+		UsageFrameLastKind:  a.usageFrameLastKind,
 	}
 }
 
@@ -2706,6 +2770,18 @@ func (a *Account) SetRateLimitReachedType(kind string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.CreditsRateLimitReachedType = strings.TrimSpace(kind)
+}
+
+// GetRateLimitReachedType returns the last workspace hard-stop marker. WS
+// frames do not carry the per-response field, so the frame path preserves this
+// value until WHAM or an explicit header observation clears it.
+func (a *Account) GetRateLimitReachedType() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.CreditsRateLimitReachedType
 }
 
 // ApplySparseCreditsHeaders 应用普通 Codex 响应头携带的 sparse credits 观测信息。
@@ -11034,9 +11110,9 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 // PublishUsageSnapshot updates the in-memory usage snapshot and the scheduler.
 // persist=false skips the database write, used by the WS frame path where the
 // in-memory value must change immediately but persistence is throttled.
-func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt time.Time, persist bool) {
+func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt time.Time, persist bool) bool {
 	if acc == nil || s == nil {
-		return
+		return false
 	}
 	if observedAt.IsZero() {
 		observedAt = time.Now()
@@ -11046,7 +11122,7 @@ func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt tim
 	s.fastSchedulerUpdate(acc)
 
 	if !persist || s.db == nil {
-		return
+		return false
 	}
 
 	// 如果有 5h 数据，使用完整存储
@@ -11057,15 +11133,18 @@ func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt tim
 		defer cancel()
 		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, observedAt, acc.GetUsageUpdatedAt5h()); err != nil {
 			log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
+			return false
 		}
-		return
+		return true
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, observedAt); err != nil {
 		log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
+		return false
 	}
+	return true
 }
 
 // UpdateAccountSubscriptionExpiresAt persists the latest subscription expiration observed from upstream.
