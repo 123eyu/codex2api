@@ -528,15 +528,25 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	dst.CooldownUtil = src.CooldownUtil
 	dst.CooldownReason = src.CooldownReason
 	dst.ErrorMsg = src.ErrorMsg
-	dst.UsagePercent7d = src.UsagePercent7d
-	dst.UsagePercent7dValid = src.UsagePercent7dValid
-	dst.Reset7dAt = src.Reset7dAt
-	dst.Window7dSeconds = src.Window7dSeconds
-	dst.UsagePercent5h = src.UsagePercent5h
-	dst.UsagePercent5hValid = src.UsagePercent5hValid
-	dst.Reset5hAt = src.Reset5hAt
-	dst.UsageUpdatedAt = src.UsageUpdatedAt
-	dst.UsageUpdatedAt5h = src.UsageUpdatedAt5h
+	// A WS frame can update the runtime snapshot between two persisted
+	// observations; the outbox row then still carries the older DB value. Do
+	// not let that reload roll usage back unless the row is newer, or the
+	// credential identity changed and usage belongs to a new account.
+	useRuntime5h := identityChanged || !src.UsageUpdatedAt5h.Before(dst.UsageUpdatedAt5h)
+	if useRuntime5h {
+		dst.UsagePercent5h = src.UsagePercent5h
+		dst.UsagePercent5hValid = src.UsagePercent5hValid
+		dst.Reset5hAt = src.Reset5hAt
+		dst.UsageUpdatedAt5h = src.UsageUpdatedAt5h
+	}
+	useRuntime7d := identityChanged || !src.UsageUpdatedAt.Before(dst.UsageUpdatedAt)
+	if useRuntime7d {
+		dst.UsagePercent7d = src.UsagePercent7d
+		dst.UsagePercent7dValid = src.UsagePercent7dValid
+		dst.Reset7dAt = src.Reset7dAt
+		dst.Window7dSeconds = src.Window7dSeconds
+		dst.UsageUpdatedAt = src.UsageUpdatedAt
+	}
 	if src.usageObservedAt.After(dst.usageObservedAt) {
 		dst.usageObservedAt = src.usageObservedAt
 	}
