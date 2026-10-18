@@ -84,12 +84,13 @@ func applyCodexRateLimitsFrame(store *auth.Store, account *auth.Account, frame g
 	if len(headers) == 0 {
 		return
 	}
-	account.MarkUsageFrameObserved(codexRateLimitsFrameType, observedAt)
-	applyCodexUsageHeaders(store, account, headers, observedAt)
+	if result := applyCodexUsageHeaders(store, account, headers, observedAt); result.Applied {
+		account.MarkUsageFrameObserved(codexRateLimitsFrameType, observedAt)
+	}
 }
 
 func codexRateLimitsHeaders(frame gjson.Result, observedAt time.Time) http.Header {
-	if name := firstCodexFrameString(frame, "metered_limit_name", "limit_name", "limit_id"); name != "" && !isDefaultCodexLimitName(name) {
+	if name := firstCodexFrameString(frame, "metered_limit_name", "limit_id", "limit_name"); name != "" && !isDefaultCodexLimitName(name) {
 		return nil
 	}
 	headers := make(http.Header)
@@ -141,12 +142,16 @@ func applyCodexResponseMetadataFrame(store *auth.Store, account *auth.Account, f
 	if len(headers) == 0 {
 		return
 	}
-	account.MarkUsageFrameObserved(codexResponseMetadataFrameType, observedAt)
-	applyCodexUsageHeaders(store, account, headers, observedAt)
+	if result := applyCodexUsageHeaders(store, account, headers, observedAt); result.Applied {
+		account.MarkUsageFrameObserved(codexResponseMetadataFrameType, observedAt)
+	}
 }
 
 func codexResponseMetadataHeaders(frame gjson.Result, observedAt time.Time) http.Header {
 	headers := make(http.Header)
+	// Absolute reset values win over a relative header carrying the same
+	// window, regardless of the JSON key order in the frame.
+	absoluteResets := make(map[string]string, 2)
 	frame.Get("headers").ForEach(func(key, value gjson.Result) bool {
 		name := strings.ToLower(strings.TrimSpace(key.String()))
 		if !isCodexUsageFrameHeader(name) {
@@ -179,7 +184,7 @@ func codexResponseMetadataHeaders(frame gjson.Result, observedAt time.Time) http
 					seconds = 0
 				}
 				prefix := strings.TrimSuffix(name, "reset-at")
-				headers.Set(prefix+"reset-after-seconds", strconv.FormatInt(seconds, 10))
+				absoluteResets[prefix+"reset-after-seconds"] = strconv.FormatInt(seconds, 10)
 			}
 			return true
 		}
@@ -190,6 +195,9 @@ func codexResponseMetadataHeaders(frame gjson.Result, observedAt time.Time) http
 		headers.Set(name, raw)
 		return true
 	})
+	for name, value := range absoluteResets {
+		headers.Set(name, value)
+	}
 	return headers
 }
 
@@ -212,9 +220,9 @@ func isCodexUsageFrameHeader(name string) bool {
 	return false
 }
 
-func applyCodexUsageHeaders(store *auth.Store, account *auth.Account, headers http.Header, observedAt time.Time) {
+func applyCodexUsageHeaders(store *auth.Store, account *auth.Account, headers http.Header, observedAt time.Time) CodexUsageSyncResult {
 	if len(headers) == 0 {
-		return
+		return CodexUsageSyncResult{}
 	}
 	// WS frames do not carry the per-response rate_limit_reached_type field, and
 	// the shared sync treats an absent value as "not reached" (correct for HTTP
@@ -230,7 +238,7 @@ func applyCodexUsageHeaders(store *auth.Store, account *auth.Account, headers ht
 	// WHAM probes remain the authority for window presence/absence. The persist
 	// decision runs inside ApplyUsageObservation so a stale/out-of-order frame
 	// cannot advance the throttling state without being applied.
-	syncCodexUsageState(store, account, resp, observedAt, codexUsageSyncOptions{
+	return syncCodexUsageState(store, account, resp, observedAt, codexUsageSyncOptions{
 		persistUsageSnapshot: true,
 		clearAbsent5h:        false,
 		shouldPersistUsage: func(pct5h float64, has5h bool, pct7d float64, has7d bool) bool {
@@ -260,16 +268,18 @@ func setCodexFrameWindow(headers http.Header, prefix string, window gjson.Result
 // (absolute Unix seconds); older/observed fixtures used resets_in_seconds or
 // reset_after_seconds.
 func codexFrameResetSeconds(window gjson.Result, observedAt time.Time) string {
+	relativeSeen := false
 	for _, key := range []string{"resets_in_seconds", "reset_after_seconds"} {
 		if value := window.Get(key); value.Exists() {
 			if n, ok := codexFrameInt64Value(value); ok {
+				relativeSeen = true
 				// Zero/negative means "resets now", matching the absolute form
-				// where a past epoch is clamped to zero. Only a missing or
-				// unparseable field keeps the previous reset.
-				if n < 0 {
-					n = 0
+				// where a past epoch is clamped to zero. A positive relative
+				// value is authoritative; a zero yields to a future absolute
+				// reset below so the real window end is not discarded.
+				if n > 0 {
+					return strconv.FormatInt(n, 10)
 				}
-				return strconv.FormatInt(n, 10)
 			}
 		}
 	}
@@ -285,6 +295,9 @@ func codexFrameResetSeconds(window gjson.Result, observedAt time.Time) string {
 			}
 			return strconv.FormatInt(seconds, 10)
 		}
+	}
+	if relativeSeen {
+		return "0"
 	}
 	return ""
 }
@@ -352,13 +365,34 @@ func ApplyCodexIdleUsageFrame(account *auth.Account, eventType string, payload [
 	if len(headers) == 0 {
 		return
 	}
-	observation := parseCodexUsageHeaderObservation(&http.Response{Header: headers})
-	if !observation.authoritative {
+	resp := &http.Response{Header: headers}
+	observation := parseCodexUsageHeaderObservation(resp)
+	hasCredits, unlimited, creditsObserved := parseCodexCreditsFlagHeaders(resp)
+	if !observation.authoritative && !creditsObserved {
 		return
 	}
 	account.TryApplyUsageObservation(observedAt, func() {
 		account.MarkUsageFrameObserved(normalizedType, observedAt)
-		// Never clear an absent 5h window from a partial connection-level frame.
-		applyCodexUsageHeaderObservation(nil, account, observation, observedAt, false)
+		if observation.authoritative {
+			// Never clear an absent 5h window from a partial connection-level frame.
+			applyCodexUsageHeaderObservation(nil, account, observation, observedAt, false)
+		}
+		if creditsObserved {
+			// Connection-level frames also carry the post-turn credits snapshot.
+			// Apply it so the last spent credit can flip credit-based scheduling
+			// before the next WHAM probe. Keep the stored hard stop: the frame has
+			// no rate_limit_reached_type of its own.
+			var balance *string
+			if trimmed := strings.TrimSpace(headers.Get("x-codex-credits-balance")); trimmed != "" {
+				balance = &trimmed
+			}
+			var overage *bool
+			if raw := strings.TrimSpace(headers.Get("x-codex-credits-overage-reached")); raw != "" {
+				if value, err := strconv.ParseBool(raw); err == nil {
+					overage = &value
+				}
+			}
+			account.ApplySparseCreditsHeaders(hasCredits, unlimited, balance, overage, account.GetRateLimitReachedType())
+		}
 	})
 }

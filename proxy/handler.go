@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -192,7 +193,10 @@ type CodexUsageSyncResult struct {
 	Premium5hRateLimited bool
 	// PersistUsage 表示节流策略允许本次观察落库。WS 帧路径可能只更新内存
 	// 快照；100% 冷却标记只跟着允许落库的观察执行，避免每帧重复写库。
-	PersistUsage             bool
+	PersistUsage bool
+	// Applied 表示本次观察通过了排序门并写入了账号状态；WS 帧路径用它决定
+	// 是否更新“最后一帧”观测标记，避免迟到的旧帧伪装成最新帧。
+	Applied                  bool
 	UsageWindowLimitsIgnored bool
 	// Cleared5h 表示本次同步因上游未返回 5h 窗口而清除了本地陈旧 5h 快照（issue #382）。
 	Cleared5h bool
@@ -8155,21 +8159,27 @@ func parseCodexWindowUsage(usedStr, windowStr, resetStr string) codexWindowUsage
 		return codexWindowUsage{}
 	}
 	var usedPct, windowMin, resetSec float64
-	if _, err := fmt.Sscanf(usedStr, "%f", &usedPct); err != nil {
+	// Parse the whole value: fmt.Sscanf("%f") accepts trailing garbage, so a
+	// malformed header such as "42abc" would be treated as 42.
+	parsedUsed, err := strconv.ParseFloat(strings.TrimSpace(usedStr), 64)
+	if err != nil || math.IsNaN(parsedUsed) {
 		return codexWindowUsage{}
 	}
+	usedPct = parsedUsed
 	// Reject out-of-range percentages instead of pacing an account on a
 	// malformed observation; keep the previous snapshot until the next probe.
 	if usedPct < 0 || usedPct > 100 {
 		return codexWindowUsage{}
 	}
-	if _, err := fmt.Sscanf(windowStr, "%f", &windowMin); err != nil || windowMin <= 0 {
+	parsedWindow, err := strconv.ParseFloat(strings.TrimSpace(windowStr), 64)
+	if err != nil || math.IsNaN(parsedWindow) || math.IsInf(parsedWindow, 0) || parsedWindow <= 0 {
 		return codexWindowUsage{}
 	}
+	windowMin = parsedWindow
 	hasReset := strings.TrimSpace(resetStr) != ""
 	if hasReset {
-		if _, err := fmt.Sscanf(resetStr, "%f", &resetSec); err != nil {
-			resetSec = 0
+		if parsedReset, err := strconv.ParseFloat(strings.TrimSpace(resetStr), 64); err == nil && !math.IsNaN(parsedReset) && !math.IsInf(parsedReset, 0) {
+			resetSec = parsedReset
 		}
 	}
 	return codexWindowUsage{
@@ -8194,8 +8204,8 @@ func codexResetAfterSeconds(header http.Header, prefix string) string {
 	if raw == "" {
 		return ""
 	}
-	var epoch int64
-	if _, err := fmt.Sscanf(raw, "%d", &epoch); err != nil || epoch <= 0 {
+	epoch, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || epoch <= 0 {
 		return ""
 	}
 	seconds := time.Until(time.Unix(epoch, 0)).Seconds()
@@ -8855,6 +8865,7 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 		}
 	}
 
+	result.Applied = usageApplied || result.CreditsObserved
 	return result
 }
 
@@ -8952,15 +8963,18 @@ func applyCodexUsageHeaderObservation(store *auth.Store, account *auth.Account, 
 		existingReset := account.GetReset5hAt()
 		existingPct, existingValid := account.GetUsagePercent5h()
 		resetAt := existingReset
+		// Only a reset that is still in the future identifies the current
+		// window. If it has already passed, a frame without reset_at belongs
+		// to the next window and must not inherit the stale timestamp.
 		if observation.w5h.hasReset {
 			resetAt = observedAt.Add(time.Duration(observation.w5h.resetSec) * time.Second)
-		} else if resetAt.IsZero() {
+		} else if resetAt.IsZero() || !resetAt.After(observedAt) {
 			// A partial frame without reset must not create a zero reset that
 			// never expires; bound the pause to one window length instead.
 			resetAt = observedAt.Add(time.Duration(observation.w5h.windowMin) * time.Minute)
 		}
 		pct := observation.w5h.usedPct
-		if existingValid && sameUsageResetWindow(existingReset, resetAt) && pct < existingPct {
+		if existingValid && existingReset.After(observedAt) && sameUsageResetWindow(existingReset, resetAt) && pct < existingPct {
 			// Within one window usage only increases. A late frame from an
 			// earlier concurrent turn must not roll the snapshot back and
 			// temporarily un-pause the account.
@@ -8978,12 +8992,12 @@ func applyCodexUsageHeaderObservation(store *auth.Store, account *auth.Account, 
 		if observation.w7d.hasReset {
 			resetAt = observedAt.Add(time.Duration(observation.w7d.resetSec) * time.Second)
 			account.SetReset7dAt(resetAt)
-		} else if resetAt.IsZero() {
+		} else if resetAt.IsZero() || !resetAt.After(observedAt) {
 			resetAt = observedAt.Add(time.Duration(observation.w7d.windowMin) * time.Minute)
 			account.SetReset7dAt(resetAt)
 		}
 		pct := observation.w7d.usedPct
-		if existingValid && sameUsageResetWindow(existingReset, resetAt) && pct < existingPct {
+		if existingValid && existingReset.After(observedAt) && sameUsageResetWindow(existingReset, resetAt) && pct < existingPct {
 			pct = existingPct
 		}
 		account.SetWindow7dSeconds(int64(observation.w7d.windowMin * 60))
