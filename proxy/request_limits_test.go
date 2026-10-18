@@ -7,6 +7,22 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestRejectDuplicateJSONField(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"messages":[],"messages":[{"a":1}]}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	if !rejectDuplicateJSONField(c, body, "messages") {
+		t.Fatal("expected duplicate top-level field rejection")
+	}
+	if recorder.Code != 400 {
+		t.Fatalf("status = %d, want 400", recorder.Code)
+	}
+	if rejectDuplicateJSONField(c, []byte(`{"messages":[]}`), "messages") {
+		t.Fatal("unexpected rejection for a single field")
+	}
+}
+
 func TestRejectExcessiveJSONArray(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := []byte(`{"input":[{"a":1},{"a":2},{"a":3}]}`)

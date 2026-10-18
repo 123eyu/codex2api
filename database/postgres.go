@@ -8782,6 +8782,25 @@ func (db *DB) InsertAccountWithCredentials(ctx context.Context, name string, cre
 	)
 }
 
+// InsertDisabledAccountWithCredentials creates an account in the pending state
+// from the first write. Self-service submissions must not briefly exist as an
+// enabled account if a follow-up update fails.
+func (db *DB) InsertDisabledAccountWithCredentials(ctx context.Context, name string, credentials map[string]interface{}, proxyURL string) (int64, error) {
+	if credentials == nil {
+		credentials = map[string]interface{}{}
+	}
+	credJSON, err := json.Marshal(encryptSensitiveCredentials(credentials))
+	if err != nil {
+		return 0, err
+	}
+	return db.insertAccountRowWithFamily(ctx,
+		`INSERT INTO accounts (name, credentials, proxy_url, enabled) VALUES ($1, $2, $3, FALSE) RETURNING id`,
+		`INSERT INTO accounts (name, credentials, proxy_url, enabled) VALUES ($1, $2, $3, FALSE)`,
+		credentials,
+		name, credJSON, proxyURL,
+	)
+}
+
 func (db *DB) InsertOpenAIResponsesAccount(ctx context.Context, name string, credentials map[string]interface{}, proxyURL string) (int64, error) {
 	if credentials == nil {
 		credentials = map[string]interface{}{}

@@ -261,7 +261,7 @@ func newCodexStandardTransport(proxyURL string) http.RoundTripper {
 	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport.DialContext = baseDialer.DialContext
 	if err := auth.ConfigureTransportProxy(transport, proxyURL, baseDialer); err != nil {
-		log.Printf("[CodexTransport] 代理配置失败，回退直连: proxy=%s err=%v", security.MaskURLCredentials(proxyURL), err)
+		log.Printf("[CodexTransport] 代理配置失败，回退直连: proxy=%s err_type=%T", security.MaskURLCredentials(proxyURL), err)
 		transport.Proxy = nil
 		transport.DialContext = baseDialer.DialContext
 	}

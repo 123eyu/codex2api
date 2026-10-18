@@ -105,7 +105,7 @@ func NewUTLSTransport(proxyURL string) http.RoundTripper {
 	if proxyURL != "" {
 		d, err := buildProxyDialer(proxyURL)
 		if err != nil {
-			log.Printf("[UTLS] 代理配置失败，回退直连: proxy=%s err=%v", security.MaskURLCredentials(proxyURL), err)
+			log.Printf("[UTLS] 代理配置失败，回退直连: proxy=%s err_type=%T", security.MaskURLCredentials(proxyURL), err)
 			dialer = xproxy.Direct
 		} else {
 			dialer = d

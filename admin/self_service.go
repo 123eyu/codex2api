@@ -253,14 +253,11 @@ func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL s
 		}
 	}
 
-	id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), proxyURL)
+	id, err := h.db.InsertDisabledAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), proxyURL)
 	if err != nil {
 		return 0, err
 	}
-	// 待审核：禁用 + 备注 + 打标；不调用 Store.AddAccount，故不进调度池。
-	if err := h.db.SetAccountEnabled(ctx, id, false); err != nil {
-		return 0, err
-	}
+	// 待审核：插入时即 disabled；备注/标签失败时账号仍保持禁用，不会进调度池。
 	note := "自助提交联系人: " + contactEmail
 	if err := h.db.UpdateAccountNote(ctx, id, note); err != nil {
 		return 0, err

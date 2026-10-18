@@ -1808,7 +1808,10 @@ func cachedOrParse(rawJSON []byte) openAIRequest {
 	}
 	var req openAIRequest
 	_ = json.Unmarshal(rawJSON, &req)
-	globalRequestCache.put(key, req, len(rawJSON))
+	// The parsed request retains more than the raw JSON (message slices,
+	// RawMessage copies, tool structs). Charge a conservative multiplier so the
+	// byte budget bounds retained heap, not just wire bytes.
+	globalRequestCache.put(key, req, len(rawJSON)*3)
 	return req
 }
 
