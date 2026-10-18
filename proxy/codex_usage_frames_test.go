@@ -635,6 +635,8 @@ func TestParseCodexWindowUsageRejectsTrailingGarbage(t *testing.T) {
 	}
 	if got := parseCodexWindowUsage("42", "300", "60abc"); !got.valid {
 		t.Fatal("valid window rejected because the reset value is malformed")
+	} else if got.hasReset {
+		t.Fatalf("malformed reset accepted as a reset value: %+v", got)
 	}
 }
 

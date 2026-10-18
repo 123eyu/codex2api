@@ -8176,10 +8176,11 @@ func parseCodexWindowUsage(usedStr, windowStr, resetStr string) codexWindowUsage
 		return codexWindowUsage{}
 	}
 	windowMin = parsedWindow
-	hasReset := strings.TrimSpace(resetStr) != ""
-	if hasReset {
-		if parsedReset, err := strconv.ParseFloat(strings.TrimSpace(resetStr), 64); err == nil && !math.IsNaN(parsedReset) && !math.IsInf(parsedReset, 0) {
+	hasReset := false
+	if rawReset := strings.TrimSpace(resetStr); rawReset != "" {
+		if parsedReset, err := strconv.ParseFloat(rawReset, 64); err == nil && !math.IsNaN(parsedReset) && !math.IsInf(parsedReset, 0) {
 			resetSec = parsedReset
+			hasReset = true
 		}
 	}
 	return codexWindowUsage{
