@@ -3810,10 +3810,14 @@ type Store struct {
 	lazyRefreshInFlight sync.Map
 	stopCh              chan struct{}
 	usageFramePersist   *usageFramePersistQueue
-	stopOnce            sync.Once
-	backgroundCtx       context.Context
-	backgroundCancel    context.CancelFunc
-	wg                  sync.WaitGroup
+	// usageSnapshotPersistMu serializes 5h/7d credential writes between the
+	// synchronous observation paths and the async frame-persist worker, so a
+	// queued older frame cannot overwrite a newer WHAM observation.
+	usageSnapshotPersistMu sync.Mutex
+	stopOnce               sync.Once
+	backgroundCtx          context.Context
+	backgroundCancel       context.CancelFunc
+	wg                     sync.WaitGroup
 
 	// 代理池
 	proxyPoolReloadMu    sync.Mutex
@@ -11142,7 +11146,10 @@ func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt tim
 		reset7dAt := acc.GetReset7dAt()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, observedAt, acc.GetUsageUpdatedAt5h()); err != nil {
+		err := s.withUsageSnapshotWrite(func() error {
+			return s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, observedAt, acc.GetUsageUpdatedAt5h())
+		})
+		if err != nil {
 			log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
 			return false
 		}
@@ -11151,11 +11158,22 @@ func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt tim
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, observedAt); err != nil {
+	err := s.withUsageSnapshotWrite(func() error {
+		return s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, observedAt)
+	})
+	if err != nil {
 		log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
 		return false
 	}
 	return true
+}
+
+// withUsageSnapshotWrite serializes credential snapshot writes with the async
+// frame-persist worker.
+func (s *Store) withUsageSnapshotWrite(fn func() error) error {
+	s.usageSnapshotPersistMu.Lock()
+	defer s.usageSnapshotPersistMu.Unlock()
+	return fn()
 }
 
 // UpdateAccountSubscriptionExpiresAt persists the latest subscription expiration observed from upstream.

@@ -94,13 +94,16 @@ func (q *usageFramePersistQueue) persist(s *Store, job usageFramePersistJob) {
 	if acc == nil {
 		return
 	}
-	// A WHAM probe or a newer frame may have been applied after this job was
-	// queued; in that case the newer observation (and its own persistence path)
-	// owns the snapshot. Writing this older job would roll usage back.
+	// Serialize with the synchronous snapshot writers and re-check inside the
+	// lock: a WHAM probe or a newer frame may apply while this job waits, and
+	// its write must win. Holding usageSyncMu here would stall the upstream
+	// read path, so use the store's snapshot-write lock instead.
+	s.usageSnapshotPersistMu.Lock()
 	acc.mu.RLock()
 	superseded := acc.usageObservedAt.After(job.observedAt)
 	acc.mu.RUnlock()
 	if superseded {
+		s.usageSnapshotPersistMu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -114,8 +117,10 @@ func (q *usageFramePersistQueue) persist(s *Store, job usageFramePersistJob) {
 	case job.has5h:
 		err = s.db.UpdateUsageSnapshot5h(ctx, job.dbID, job.pct5h, job.reset5hAt, job.observedAt)
 	default:
+		s.usageSnapshotPersistMu.Unlock()
 		return
 	}
+	s.usageSnapshotPersistMu.Unlock()
 	if err != nil {
 		// Leave the throttle marker untouched; the next frame observation sees
 		// that no successful write happened and enqueues again.
@@ -128,7 +133,7 @@ func (q *usageFramePersistQueue) persist(s *Store, job usageFramePersistJob) {
 // EnqueueUsageFramePersist schedules a frame snapshot write off the upstream
 // read path. The latest snapshot per account wins while a write is queued.
 func (s *Store) EnqueueUsageFramePersist(acc *Account, observedAt time.Time) {
-	if s == nil || acc == nil || s.usageFramePersist == nil || acc.DBID == 0 {
+	if s == nil || acc == nil || s.db == nil || s.usageFramePersist == nil || acc.DBID == 0 {
 		return
 	}
 	select {

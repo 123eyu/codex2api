@@ -163,7 +163,10 @@ func (s *Store) PublishUsageSnapshot5hOnly(acc *Account, observedAt time.Time, p
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, pct5h, reset5hAt, observedAt); err != nil {
+	err := s.withUsageSnapshotWrite(func() error {
+		return s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, pct5h, reset5hAt, observedAt)
+	})
+	if err != nil {
 		log.Printf("[账号 %d] 持久化 5h 用量快照失败: %v", acc.DBID, err)
 		return false
 	}
@@ -274,7 +277,9 @@ func (s *Store) ClearAbsentUsageSnapshot5hAt(acc *Account, observedAt time.Time)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.db.ClearUsageSnapshot5h(ctx, acc.DBID); err != nil {
+	if err := s.withUsageSnapshotWrite(func() error {
+		return s.db.ClearUsageSnapshot5h(ctx, acc.DBID)
+	}); err != nil {
 		log.Printf("[账号 %d] 清除 5h 用量快照失败: %v", acc.DBID, err)
 	}
 	if cleared5hCooldown {
@@ -363,7 +368,9 @@ func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.
 	if err := s.db.SetCooldown(ctx, acc.DBID, cooldownReason, resetAt); err != nil {
 		log.Printf("[账号 %d] 持久化 premium 5h 限流冷却状态失败: %v", acc.DBID, err)
 	}
-	if err := s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, 100, resetAt, now); err != nil {
+	if err := s.withUsageSnapshotWrite(func() error {
+		return s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, 100, resetAt, now)
+	}); err != nil {
 		log.Printf("[账号 %d] 持久化 premium 5h 限流快照失败: %v", acc.DBID, err)
 	}
 }
