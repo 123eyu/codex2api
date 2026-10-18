@@ -90,12 +90,16 @@ func TestMainPersistentWebSocketIngestsLastPostTerminalUsageFrame(t *testing.T) 
 				defer response.Body.Close()
 				var body struct {
 					Accounts map[int64]struct {
-						Status    string   `json:"status"`
-						Percent   *float64 `json:"usage_percent_5h"`
-						Reset     string   `json:"reset_5h_at"`
-						Updated   string   `json:"codex_5h_usage_updated_at"`
-						FrameAt   string   `json:"codex_usage_frame_at"`
-						FrameKind string   `json:"codex_usage_frame_kind"`
+						Status         string   `json:"status"`
+						Percent        *float64 `json:"usage_percent_5h"`
+						Reset          string   `json:"reset_5h_at"`
+						Updated        string   `json:"codex_5h_usage_updated_at"`
+						FrameAt        string   `json:"codex_usage_frame_at"`
+						FrameKind      string   `json:"codex_usage_frame_kind"`
+						Plan           string   `json:"plan_type"`
+						CreditsValid   bool     `json:"credits_valid"`
+						CreditsBalance *string  `json:"credits_balance"`
+						HasCredits     bool     `json:"credits_has_credits"`
 					} `json:"accounts"`
 				}
 				if response.StatusCode != http.StatusOK {
@@ -108,7 +112,7 @@ func TestMainPersistentWebSocketIngestsLastPostTerminalUsageFrame(t *testing.T) 
 				if !ok {
 					t.Fatal("live endpoint omitted the synthetic account")
 				}
-				result := auth.AccountLiveUsageSnapshot{Status: item.Status, UsageFrameLastKind: item.FrameKind}
+				result := auth.AccountLiveUsageSnapshot{Status: item.Status, UsageFrameLastKind: item.FrameKind, PlanType: item.Plan, CreditsValid: item.CreditsValid, Credits: auth.CreditBalanceSnapshot{Balance: item.CreditsBalance, HasCredits: item.HasCredits}}
 				if item.Percent != nil {
 					result.UsagePercent5h, result.UsagePercent5hValid = *item.Percent, true
 				}
@@ -145,9 +149,9 @@ func TestMainPersistentWebSocketIngestsLastPostTerminalUsageFrame(t *testing.T) 
 			var serverHandlers sync.WaitGroup
 			var requests atomic.Int32
 			reset := time.Now().Add(2 * time.Hour).Truncate(time.Second)
-			payload := fmt.Sprintf(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":96,"window_minutes":300,"reset_at":%d}}}`, reset.Unix())
+			payload := fmt.Sprintf(`{"type":"codex.rate_limits","plan_type":"pro","credits":{"has_credits":true,"unlimited":false,"balance":"3.5"},"rate_limits":{"primary":{"used_percent":96,"window_minutes":300,"reset_at":%d}}}`, reset.Unix())
 			if test.eventType == "codex.response.metadata" {
-				payload = fmt.Sprintf(`{"type":"codex.response.metadata","headers":{"x-codex-primary-used-percent":"96","x-codex-primary-window-minutes":"300","x-codex-primary-reset-at":"%d"}}`, reset.Unix())
+				payload = fmt.Sprintf(`{"type":"codex.response.metadata","headers":{"x-codex-plan-type":"pro","x-codex-credits-has-credits":"true","x-codex-credits-unlimited":"false","x-codex-credits-balance":"3.5","x-codex-primary-used-percent":"96","x-codex-primary-window-minutes":"300","x-codex-primary-reset-at":"%d"}}`, reset.Unix())
 			}
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 				serverHandlers.Add(1)
@@ -270,7 +274,7 @@ func TestMainPersistentWebSocketIngestsLastPostTerminalUsageFrame(t *testing.T) 
 				defer ticker.Stop()
 				for {
 					live := readLive()
-					if live.Status == "quota_paused" && live.UsagePercent5hValid && live.UsagePercent5h == 96 && live.Reset5hAt.Equal(reset) && !live.UsageUpdatedAt5h.IsZero() && !live.UsageFrameLastAt.IsZero() && live.UsageFrameLastKind == test.eventType && !account.IsAvailable() && store.AvailableCount() == 0 {
+					if live.Status == "quota_paused" && live.UsagePercent5hValid && live.UsagePercent5h == 96 && live.Reset5hAt.Equal(reset) && !live.UsageUpdatedAt5h.IsZero() && !live.UsageFrameLastAt.IsZero() && live.UsageFrameLastKind == test.eventType && live.PlanType == "pro" && live.CreditsValid && live.Credits.HasCredits && live.Credits.Balance != nil && *live.Credits.Balance == "3.5" && !account.IsAvailable() && store.AvailableCount() == 0 {
 						break
 					}
 					select {

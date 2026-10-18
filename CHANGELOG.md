@@ -8,6 +8,8 @@
 
 ### Fixes
 
+- **Account live polling refreshes the existing plan and credit badges.** The live endpoint now includes the runtime plan and credit snapshot using the account-list field contract. Missing fields preserve older-backend values, hidden balances clear stale values, and unchanged rows keep their identity; Antigravity rows retain their own projection. Persistent-WebSocket coverage checks post-terminal plan and balance changes through the authenticated live endpoint.
+
 - **Quota-frame reset timestamps require strict integers.** Fractional, exponent-form and overflowing JSON numbers are rejected instead of being truncated or wrapped into reset deadlines; valid usage fields remain usable with the existing missing-reset fallback.
 
 - **Post-terminal quota frames survive observation contention without stalling the WebSocket reader.** Active and idle frames share an ordered runtime path; a bounded per-account FIFO retains partial updates and requests an authoritative probe on overflow. Credits, plan, quota and cooldown writes are coalesced off the reader, including exhausted-window and credits-only frames. Old observations cannot roll credits or frame freshness backward, 7d-only writes retain their reset, and delayed cooldown publication reads current state so it cannot overwrite a newer authentication error or resurrect a cleared cooldown. Failed cooldown writes retry on later observations without another failure count; repeated real Responses 429s still fence older in-flight successes. A persistent-WebSocket regression exercises the production idle observer through scheduling and the authenticated live endpoint, with no subsequent business request or probe.

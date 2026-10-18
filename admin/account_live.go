@@ -8,6 +8,8 @@ import (
 )
 
 type accountLiveItem struct {
+	// A nil embedded projection omits Codex credit fields for other planes.
+	*AccountLiveCredits
 	ActiveRequests   int64 `json:"active_requests"`
 	OccupiedRequests int64 `json:"occupied_requests"`
 	// DynamicConcurrencyLimit is the admission cap the scheduler currently
@@ -24,6 +26,7 @@ type accountLiveItem struct {
 	// the now-invalid window).
 	Status           *string  `json:"status,omitempty"`
 	UsingCredits     *bool    `json:"using_credits,omitempty"`
+	PlanType         *string  `json:"plan_type,omitempty"`
 	UsagePercent5h   *float64 `json:"usage_percent_5h"`
 	Reset5hAt        *string  `json:"reset_5h_at"`
 	UsageUpdatedAt5h *string  `json:"codex_5h_usage_updated_at"`
@@ -34,6 +37,17 @@ type accountLiveItem struct {
 	// account; omitted until the first frame is applied.
 	UsageFrameAt   *string `json:"codex_usage_frame_at,omitempty"`
 	UsageFrameKind *string `json:"codex_usage_frame_kind,omitempty"`
+}
+
+// AccountLiveCredits uses the existing account-list credit field contract.
+type AccountLiveCredits struct {
+	Valid                bool    `json:"credits_valid"`
+	Balance              *string `json:"credits_balance"`
+	HasCredits           *bool   `json:"credits_has_credits"`
+	Unlimited            *bool   `json:"credits_unlimited"`
+	OverageLimitReached  *bool   `json:"credits_overage_limit_reached"`
+	SpendControlReached  *bool   `json:"credits_spend_control_reached"`
+	RateLimitReachedType string  `json:"credits_rate_limit_reached_type"`
 }
 
 // GetAccountLiveState returns request-local runtime counters for the visible
@@ -68,6 +82,16 @@ func (h *Handler) GetAccountLiveState(c *gin.Context) {
 		// does not model their display status, so leave the row's fields alone.
 		if !account.IsAntigravityAPI() {
 			usage := account.GetAccountLiveUsageSnapshot()
+			item.PlanType = &usage.PlanType
+			item.AccountLiveCredits = &AccountLiveCredits{Valid: usage.CreditsValid}
+			if usage.CreditsValid {
+				item.Balance = usage.Credits.Balance
+				item.HasCredits = &usage.Credits.HasCredits
+				item.Unlimited = &usage.Credits.Unlimited
+				item.OverageLimitReached = &usage.Credits.OverageLimitReached
+				item.SpendControlReached = usage.Credits.SpendControlReached
+				item.RateLimitReachedType = usage.Credits.RateLimitReachedType
+			}
 			status := usage.Status
 			item.Status = &status
 			usingCredits := usage.UsingCredits

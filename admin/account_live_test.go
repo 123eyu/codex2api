@@ -80,6 +80,9 @@ func TestGetAccountLiveStateReturnsRuntimeUsage(t *testing.T) {
 	account.Reset7dAt = now.Add(24 * time.Hour)
 	account.UsageUpdatedAt = now
 	store.AddAccount(account)
+	store.ObserveUsageFramePlan(account, "pro")
+	balance := "12.5"
+	account.ApplySparseCreditsHeaders(true, false, &balance, nil, "")
 	handler := &Handler{store: store}
 
 	recorder := httptest.NewRecorder()
@@ -111,6 +114,17 @@ func TestGetAccountLiveStateReturnsRuntimeUsage(t *testing.T) {
 	}
 	if item.UsingCredits == nil {
 		t.Fatalf("using_credits missing: %+v", item)
+	}
+	var raw struct {
+		Accounts map[string]map[string]json.RawMessage `json:"accounts"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"plan_type": `"pro"`, "credits_valid": "true", "credits_balance": `"12.5"`, "credits_has_credits": "true", "credits_unlimited": "false", "credits_spend_control_reached": "null"} {
+		if got := string(raw.Accounts["7"][key]); got != want {
+			t.Errorf("live %s=%s, want %s", key, got, want)
+		}
 	}
 }
 
@@ -161,7 +175,7 @@ func TestGetAccountLiveStateSerializesNullWindowsAndSkipsAntigravityFields(t *te
 		t.Fatalf("codex frame time missing: %s", got)
 	}
 	antigravityItem := raw.Accounts["12"]
-	for _, key := range []string{"status", "using_credits", "codex_usage_frame_at", "codex_usage_frame_kind"} {
+	for _, key := range []string{"status", "using_credits", "plan_type", "credits_valid", "credits_balance", "codex_usage_frame_at", "codex_usage_frame_kind"} {
 		if value, ok := antigravityItem[key]; ok {
 			t.Fatalf("antigravity item unexpectedly carries %s=%s", key, value)
 		}

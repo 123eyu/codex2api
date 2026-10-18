@@ -6,6 +6,10 @@ const baseRow = {
   id: 1,
   status: "active",
   using_credits: false,
+  plan_type: "plus",
+  credits_valid: true,
+  credits_balance: "10",
+  credits_has_credits: true,
   usage_percent_5h: 40,
   reset_5h_at: "2026-10-18T17:00:00+08:00",
   codex_5h_usage_updated_at: "2026-10-18T13:00:00+08:00",
@@ -29,6 +33,10 @@ function live(overrides = {}) {
         base_concurrency_effective: 5,
         status: "active",
         using_credits: false,
+        plan_type: baseRow.plan_type,
+        credits_valid: baseRow.credits_valid,
+        credits_balance: baseRow.credits_balance,
+        credits_has_credits: baseRow.credits_has_credits,
         usage_percent_5h: 40,
         reset_5h_at: baseRow.reset_5h_at,
         codex_5h_usage_updated_at: baseRow.codex_5h_usage_updated_at,
@@ -135,4 +143,23 @@ test("session slot buffer change is merged into rows", () => {
   payload.session_slot_buffer_enabled = true;
   const merged = mergeAccountLiveState(rows, payload);
   assert.equal(merged[0].session_slot_buffer_enabled, true);
+});
+
+test("plan and credit changes reach the existing account row", () => {
+  const other = { ...baseRow, id: 2 };
+  const rows = [baseRow, other];
+  const merged = mergeAccountLiveState(rows, live({ plan_type: "pro", credits_balance: "0", credits_has_credits: false }));
+  assert.equal(merged[0].plan_type, "pro");
+  assert.equal(merged[0].credits_balance, "0");
+  assert.equal(merged[0].credits_has_credits, false);
+  assert.equal(merged[1], other);
+});
+
+test("hidden credit balance clears the prior value and absent fields preserve it", () => {
+  const merged = mergeAccountLiveState([baseRow], live({ credits_balance: null }));
+  assert.equal(merged[0].credits_balance, null);
+  const payload = live();
+  delete payload.accounts["1"].credits_balance;
+  delete payload.accounts["1"].plan_type;
+  assert.equal(mergeAccountLiveState([baseRow], payload)[0], baseRow);
 });

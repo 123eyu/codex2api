@@ -796,6 +796,14 @@ Codex 的流式 remote compact v2（`POST /v1/responses`，`stream:true`，`inpu
       "base_concurrency_effective": 2,
       "status": "quota_paused",
       "using_credits": false,
+      "plan_type": "pro",
+      "credits_valid": true,
+      "credits_balance": "12.5",
+      "credits_has_credits": true,
+      "credits_unlimited": false,
+      "credits_overage_limit_reached": false,
+      "credits_spend_control_reached": null,
+      "credits_rate_limit_reached_type": "",
       "usage_percent_5h": 91.2,
       "reset_5h_at": "2026-10-18T18:00:00+08:00",
       "codex_5h_usage_updated_at": "2026-10-18T15:10:00+08:00",
@@ -815,6 +823,10 @@ Codex 的流式 remote compact v2（`POST /v1/responses`，`stream:true`，`inpu
 | 字段 | 类型 | 说明 |
 | ---- | ---- | ---- |
 | status / using_credits | string / bool | 运行时状态；旧后端或 Antigravity 行省略该 key，前端保留列表值 |
+| plan_type | string | 最新运行时套餐，沿用账号列表字段；旧后端或 Antigravity 行省略时保留列表值 |
+| credits_valid / credits_balance | bool / string/null | 当前积分快照是否已观测、余额；未知或隐藏的余额为 `null`，清除旧显示值 |
+| credits_has_credits / credits_unlimited / credits_overage_limit_reached | bool/null | 沿用账号列表的积分业务标志；未观测快照时为 `null` |
+| credits_spend_control_reached / credits_rate_limit_reached_type | bool/null / string | 支出限制与工作区硬停止；未知支出限制为 `null`，无硬停止为 `""` |
 | usage_percent_5h / usage_percent_7d | number/null | 运行时用量；显式 `null` 表示窗口已失效，前端清除列表值 |
 | reset_5h_at / reset_7d_at | string/null | 窗口重置时间（RFC3339） |
 | codex_5h_usage_updated_at / codex_usage_updated_at | string/null | 最近一次用量刷新时间；WS 每轮配额帧也会刷新 |
@@ -822,7 +834,7 @@ Codex 的流式 remote compact v2（`POST /v1/responses`，`stream:true`，`inpu
 | dynamic_concurrency_limit / base_concurrency_effective | integer | 调度器当前生效的并发上限与配置值 |
 | session_slot_buffer_enabled | bool | 全局会话槽缓冲开关 |
 
-缺失的 key 表示旧后端，前端保留列表值；显式 `null` 表示窗口失效。Antigravity 行不使用 Codex 用量字段。
+缺失的 key 表示旧后端，前端保留列表值；用量字段显式 `null` 表示窗口失效。套餐与 credits 的 live 字段只投影到使用 Codex 运行时字段的行，Antigravity 行省略这些字段，不改变原列表展示。
 
 终态后到达的连接级配额帧也会更新上述字段。只有通过观测排序门的帧才推进帧时间、credits 和用量；遇到并发观测锁争用时按原始时间排队应用，不等待数据库。用量、credits、套餐与冷却的数据库写入在后台合并执行，因此 live 结果可先于持久化结果可见。
 

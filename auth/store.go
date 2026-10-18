@@ -2653,6 +2653,9 @@ func (a *Account) MarkUsageFrameObserved(kind string, at time.Time) {
 type AccountLiveUsageSnapshot struct {
 	Status              string
 	UsingCredits        bool
+	PlanType            string
+	CreditsValid        bool
+	Credits             CreditBalanceSnapshot
 	UsagePercent5h      float64
 	UsagePercent5hValid bool
 	Reset5hAt           time.Time
@@ -2679,6 +2682,9 @@ func (a *Account) GetAccountLiveUsageSnapshot() AccountLiveUsageSnapshot {
 	return AccountLiveUsageSnapshot{
 		Status:              a.runtimeStatusLocked(now),
 		UsingCredits:        a.usingCreditsLocked(now),
+		PlanType:            a.PlanType,
+		CreditsValid:        a.CreditsValid,
+		Credits:             a.creditSnapshotLocked(),
 		UsagePercent5h:      a.UsagePercent5h,
 		UsagePercent5hValid: a.UsagePercent5hValid,
 		Reset5hAt:           a.Reset5hAt,

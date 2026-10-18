@@ -631,6 +631,14 @@ export interface AccountLiveStateResponse {
     // 运行时用量投影：旧后端缺 key 时保留列表值；显式 null 表示窗口已失效。
     status?: AccountStatus
     using_credits?: boolean
+    plan_type?: string
+    credits_valid?: boolean
+    credits_balance?: string | null
+    credits_has_credits?: boolean | null
+    credits_unlimited?: boolean | null
+    credits_overage_limit_reached?: boolean | null
+    credits_spend_control_reached?: boolean | null
+    credits_rate_limit_reached_type?: string | null
     usage_percent_5h?: number | null
     reset_5h_at?: ISODateString | null
     codex_5h_usage_updated_at?: ISODateString | null
