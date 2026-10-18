@@ -31,6 +31,8 @@ func newAntigravityBalanceStore(t *testing.T, accounts int) *Store {
 	return store
 }
 
+// antigravitySelectionOpts 返回渠道为 Antigravity 的选号上下文，用于让测试进入
+// 首绑 / Fresh 加权避险分支。
 func antigravitySelectionOpts() SelectionOptions {
 	return SelectionOptions{
 		Provider: database.UpstreamChannelAntigravity,
@@ -398,6 +400,8 @@ func antigravityTieBreakWinner(tie func(string, int64) uint64, accounts, trials 
 	return wins
 }
 
+// antigravityChiSquared 以等概率为期望值计算各账号中奖次数的卡方统计量，
+// 用于断言散列平票打散在账号维度上没有系统性偏置。
 func antigravityChiSquared(wins []int) float64 {
 	total, expected := 0, 0.0
 	for _, win := range wins {

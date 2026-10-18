@@ -3099,6 +3099,8 @@ func (a *Account) AllowsAPIKey(apiKeyID int64) bool {
 	return ok
 }
 
+// normalizeModelCooldownKey 归一化模型冷却键：去除首尾空白并转为小写。
+// 返回空串表示没有可用的模型标识，调用方据此跳过冷却写入与查询。
 func normalizeModelCooldownKey(model string) string {
 	return strings.ToLower(strings.TrimSpace(model))
 }
@@ -3141,6 +3143,10 @@ func (a *Account) setModelCooldownUntilLocked(key, reason string, resetAt, now t
 	return cooldown
 }
 
+// SetModelCooldownUntil 在账号内存中为指定模型写入「冷却直至 resetAt」并返回写入
+// 的条目（本方法仅更新内存 map，不负责持久化）；模型键为空或 resetAt 为零值时返回
+// 零值且不写入。wire、family 这类被多个公开档位共享的冷却键应改用
+// SetModelCooldownUntilAtLeast，避免更短的 deadline 把既有长冷却改短。
 func (a *Account) SetModelCooldownUntil(model, reason string, resetAt time.Time) ModelCooldown {
 	key, reason, ok := normalizeModelCooldownArgs(model, reason, resetAt)
 	if !ok {
@@ -3206,6 +3212,8 @@ func (a *Account) IsModelRateLimited(model string) bool {
 	return ok && cooldown.ResetAt.After(time.Now())
 }
 
+// ModelCooldownRemaining 返回指定模型冷却距 ResetAt 的剩余时长；模型键为空、
+// 没有冷却条目或冷却已过期均返回 0。
 func (a *Account) ModelCooldownRemaining(model string) time.Duration {
 	key := normalizeModelCooldownKey(model)
 	if key == "" {
@@ -7448,6 +7456,10 @@ func (s *Store) nextAccountForFreshAffinity(key string, apiKeyID int64, exclude 
 	return s.nextAccountForFreshAffinityWithDispatch(key, apiKeyID, exclude, filter, SelectionOptions{Policy: DispatchPolicyStandard})
 }
 
+// nextAccountForFreshAffinityWithDispatch 是 nextAccountForFreshAffinity 的带
+// DispatchPolicy 变体：Antigravity 加权避险接管时直接返回其结果（含号池无可用
+// 容量返回 nil 的情况），避免再次回退重扫并重复求值 filter；未接管时才按散列开关
+// 回退到 HRW / 调度器 / round-robin 重扫。
 func (s *Store) nextAccountForFreshAffinityWithDispatch(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, opts SelectionOptions) *Account {
 	if s == nil {
 		return nil
@@ -8033,6 +8045,9 @@ func (s *Store) WaitForSessionAvailableWithFilter(ctx context.Context, key strin
 	return account, proxyURL
 }
 
+// WaitForSessionAvailableWithDispatch 按指定 DispatchPolicy 排队等待满足过滤条件
+// 的会话账号，只返回账号与代理地址；需要保留容量溢出借用判定时改用
+// WaitForSessionAvailableWithDispatchGuard。
 func (s *Store) WaitForSessionAvailableWithDispatch(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy) (*Account, string) {
 	account, proxyURL, _, _ := s.waitForSessionAvailableWithFilter(ctx, key, timeout, apiKeyID, exclude, filter, false, SelectionOptions{Policy: policy})
 	return account, proxyURL
@@ -8052,6 +8067,9 @@ func (s *Store) WaitForContinuationAvailableWithFilter(ctx context.Context, key 
 	return account, proxyURL
 }
 
+// WaitForContinuationAvailableWithDispatch 按指定 DispatchPolicy 排队等待续链亲和键
+// 绑定的账号可用（preserveBinding=true）：存在绑定时锁定该账号不顺延其他账号，无绑定时
+// 沿用底层 Fresh 选号语义。
 func (s *Store) WaitForContinuationAvailableWithDispatch(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy) (*Account, string) {
 	account, proxyURL, _, _ := s.waitForSessionAvailableWithFilter(ctx, key, timeout, apiKeyID, exclude, filter, true, SelectionOptions{Policy: policy})
 	return account, proxyURL
@@ -8063,6 +8081,10 @@ func (s *Store) WaitForDispatchAvailable(ctx context.Context, key string, timeou
 	return s.waitForSessionAvailableWithFilter(ctx, key, timeout, apiKeyID, exclude, filter, preserveBinding, SelectionOptions{Policy: policy}, heartbeat...)
 }
 
+// waitForSessionAvailableWithFilter 是各会话等待入口的共同底层实现：按 opts 在超时
+// 窗口内反复尝试选号并挂到可用性 hub 上等待唤醒，preserveBinding 为 true 时若存在绑定
+// 则锁定该账号不顺延其他账号（无绑定时走 Fresh 选号），heartbeat 非空时在等待期间按回调
+// 返回的间隔写出心跳。队列准入被拒（如队列已满）时把错误原样上抛，供协议处理器区分过载与无候选。
 func (s *Store) waitForSessionAvailableWithFilter(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, preserveBinding bool, opts SelectionOptions, heartbeat ...SchedulerWaitHeartbeat) (*Account, string, SessionAffinityGuard, error) {
 	if ctx == nil {
 		ctx = context.Background()

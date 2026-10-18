@@ -167,6 +167,8 @@ func (h *Handler) GeminiModelsAction(c *gin.Context) {
 	}
 }
 
+// geminiCountTokensInboundEndpoint 返回 native countTokens 入口的入站端点标识，
+// 与上游端点（v1internal:countTokens）区分，供日志、错误与用量记录归因使用。
 func geminiCountTokensInboundEndpoint() string {
 	return "/v1beta/models:countTokens"
 }
@@ -182,6 +184,9 @@ func geminiNativeSelectionOptions(c *gin.Context, model string, policy auth.Disp
 	return selectionOptionsForRequestWithProvider(c, model, policy, database.UpstreamChannelAntigravity)
 }
 
+// handleGeminiCountTokens 处理 native Gemini models:countTokens 请求：先过 Key 限额
+// 与并发额度，候选池被硬限定为 Antigravity OAuth 并叠加跨实例冷却、渠道与预算过滤，
+// 随后在重试循环内带重试排除项与亲和守卫选号，转发到上游 v1internal:countTokens。
 func (h *Handler) handleGeminiCountTokens(c *gin.Context, model string, rawBody []byte) {
 	if h.enforceAPIKeyLimitsAndReply(c, model) {
 		return
@@ -428,6 +433,10 @@ func writeGeminiNativeError(c *gin.Context, status int, message string) {
 	}
 }
 
+// handleGeminiGenerateContent 处理 native Gemini generateContent /
+// streamGenerateContent 请求：候选池被硬限定为 Antigravity OAuth 并叠加跨实例冷却、
+// 渠道与预算过滤，按 stream 决定是否安装 SSE 心跳，并在持续重试策略下带重试排除项
+// 与亲和守卫选号转发上游。
 func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawBody []byte, stream bool) {
 	if h.enforceAPIKeyLimitsAndReply(c, model) {
 		return

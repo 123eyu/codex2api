@@ -237,6 +237,9 @@ func TestApplyAntigravityCooldownBacksOffBrieflyWhenGoogleGivesNoHint(t *testing
 	}
 }
 
+// TestApplyAntigravityCooldownPrefersRetryAfterHeaderOverTheShortBackOff 覆盖
+// Retry-After 响应头优先：结构化 body 没有给出 RetryInfo 时，头部秒数必须取代裸
+// RESOURCE_EXHAUSTED 的短回退时长。
 func TestApplyAntigravityCooldownPrefersRetryAfterHeaderOverTheShortBackOff(t *testing.T) {
 	store := newProxyPremiumTestStore()
 	account := &auth.Account{DBID: 7303, UpstreamType: auth.UpstreamAntigravity, AccessToken: "google-token", AntigravityProjectID: "google-project"}
@@ -451,6 +454,8 @@ func TestGeminiNativeCountTokensAppliesModelCooldown(t *testing.T) {
 // antigravityQuotaExhaustedThreshold，因此仍按 rate_limit 分类。
 const antigravityLongRateLimitBody = `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED","metadata":{"model":"gemini-3.8-flash-tiered"}},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"290s"}]}}`
 
+// newAntigravityCooldownTestAccount 构造带项目凭据的 Antigravity 账号，供冷却用例
+// 复用同一组必需字段。
 func newAntigravityCooldownTestAccount(id int64) *auth.Account {
 	return &auth.Account{DBID: id, UpstreamType: auth.UpstreamAntigravity, AccessToken: "google-token", AntigravityProjectID: "google-project"}
 }

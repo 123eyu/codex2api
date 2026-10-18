@@ -167,10 +167,14 @@ func (a *Account) ResetAntigravityPenalty() {
 // 原 round-robin。冷却正确性修复不受该开关影响，始终生效。
 var antigravityBalancedAffinityEnabled atomic.Bool
 
+// init 在包加载时用环境变量初值打开或关闭首绑 / Fresh 选号加权避险开关。
 func init() {
 	antigravityBalancedAffinityEnabled.Store(antigravityBalancedAffinityFromEnv())
 }
 
+// antigravityBalancedAffinityFromEnv 解析 ANTIGRAVITY_BALANCED_AFFINITY：未设置、
+// 空值或无法识别的取值都按开启处理，只有 0/false/off/none/no（忽略大小写与空白）
+// 才关闭加权避险。
 func antigravityBalancedAffinityFromEnv() bool {
 	raw, ok := os.LookupEnv(antigravityBalancedAffinityEnv)
 	if !ok {

@@ -460,6 +460,8 @@ func (h *Handler) waitForRetryAccountAvailable(ctx context.Context, affinityKey 
 	return account, proxyURL, err
 }
 
+// waitForRetryAccountAvailableWithGuard 按完整 SelectionOptions 排队等待一次队列准入，
+// 持续重试心跳激活时把心跳挂进等待回调以保持连接活跃；未选中账号时一并丢弃亲和守卫。
 func (h *Handler) waitForRetryAccountAvailableWithGuard(ctx context.Context, affinityKey string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, preserveBinding bool, opts auth.SelectionOptions) (*auth.Account, string, auth.SessionAffinityGuard, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -498,14 +500,21 @@ func (h *Handler) nextRetryAccountForSessionWithDispatch(ctx context.Context, af
 	return h.nextRetryAccount(ctx, affinityKey, apiKeyID, exclusions, filter, false, policy)
 }
 
+// nextRetryAccountForSessionWithDispatchGuard 是会话重试选号中同时携带
+// SelectionOptions 与亲和守卫的变体：不保留绑定（preserveBinding=false），
+// 排除项取自本次请求的重试排除集。
 func (h *Handler) nextRetryAccountForSessionWithDispatchGuard(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter, opts auth.SelectionOptions) (*auth.Account, string, auth.SessionAffinityGuard, error) {
 	return h.nextRetryAccountWithGuard(ctx, affinityKey, apiKeyID, exclusions, filter, false, opts)
 }
 
+// nextRetryAccountForSessionWithGuard 以 standard 策略做会话重试选号，并返回亲和守卫。
 func (h *Handler) nextRetryAccountForSessionWithGuard(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter) (*auth.Account, string, auth.SessionAffinityGuard, error) {
 	return h.nextRetryAccountWithGuard(ctx, affinityKey, apiKeyID, exclusions, filter, false, auth.SelectionOptions{Policy: auth.DispatchPolicyStandard})
 }
 
+// nextRetryAccountForContinuation 以 standard 策略做续链重试选号（preserveBinding=true）：
+// 存在绑定时锁定已绑定账号，无绑定时沿用底层 Fresh 选号；需要渠道上下文时改用
+// nextRetryAccountForContinuationWithSelection。
 func (h *Handler) nextRetryAccountForContinuation(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter) (*auth.Account, string) {
 	return h.nextRetryAccount(ctx, affinityKey, apiKeyID, exclusions, filter, true, auth.DispatchPolicyStandard)
 }
@@ -520,6 +529,8 @@ func (h *Handler) nextRetryAccountForContinuationWithSelection(ctx context.Conte
 	return account, proxyURL, err
 }
 
+// nextRetryAccount 在重试排除项与选号预算内完成一次重试选号，只返回账号与代理地址；
+// 需要亲和守卫与队列准入错误时改用 nextRetryAccountWithGuard。
 func (h *Handler) nextRetryAccount(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter, preserveBinding bool, policy auth.DispatchPolicy) (*auth.Account, string) {
 	account, proxyURL, _, _ := h.nextRetryAccountWithGuard(ctx, affinityKey, apiKeyID, exclusions, filter, preserveBinding, auth.SelectionOptions{Policy: policy})
 	return account, proxyURL
@@ -540,6 +551,10 @@ func selectionFilterWithContext(ctx context.Context, filter auth.AccountFilter) 
 	}
 }
 
+// nextRetryAccountWithGuard 是重试选号的底层实现：先在 accountSelectionTimeout 预算内
+// 做一次同步选号（过滤器同时受该预算约束），失败后触发调度状态对账并排队等待。阻塞者
+// 只剩本次请求自身的软 / 暂态排除项时跳过等待直接重置，硬排除、账号冷却与过滤器始终
+// 生效；预算耗尽返回上下文错误，队列准入被拒时上抛准入错误。
 func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter, preserveBinding bool, opts auth.SelectionOptions) (*auth.Account, string, auth.SessionAffinityGuard, error) {
 	if ctx == nil {
 		ctx = context.Background()

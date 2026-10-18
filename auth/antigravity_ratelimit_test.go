@@ -14,6 +14,8 @@ import (
 // 合成键；auth 包不能反向依赖 proxy，这里按字面量断言。
 const antigravityGeminiFamilyKey = "antigravity:gemini"
 
+// antigravityPenaltyClose 断言惩罚值落在容差内（期望 0 时收紧到 1e-9），避免指数
+// 衰减的二进制舍入把断言变成偶发失败。
 func antigravityPenaltyClose(t *testing.T, got, want float64, label string) {
 	t.Helper()
 	tolerance := 1e-6
@@ -25,6 +27,8 @@ func antigravityPenaltyClose(t *testing.T, got, want float64, label string) {
 	}
 }
 
+// TestAntigravityPenaltyDecaysWithHalfLife 覆盖惩罚的指数衰减：每过一个半衰期减半、
+// 超出整个窗口直接归零、时钟回拨不放大惩罚，ResetAntigravityPenalty 立即清零。
 func TestAntigravityPenaltyDecaysWithHalfLife(t *testing.T) {
 	base := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	acc := &Account{DBID: 8801, AccessToken: "token"}
@@ -64,6 +68,8 @@ func TestAntigravityPenaltyDecaysWithHalfLife(t *testing.T) {
 	}
 }
 
+// TestAntigravityPenaltyAccumulatesAndCaps 覆盖惩罚累加：新事件先按间隔衰减旧累加值
+// 再相加，跨过整个窗口后旧值完全归零，连续事件累加封顶在 antigravityThrottleMaxPenalty。
 func TestAntigravityPenaltyAccumulatesAndCaps(t *testing.T) {
 	base := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	acc := &Account{DBID: 8802, AccessToken: "token"}
@@ -91,6 +97,9 @@ func TestAntigravityPenaltyAccumulatesAndCaps(t *testing.T) {
 	}
 }
 
+// TestRecordAntigravityRateLimitEventWeights 覆盖事件分类权重：共享容量与账号配额
+// 不记账，裸 RESOURCE_EXHAUSTED 记半个、明确限流记一个，权重越界夹回区间、NaN 与
+// 负值丢弃，缺省 ObservedAt 落到当前时刻，nil 账号不 panic。
 func TestRecordAntigravityRateLimitEventWeights(t *testing.T) {
 	base := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 
@@ -135,6 +144,9 @@ func TestRecordAntigravityRateLimitEventWeights(t *testing.T) {
 	}
 }
 
+// TestAntigravityBalancedAffinitySwitch 覆盖加权避险开关：Set / Get 成对生效，
+// ReloadAntigravityBalancedAffinityFromEnv 按 ANTIGRAVITY_BALANCED_AFFINITY 的取值
+// 重新判定开启与关闭，用例结束后恢复原值。
 func TestAntigravityBalancedAffinitySwitch(t *testing.T) {
 	previous := GetAntigravityBalancedAffinity()
 	t.Cleanup(func() { SetAntigravityBalancedAffinity(previous) })
@@ -169,6 +181,8 @@ func TestAntigravityBalancedAffinitySwitch(t *testing.T) {
 	}
 }
 
+// newAntigravityRateLimitTestStore 构造仅用于冷却与惩罚断言的内存 Store：账号直接
+// AddAccount 注入，不经数据库，并注册 Stop 清理。
 func newAntigravityRateLimitTestStore(t *testing.T, tokenCache cache.TokenCache, accounts ...*Account) *Store {
 	t.Helper()
 	store := NewStore(nil, tokenCache, &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1, TestModel: "gpt-5.4"})

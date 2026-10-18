@@ -409,6 +409,12 @@ func antigravityRateLimitEvent(statusCode int, model, wireModel string, quota an
 	return event
 }
 
+// applyAntigravityCooldownWithPenalty 是 Antigravity 429/503 冷却落地的共同实现：解析
+// 结构化 google.rpc 信号定出冷却时长（优先尊重 RetryInfo 与 Retry-After 头，无明确提示
+// 时按 Kind 分类默认值处理，裸限流退到短回退；完全解析失败的非结构化 429 走通用 429 策略），
+// 写入公开模型键。对于共享的 wire 键统一只延长、不改短；Gemini family 冷却键仅在
+// QUOTA_EXHAUSTED 且归属 Gemini 模型时写入且同样只延长不改短。recordPenalty 为 false
+// 时只落冷却、不进进程内避险惩罚累加器（admin 连接性探测走这一档）。
 func applyAntigravityCooldownWithPenalty(store *auth.Store, account *auth.Account, statusCode int, body []byte, resp *http.Response, model string, recordPenalty bool) codex429Decision {
 	quota, ok := parseAntigravityQuotaError(statusCode, body)
 	if !ok {

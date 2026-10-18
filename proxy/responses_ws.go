@@ -299,6 +299,10 @@ func stripNewAPIPolicyWebSocketEventID(payload []byte) ([]byte, string) {
 	return cleaned, eventID
 }
 
+// forwardResponsesWebSocketTurn 处理 WebSocket 传输上的一个 Responses 会话轮次：每个
+// response.create 都是独立的逻辑请求，先做内存准入、Key 绑定与配额复核并重置上一帧的
+// 安全上下文，再归一化请求体、在重试循环内带排除项重新选号转发；可恢复的失败按协议写回错误
+// 帧并保留连接，需要关闭连接的致命失败才返回 close error。
 func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn, rawPayload []byte, policyEventID string, options *responsesWSForwardOptions) (returnErr error) {
 	defer releasePromptRequestFrameBody(c)
 	reservation, admitted := security.TryAcquireRequestMemory(int64(len(rawPayload)))

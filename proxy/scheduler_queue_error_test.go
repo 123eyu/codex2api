@@ -39,6 +39,9 @@ func saturatedSchedulerQueue(t *testing.T) *auth.Store {
 	return store
 }
 
+// TestSchedulerQueueOverloadStopsContinuousRetry 断言调度队列准入被拒时选号立即带着
+// ErrSchedulerQueueFull 返回，不再进入持续重试循环，且既有上游重试排除项保持不变、
+// 拒绝计数各记一次。
 func TestSchedulerQueueOverloadStopsContinuousRetry(t *testing.T) {
 	s := saturatedSchedulerQueue(t)
 	h := &Handler{store: s}
@@ -232,6 +235,8 @@ func TestSchedulerQueueOverloadResponsesWebSocket(t *testing.T) {
 	}
 }
 
+// TestSchedulerWaitHeartbeatPreservesOneAdmission 断言等待期间心跳按间隔持续写出保活帧，
+// 既保持连接活跃，也不会重复占用队列准入名额或遗留等待者。
 func TestSchedulerWaitHeartbeatPreservesOneAdmission(t *testing.T) {
 	previous := continuousRetryKeepaliveInterval
 	continuousRetryKeepaliveInterval = 5 * time.Millisecond

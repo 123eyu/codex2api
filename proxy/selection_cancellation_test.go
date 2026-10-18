@@ -11,6 +11,8 @@ import (
 	"github.com/codex2api/database"
 )
 
+// TestSelectionCancellationStopsInitialScan 断言上下文取消后初次扫描立即停止：过滤器
+// 至多再被调用一次，不选入账号、不启动队列等待，并返回 context.Canceled。
 func TestSelectionCancellationStopsInitialScan(t *testing.T) {
 	for _, engine := range []string{"legacy", "indexed"} {
 		for _, cancelBefore := range []bool{true, false} {
@@ -59,6 +61,8 @@ func TestSelectionCancellationStopsInitialScan(t *testing.T) {
 	}
 }
 
+// TestSelectionBudgetIncludesInitialScan 断言选号预算把初次扫描自身算进去：慢过滤器
+// 返回后预算已到期，必须直接返回 DeadlineExceeded，不再启动任何队列等待。
 func TestSelectionBudgetIncludesInitialScan(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, SchedulerEngine: "legacy"})
@@ -85,6 +89,9 @@ func TestSelectionBudgetIncludesInitialScan(t *testing.T) {
 	})
 }
 
+// TestSelectionSuccessPreservesRequestLifetime 断言选号超时只约束选号阶段：成功选号后
+// 即便超过 accountSelectionTimeout，父上下文不受影响、账号仍被持有，不误伤后续上游
+// 流式响应。
 func TestSelectionSuccessPreservesRequestLifetime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
@@ -106,6 +113,8 @@ func TestSelectionSuccessPreservesRequestLifetime(t *testing.T) {
 	})
 }
 
+// TestSelectionDeadlineStopsPoolWait 断言请求截止时间到点即退出号池等待，不遗留队列
+// 等待者，也不会一直等到 accountSelectionTimeout。
 func TestSelectionDeadlineStopsPoolWait(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, FastSchedulerEnabled: true})
 	t.Cleanup(store.Stop)
@@ -162,6 +171,8 @@ func TestSelectionResetsRequestExclusionsCoveringWholePool(t *testing.T) {
 	}
 }
 
+// TestSelectionTransientResetKeepsHardExclusions 断言多轮暂态重置只会重新放开暂态排除
+// 的账号，MarkHard 标记的硬排除账号在每一轮都必须继续被拦住。
 func TestSelectionTransientResetKeepsHardExclusions(t *testing.T) {
 	for _, engine := range []string{"legacy", "indexed"} {
 		t.Run(engine, func(t *testing.T) {
@@ -188,6 +199,8 @@ func TestSelectionTransientResetKeepsHardExclusions(t *testing.T) {
 	}
 }
 
+// TestSelectionTransientResetKeepsAccountCooldown 断言暂态重置不会绕过账号级冷却：唯一
+// 候选仍处于冷却时只能等到上下文超时，不能借重置把它重新选入。
 func TestSelectionTransientResetKeepsAccountCooldown(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, SchedulerEngine: "indexed"})
 	t.Cleanup(store.Stop)
