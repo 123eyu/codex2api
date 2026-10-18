@@ -64,7 +64,10 @@ func codexUsageFramePersistInterval() time.Duration {
 // already on the wire (the gateway forwards them downstream), so this adds no
 // upstream requests and no new request headers.
 func ApplyCodexUsageEventFrame(store *auth.Store, account *auth.Account, eventType string, frame gjson.Result, observedAt time.Time) {
-	if account == nil || !codexUsageFrameIngestEnabled.Load() {
+	// Relay accounts can pass through their backend's quota frames. Those
+	// describe the relay's own upstream account, not this account's Codex
+	// windows, so they must not drive local usage or cooldowns.
+	if account == nil || account.IsRelayStyle() || !codexUsageFrameIngestEnabled.Load() {
 		return
 	}
 	switch strings.ToLower(strings.TrimSpace(eventType)) {
@@ -341,7 +344,7 @@ func isDefaultCodexLimitName(name string) bool {
 // paths; this path exists to shrink the window between a turn finishing and
 // the scheduler seeing its consumption.
 func ApplyCodexIdleUsageFrame(account *auth.Account, eventType string, payload []byte) {
-	if account == nil || len(payload) == 0 || !codexUsageFrameIngestEnabled.Load() {
+	if account == nil || account.IsRelayStyle() || len(payload) == 0 || !codexUsageFrameIngestEnabled.Load() {
 		return
 	}
 	normalizedType := strings.ToLower(strings.TrimSpace(eventType))
