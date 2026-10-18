@@ -53,6 +53,9 @@ func (t *adminAuthThrottle) recordFailure(ip string, now time.Time) time.Duratio
 	defer t.mu.Unlock()
 	entry := t.entries[ip]
 	if entry == nil || now.Sub(entry.windowStart) > adminAuthFailureWindow {
+		// 新来源也要触发清理：攻击者可以给大量 IP 各留 1–4 次失败，
+		// 只在达到阻断阈值时清理会让表无限增长。
+		t.evictLocked(now)
 		entry = &adminAuthThrottleEntry{windowStart: now}
 		t.entries[ip] = entry
 	}
@@ -67,7 +70,6 @@ func (t *adminAuthThrottle) recordFailure(ip string, now time.Time) time.Duratio
 	entry.failures = 0
 	entry.windowStart = now
 	entry.blockedUntil = now.Add(adminAuthBlockDuration)
-	t.evictLocked(now)
 	return adminAuthBlockDuration
 }
 
@@ -80,9 +82,9 @@ func (t *adminAuthThrottle) reset(ip string) {
 	t.mu.Unlock()
 }
 
-// evictLocked 在条目过多时清理过期记录，避免伪造来源地址把内存撑大。
+// evictLocked 在写入新条目之前清理，保证插入后不超过上限。
 func (t *adminAuthThrottle) evictLocked(now time.Time) {
-	if len(t.entries) <= adminAuthMaxEntries {
+	if len(t.entries) < adminAuthMaxEntries {
 		return
 	}
 	for ip, entry := range t.entries {
@@ -90,7 +92,7 @@ func (t *adminAuthThrottle) evictLocked(now time.Time) {
 			delete(t.entries, ip)
 		}
 	}
-	for len(t.entries) > adminAuthMaxEntries {
+	for len(t.entries) >= adminAuthMaxEntries {
 		var oldestIP string
 		var oldest time.Time
 		for ip, entry := range t.entries {

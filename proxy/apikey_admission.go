@@ -44,27 +44,28 @@ func (h *Handler) admissionLimiter() *apiKeyAdmissionLimiter {
 }
 
 // allow 在 RPM/RPD 限额内为 requests 个上游请求预留计数。
-// limit <= 0 表示该维度不限制。
-func (l *apiKeyAdmissionLimiter) allow(keyID int64, rpm, rpd, requests int, now time.Time) bool {
+// limit <= 0 表示该维度不限制。拒绝时返回 "rpm" 或 "rpd"。
+func (l *apiKeyAdmissionLimiter) allow(keyID int64, rpm, rpd, requests int, now time.Time) (bool, string) {
 	if l == nil || keyID <= 0 || requests <= 0 {
-		return true
+		return true, ""
 	}
 	if rpm <= 0 && rpd <= 0 {
-		return true
+		return true, ""
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	entry := l.entries[keyID]
 	if entry == nil {
+		// 先清理再插入，否则满表时新键会被自己的淘汰逻辑删掉。
+		l.evictLocked(now)
 		entry = &apiKeyAdmissionEntry{}
 		l.entries[keyID] = entry
-		l.evictLocked(now)
 	}
 	entry.lastSeen = now
 
 	if rpm > 0 && entry.rpmUsed(now)+int64(requests) > int64(rpm) {
-		return false
+		return false, "rpm"
 	}
 	if rpd > 0 {
 		if entry.rpdStart.IsZero() || now.Sub(entry.rpdStart) >= apiKeyRPDWindow {
@@ -72,7 +73,7 @@ func (l *apiKeyAdmissionLimiter) allow(keyID int64, rpm, rpd, requests int, now 
 			entry.rpdCount = 0
 		}
 		if entry.rpdCount+int64(requests) > int64(rpd) {
-			return false
+			return false, "rpd"
 		}
 	}
 
@@ -83,7 +84,7 @@ func (l *apiKeyAdmissionLimiter) allow(keyID int64, rpm, rpd, requests int, now 
 	if rpd > 0 {
 		entry.rpdCount += int64(requests)
 	}
-	return true
+	return true, ""
 }
 
 // rpmUsed 推进秒级桶并返回最近 60 秒的计数，不写入本次请求。

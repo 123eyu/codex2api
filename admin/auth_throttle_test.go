@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -92,5 +93,16 @@ func TestAdminAuthMiddlewareThrottlesFailedAttempts(t *testing.T) {
 	}
 	if rec := request("wrong-key"); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("failure after successful login returned %d, want 401", rec.Code)
+	}
+}
+
+func TestAdminAuthThrottleBoundsTrackedIPs(t *testing.T) {
+	throttle := newAdminAuthThrottle()
+	now := time.Unix(1_700_000_000, 0)
+	for i := 0; i < adminAuthMaxEntries+200; i++ {
+		throttle.recordFailure(fmt.Sprintf("198.51.100.%d", i), now)
+	}
+	if got := len(throttle.entries); got > adminAuthMaxEntries {
+		t.Fatalf("tracked IPs = %d, want <= %d", got, adminAuthMaxEntries)
 	}
 }

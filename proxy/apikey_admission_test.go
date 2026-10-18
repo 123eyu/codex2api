@@ -1,28 +1,37 @@
 package proxy
 
 import (
+	"net/http"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/codex2api/database"
 )
+
+func admissionAllow(l *apiKeyAdmissionLimiter, keyID int64, rpm, rpd, requests int, now time.Time) bool {
+	ok, _ := l.allow(keyID, rpm, rpd, requests, now)
+	return ok
+}
 
 func TestAPIKeyAdmissionLimiterRejectsBurst(t *testing.T) {
 	limiter := newAPIKeyAdmissionLimiter()
 	now := time.Unix(1_700_000_000, 0)
 
 	for i := 0; i < 2; i++ {
-		if !limiter.allow(1, 2, 0, 1, now) {
+		if !admissionAllow(limiter, 1, 2, 0, 1, now) {
 			t.Fatalf("request %d within RPM rejected", i+1)
 		}
 	}
-	if limiter.allow(1, 2, 0, 1, now) {
+	if admissionAllow(limiter, 1, 2, 0, 1, now) {
 		t.Fatal("third request in the same second should exceed RPM=2")
 	}
-	if !limiter.allow(2, 2, 0, 1, now) {
+	if !admissionAllow(limiter, 2, 2, 0, 1, now) {
 		t.Fatal("other API key should not be affected")
 	}
-	if !limiter.allow(1, 2, 0, 1, now.Add(time.Minute)) {
+	if !admissionAllow(limiter, 1, 2, 0, 1, now.Add(time.Minute)) {
 		t.Fatal("request should be admitted after the RPM window rolls")
 	}
 }
@@ -36,7 +45,7 @@ func TestAPIKeyAdmissionLimiterConcurrentBurst(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if limiter.allow(1, 5, 0, 1, now) {
+			if admissionAllow(limiter, 1, 5, 0, 1, now) {
 				allowed.Add(1)
 			}
 		}()
@@ -50,13 +59,13 @@ func TestAPIKeyAdmissionLimiterConcurrentBurst(t *testing.T) {
 func TestAPIKeyAdmissionLimiterReservesBatchRequests(t *testing.T) {
 	limiter := newAPIKeyAdmissionLimiter()
 	now := time.Unix(1_700_000_000, 0)
-	if !limiter.allow(1, 10, 0, 4, now) {
+	if !admissionAllow(limiter, 1, 10, 0, 4, now) {
 		t.Fatal("batch of 4 within RPM=10 rejected")
 	}
-	if limiter.allow(1, 10, 0, 7, now) {
+	if admissionAllow(limiter, 1, 10, 0, 7, now) {
 		t.Fatal("batch of 7 would exceed the remaining RPM budget")
 	}
-	if !limiter.allow(1, 10, 0, 6, now) {
+	if !admissionAllow(limiter, 1, 10, 0, 6, now) {
 		t.Fatal("batch of 6 should fit exactly")
 	}
 }
@@ -64,16 +73,63 @@ func TestAPIKeyAdmissionLimiterReservesBatchRequests(t *testing.T) {
 func TestAPIKeyAdmissionLimiterEnforcesRPD(t *testing.T) {
 	limiter := newAPIKeyAdmissionLimiter()
 	now := time.Unix(1_700_000_000, 0)
-	if !limiter.allow(1, 0, 2, 1, now) {
+	if !admissionAllow(limiter, 1, 0, 2, 1, now) {
 		t.Fatal("first RPD request rejected")
 	}
-	if !limiter.allow(1, 0, 2, 1, now.Add(time.Hour)) {
+	if !admissionAllow(limiter, 1, 0, 2, 1, now.Add(time.Hour)) {
 		t.Fatal("second RPD request rejected")
 	}
-	if limiter.allow(1, 0, 2, 1, now.Add(2*time.Hour)) {
-		t.Fatal("third RPD request should exceed RPD=2")
+	if ok, reason := limiter.allow(1, 0, 2, 1, now.Add(2*time.Hour)); ok || reason != "rpd" {
+		t.Fatalf("third RPD request = (%v, %q), want (false, rpd)", ok, reason)
 	}
-	if !limiter.allow(1, 0, 2, 1, now.Add(apiKeyRPDWindow)) {
+	if !admissionAllow(limiter, 1, 0, 2, 1, now.Add(apiKeyRPDWindow)) {
 		t.Fatal("RPD window should reset after 24h")
+	}
+}
+
+func TestAPIKeyAdmissionLimiterKeepsNewKeyWhenFull(t *testing.T) {
+	limiter := newAPIKeyAdmissionLimiter()
+	now := time.Unix(1_700_000_000, 0)
+	for i := 1; i <= apiKeyAdmissionMaxKeys; i++ {
+		if !admissionAllow(limiter, int64(i), 1, 0, 1, now) {
+			t.Fatalf("key %d rejected while filling the map", i)
+		}
+	}
+	newKey := int64(apiKeyAdmissionMaxKeys + 1)
+	if !admissionAllow(limiter, newKey, 1, 0, 1, now) {
+		t.Fatal("new key rejected when the map is full")
+	}
+	if _, ok := limiter.entries[newKey]; !ok {
+		t.Fatal("new key was evicted immediately after insertion")
+	}
+	if got := len(limiter.entries); got > apiKeyAdmissionMaxKeys+1 {
+		t.Fatalf("entries = %d, want <= %d", got, apiKeyAdmissionMaxKeys+1)
+	}
+}
+
+func TestBatchAdmissionDoesNotReserveSlotsTwice(t *testing.T) {
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "admission.db"))
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	h := &Handler{db: db}
+	limits := database.APIKeyLimits{RPM: 3}
+	c := newImageLimitCtx(t, "/v1/images/generations", `{"prompt":"cat"}`, limits)
+
+	// The enqueue check must not consume RPM; each upstream call reserves one.
+	if status, msg := h.EnforceAPIKeyLimitsForRequests(c, "gpt-image-2", 3); status != 0 {
+		t.Fatalf("batch admission = %d (%s), want pass", status, msg)
+	}
+	if _, ok := h.admissionLimiter().entries[1]; ok {
+		t.Fatal("batch admission reserved RPM slots before execution")
+	}
+	for i := 0; i < 3; i++ {
+		if status, msg := h.EnforceAPIKeyLimits(c, "gpt-image-2"); status != 0 {
+			t.Fatalf("per-call admission %d = %d (%s), want pass", i+1, status, msg)
+		}
+	}
+	if status, _ := h.EnforceAPIKeyLimits(c, "gpt-image-2"); status != http.StatusTooManyRequests {
+		t.Fatalf("fourth per-call admission = %d, want 429", status)
 	}
 }

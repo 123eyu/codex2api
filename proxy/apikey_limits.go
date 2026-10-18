@@ -77,20 +77,20 @@ func (h *Handler) payloadRuleIdentity(c *gin.Context) *PayloadRuleIdentity {
 
 // EnforceAPIKeyLimits checks API key scoped model and rate/cost limits.
 func (h *Handler) EnforceAPIKeyLimits(c *gin.Context, model string) (int, string) {
-	return h.enforceAPIKeyLimitsN(c, model, 1)
+	return h.enforceAPIKeyLimitsChecks(c, model, true)
 }
 
 // EnforceAPIKeyLimitsForRequests performs the normal API-key checks and also
 // verifies that a batched request cannot cross the RPM/RPD boundary by issuing
-// multiple upstream calls after a single admission check. The whole batch is
-// reserved atomically so concurrent batches cannot overshoot the window.
+// multiple upstream calls after a single admission check.
+//
+// It deliberately does not reserve the batch here: every generated image is an
+// upstream request that re-enters the standard Images handler and reserves one
+// RPM/RPD slot there. Reserving the batch here as well would charge 2N.
 func (h *Handler) EnforceAPIKeyLimitsForRequests(c *gin.Context, model string, requests int) (int, string) {
 	if requests < 1 {
 		requests = 1
 	}
-	// 先做批量边界检查，避免整批被拒绝时仍消耗一个 RPM 配额。
-	// Each upstream call still runs the normal handler checks and records its own
-	// usage entry, so the single admission below only reserves the batch size.
 	row := apiKeyRowFromContext(c)
 	if row != nil && row.ID > 0 && requests > 1 {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
@@ -110,7 +110,7 @@ func (h *Handler) EnforceAPIKeyLimitsForRequests(c *gin.Context, model string, r
 			}
 		}
 	}
-	return h.enforceAPIKeyLimitsN(c, model, requests)
+	return h.enforceAPIKeyLimitsChecks(c, model, false)
 }
 
 func apiKeyBatchWouldExceed(current int64, limit, requests int) bool {
@@ -127,15 +127,12 @@ func apiKeyBatchWouldExceed(current int64, limit, requests int) bool {
 //   - http.StatusForbidden (403): 模型不在白名单 / 在黑名单
 //   - http.StatusTooManyRequests (429): rpm/rpd/cost/token 任一窗口超额
 func (h *Handler) enforceAPIKeyLimits(c *gin.Context, model string) (int, string) {
-	return h.enforceAPIKeyLimitsN(c, model, 1)
+	return h.enforceAPIKeyLimitsChecks(c, model, true)
 }
 
-// enforceAPIKeyLimitsN 是准入检查的实际实现。requests 表示本次准入会消耗的
-// 上游请求数（批量生图一次可产生多个请求），用于原子预留 RPM/RPD 计数。
-func (h *Handler) enforceAPIKeyLimitsN(c *gin.Context, model string, requests int) (int, string) {
-	if requests < 1 {
-		requests = 1
-	}
+// enforceAPIKeyLimitsChecks 执行全部限额检查；reserve 为 false 时跳过进程内
+// RPM/RPD 计数，供批量入队复用（实际执行时由每个上游调用另行预留）。
+func (h *Handler) enforceAPIKeyLimitsChecks(c *gin.Context, model string, reserve bool) (int, string) {
 	var daybreakStatus int
 	var daybreakMessage string
 	model, daybreakStatus, daybreakMessage = h.checkDaybreakRequest(c, model)
@@ -273,13 +270,15 @@ func (h *Handler) enforceAPIKeyLimitsN(c *gin.Context, model string, requests in
 
 	// 7. 进程内准入计数。数据库聚合 + 60s 缓存读到的是同一份旧值，无法约束
 	// 缓存窗口内的并发突发；这里按实际请求数原子递增后再放行。
-	if !h.admissionLimiter().allow(row.ID, limits.RPM, limits.RPD, requests, time.Now()) {
-		if limits.RPM > 0 {
+	if reserve {
+		if allowed, reason := h.admissionLimiter().allow(row.ID, limits.RPM, limits.RPD, 1, time.Now()); !allowed {
+			if reason == "rpd" {
+				return http.StatusTooManyRequests,
+					fmt.Sprintf("API key rate limit exceeded: %d requests per day", limits.RPD)
+			}
 			return http.StatusTooManyRequests,
 				fmt.Sprintf("API key rate limit exceeded: %d requests per minute", limits.RPM)
 		}
-		return http.StatusTooManyRequests,
-			fmt.Sprintf("API key rate limit exceeded: %d requests per day", limits.RPD)
 	}
 
 	return 0, ""
