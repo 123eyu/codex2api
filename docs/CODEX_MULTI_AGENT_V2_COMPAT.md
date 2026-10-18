@@ -112,6 +112,7 @@ CODEX_MULTI_AGENT_V2_COMPAT=true
 
 - 在 `item`、`output`、`response.output`、`tools`、`response.tools`、`tool_choice`、`response.tool_choice` 中还原临时命名空间；
 - 工具调用还原为 `namespace: collaboration` + `name: <tool>`；namespace 声明、回显的工具定义和 `tool_choice` 恢复原前缀；
+- 上游省略 `encrypted_function_args` 或返回 `null` 时，如果 `arguments` 是合法 JSON、`message` 是字符串且不像已知密文，补全 `encrypted_function_args: []`；
 - 兼容 `collaboration-optimize.<tool>` 和 `collaboration-optimize__<tool>`；
 - 响应回显的扁平工具定义恢复为 `collaboration.<tool>`；
 - `arguments`、`input`、`output` 等不透明字段不改写；
@@ -123,6 +124,7 @@ CODEX_MULTI_AGENT_V2_COMPAT=true
 ## 安全失败策略
 
 - 不解析任务正文，不解密，也不把 `encrypted_content` 重标为 `input_text`。
+- 补全 `encrypted_function_args: []` 前检查 `arguments` 和 `message`；缺字段、非法 JSON、空文本、非字符串或 `gAAAA` 前缀都保持原样。
 - 可选的 `agent_message` 适配器只接受全部为 `input_text` 的内容；出现 `encrypted_content`、混合内容、空文本或未知 part 时拒绝转换。该适配器当前默认不接线。
 - 请求已有 `collaboration-optimize` 冲突、JSON 无效、嵌套或数量超限时，保持原请求并记录跳过日志，不做半转换。
 - 响应还原只在本次请求真的执行过改名时生效；未改名的请求不触发任何响应改写。
@@ -133,13 +135,17 @@ CODEX_MULTI_AGENT_V2_COMPAT=true
 
 默认路径只处理父请求的 schema 和响应 namespace 还原，不处理 `agent_message`。子请求通常由上游网关直接转发给第三方模型。
 
-子侧是否可用取决于该网关：本仓自带的 Responses→Chat 转换目前不识别 `agent_message`，会返回 `cannot be represented by Chat Completions`；只有子侧网关原生支持 `agent_message`，或显式接线 `rewriteCodexAgentMessageInput` 后才成立。该路径尚未做端到端验证。
+子侧是否可用取决于该网关：本仓自带的 Responses→Chat 转换目前不识别 `agent_message`，会返回 `cannot be represented by Chat Completions`；只有子侧网关原生支持 `agent_message`，或显式接线 `rewriteCodexAgentMessageInput` 后才成立。真实链路验证表明，部分第三方网关（例如 NewAPI）会忽略 `agent_message`，需要子侧做等价转换。
 
 如果接线适配器，它只接受全明文 `input_text`；密文、混合内容和空文本都会拒绝。适配器不是解密层。
 
 ## 验证
 
-截至 2026-10-18：单元测试、集成测试和真实 Codex CLI + mock 上游通过；真实 GPT v2 → 第三方子 Agent 的端到端验收未完成，受测试账号条件限制。
+截至 2026-10-18：单元测试、集成测试和真实 Codex CLI + mock 上游通过；父侧也已通过真实生产链路验证。
+
+开启兼容层后，父模型的 `spawn_agent` 调用被补全为 `encrypted_function_args: []`，子请求的 `agent_message` 只包含明文 `input_text`，正文与父模型发出的任务一致。
+
+子侧仍有一个独立依赖：第三方子 Agent 请求通常不经过本仓。目标子网关（例如 NewAPI）当前忽略 `agent_message`，所以模型仍读不到任务；把同一条子请求里的 `agent_message` 改成普通 `message` + `role=user` 后，模型返回了正确结果。本兼容层解决父侧加密边界，子侧网关还需要做等价转换。
 
 单元与集成测试覆盖：
 
@@ -150,6 +156,7 @@ CODEX_MULTI_AGENT_V2_COMPAT=true
 - `tool_choice` 的 `function`、`custom`、`allowed_tools` 形态同步改写；
 - SSE、非流式 JSON、HTTP 和 WebSocket 的还原；
 - 扁平工具定义、双下划线、点号形式还原；
+- 上游省略或返回 `null` 的 `encrypted_function_args`：明文字符串补全为 `[]`，密文、非法参数和缺字段保持原样；
 - `arguments` 不被改写、数字精度保持、幂等；
 - `agent_message` 明文转换与密文/混合内容拒绝。
 
@@ -165,28 +172,36 @@ python scripts/repro-codex-multi-agent-v2.py --codex-exe /path/to/codex --child-
 - native：子请求 `agent_message` = `input_text` 标头 + `encrypted_content`，复现失败形态；
 - compat：子请求 `agent_message` 只包含 `input_text`。
 
-脚本验证客户端判定规则；Go 集成测试验证网关还原；两者都不替代真实上游端到端验收。脚本自身不读取或输出凭据，模型请求只发往本地 mock，Codex CLI 的 `CODEX_HOME` 指向本次运行的临时目录。
+脚本验证客户端判定规则；Go 集成测试验证网关还原；真实上游结果见下。脚本自身不读取或输出凭据，模型请求只发往本地 mock，Codex CLI 的 `CODEX_HOME` 指向本次运行的临时目录。
 
 仓库 `.gitignore` 忽略 `scripts/`，该脚本需要随 PR 以 `git add -f scripts/repro-codex-multi-agent-v2.py` 加入，否则新克隆无法按本文复现。
 
-真实上游验收清单：
+真实上游验收结果（2026-10-18）：
+
+- 父请求已切换到明文协作工具，上游 `spawn_agent` 返回的调用被补全 `encrypted_function_args: []`；
+- 子请求 `agent_message` 只包含 `input_text`，正文与父模型发出的任务一致；
+- 子侧网关（NewAPI）未把 `agent_message` 转成普通 user message，模型仍读不到任务；同一条请求改成 `message` + `role=user` 后返回正确结果；
+- 因此父侧边界已通过真实链路验证，子侧转换仍是独立阻塞项。
+
+真实上游验收清单（子侧修复后复验）：
 
 - GPT v2 父 → 第三方子的 `spawn_agent`、`followup_task`、`send_message`；
 - 一次真实只读工具调用；
 - 子请求 `agent_message` 不含 `encrypted_content`；
+- 子侧网关把 `agent_message` 转成普通 user message，模型返回任务结果；
 - 上游没有新增 4xx，账号状态正常。
 
 ## 已知限制
 
-- 依赖 Codex 上游遵守修改后的 schema，并返回带 `encrypted_function_args: []` 的明文参数；目标账号尚未验证。
+- 依赖 Codex 上游遵守修改后的 schema 并生成明文 `arguments`。上游省略 `encrypted_function_args` 时网关会补全；若 `message` 仍像密文，则不补并保留诊断。
 - 无法区分原生 OpenAI 和第三方子 Agent；开启后所有匹配的 v2 协作调用都走明文。
 - 上游拒绝时不会自动回退，表现为 4xx。
 - 临时 namespace 是内部兼容细节；如果上游 reserved schema 或客户端判定规则变化，需要重新评估。
 - 只覆盖官方 Codex 客户端的 v2 协作工具；v1、普通工具和其他协议不受影响。
 - 上游错误体不还原；客户端可能看到临时命名空间。
-- 请求历史中的 `function_call` 记录保持原 namespace；本实现不改写历史，目标上游是否接受需在真实账号验证。
+- 请求历史中的 `function_call` 记录保持原 namespace；真实账号已接受该历史，上游策略变化时需要复验。
 - User-Agent 判断不是安全边界。
-- 子侧 Responses→Chat 转换需要单独支持 `agent_message`，默认未接线。
+- 子侧网关必须把 `agent_message` 转成普通 user message；本仓的 `rewriteCodexAgentMessageInput` 提供该转换，但当前子请求不经过本仓。真实链路已确认：不转换时第三方模型读不到任务，转换后正常。
 
 ## 回滚
 

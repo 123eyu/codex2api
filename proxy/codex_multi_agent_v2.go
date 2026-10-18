@@ -478,7 +478,16 @@ func restoreCodexMultiAgentV2Item(updated []byte, path string, item gjson.Result
 			if err != nil {
 				return updated, err
 			}
-			diagnoseCodexMultiAgentV2ToolCall(restoredName, item, state)
+			injected := false
+			if itemType == "function_call" {
+				updated, injected, err = ensureCodexPlaintextFunctionArgs(updated, path, restoredName, item, state)
+				if err != nil {
+					return updated, err
+				}
+			}
+			if !injected {
+				diagnoseCodexMultiAgentV2ToolCall(restoredName, item, state)
+			}
 		}
 		if restoredName != name {
 			var err error
@@ -539,6 +548,46 @@ func restoreCodexMultiAgentV2Item(updated []byte, path string, item gjson.Result
 		}
 	}
 	return updated, nil
+}
+
+// ensureCodexPlaintextFunctionArgs 把上游省略的 encrypted_function_args 显式
+// 补成 []。客户端只在 encrypted_function_args == Some([]) 时才把协作工具参数
+// 当作明文；字段缺失或为 null 时仍按密文交付，父模型生成的明文 message 会被
+// 客户端重新包进子会话的 encrypted_content。
+//
+// 补全前校验 arguments 是合法 JSON、message 是字符串，且不像已知密文前缀。
+// 上游仍返回密文时保持原样，把判断留给诊断日志和上层错误。
+func ensureCodexPlaintextFunctionArgs(updated []byte, path, name string, item gjson.Result, state *codexMultiAgentV2State) ([]byte, bool, error) {
+	if _, ok := codexCollaborationMessageTools[name]; !ok {
+		return updated, false, nil
+	}
+	marker := item.Get("encrypted_function_args")
+	if marker.Exists() && marker.Type != gjson.Null {
+		return updated, false, nil
+	}
+	arguments := strings.TrimSpace(item.Get("arguments").String())
+	if arguments == "" || !gjson.Valid(arguments) {
+		return updated, false, nil
+	}
+	message := gjson.Get(arguments, "message")
+	if !message.Exists() || message.Type != gjson.String {
+		return updated, false, nil
+	}
+	// OpenAI 的 encrypted_content 以 gAAAA 开头。兼容层删除 encrypted 标记后
+	// 上游应生成明文；若仍出现该前缀，不把密文伪装成明文。
+	if strings.HasPrefix(message.String(), "gAAAA") {
+		return updated, false, nil
+	}
+	updated, err := sjson.SetBytes(updated, path+".encrypted_function_args", []string{})
+	if err != nil {
+		return updated, false, err
+	}
+	accountID, model := state.diagnosticContext()
+	if callID := strings.TrimSpace(item.Get("call_id").String()); callID == "" || !state.markDiagnosed(callID+"\x00"+name+"\x00plaintext") {
+		log.Printf("[multi-agent-v2] 已为上游 %s 调用补全 encrypted_function_args: [] (account=%d model=%s)",
+			name, accountID, model)
+	}
+	return updated, true, nil
 }
 
 // diagnoseCodexMultiAgentV2ToolCall 在还原响应时检查上游是否真的返回了

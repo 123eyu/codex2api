@@ -496,6 +496,116 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	}
 }
 
+func TestRestoreCodexMultiAgentV2ResponseInjectsPlaintextFunctionArgs(t *testing.T) {
+	tests := []struct {
+		name          string
+		payload       string
+		path          string
+		wantInjected  bool
+		wantMarker    string
+		wantNamespace string
+	}{
+		{
+			name:          "missing marker",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_1","arguments":"{\"message\":\"do the task\"}"}}`,
+			path:          "item",
+			wantInjected:  true,
+			wantMarker:    "[]",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "null marker",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"send_message","call_id":"call_2","arguments":"{\"message\":\"follow up\"}","encrypted_function_args":null}}`,
+			path:          "item",
+			wantInjected:  true,
+			wantMarker:    "[]",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "existing empty marker",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"followup_task","call_id":"call_3","arguments":"{\"message\":\"again\"}","encrypted_function_args":[]}}`,
+			path:          "item",
+			wantMarker:    "[]",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "existing encrypted marker",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_4","arguments":"{\"message\":\"do the task\"}","encrypted_function_args":["message"]}}`,
+			path:          "item",
+			wantMarker:    `["message"]`,
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "ciphertext-like message",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_5","arguments":"{\"message\":\"gAAAAABciphertext\"}"}}`,
+			path:          "item",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "invalid arguments",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_6","arguments":"not-json"}}`,
+			path:          "item",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "arguments without message",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_7","arguments":"{\"task_name\":\"x\"}"}}`,
+			path:          "item",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "flat double underscore name",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration-optimize__spawn_agent","call_id":"call_8","arguments":"{\"message\":\"do the task\"}"}}`,
+			path:          "item",
+			wantInjected:  true,
+			wantMarker:    "[]",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "response output container",
+			payload:       `{"type":"response.completed","response":{"output":[{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_9","arguments":"{\"message\":\"do the task\"}"}]}}`,
+			path:          "response.output.0",
+			wantInjected:  true,
+			wantMarker:    "[]",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "non-collaboration tool untouched",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"business","name":"spawn_agent","call_id":"call_10","arguments":"{\"message\":\"do the task\"}"}}`,
+			path:          "item",
+			wantNamespace: "business",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := restoreCodexMultiAgentV2Response([]byte(tc.payload), nil)
+			marker := gjson.GetBytes(got, tc.path+".encrypted_function_args")
+			if tc.wantMarker == "" {
+				if marker.Exists() {
+					t.Fatalf("encrypted_function_args should be absent, got %s", marker.Raw)
+				}
+			} else if marker.Raw != tc.wantMarker {
+				t.Fatalf("encrypted_function_args = %s, want %s", marker.Raw, tc.wantMarker)
+			}
+			if ns := gjson.GetBytes(got, tc.path+".namespace").String(); ns != tc.wantNamespace {
+				t.Fatalf("namespace = %q, want %q", ns, tc.wantNamespace)
+			}
+			if tc.wantInjected {
+				// arguments 是不透明字段，补标记不能改动正文。
+				args := gjson.GetBytes(got, tc.path+".arguments").String()
+				if !strings.Contains(args, `"message"`) {
+					t.Fatalf("arguments changed: %s", args)
+				}
+				again := restoreCodexMultiAgentV2Response(got, nil)
+				if string(again) != string(got) {
+					t.Fatalf("injection is not idempotent:\nfirst=%s\nsecond=%s", got, again)
+				}
+			}
+		})
+	}
+}
+
 func TestRestoreCodexMultiAgentV2ResponseRestoresFlatToolDefinitions(t *testing.T) {
 	payload := []byte(`{
 		"tools":[
