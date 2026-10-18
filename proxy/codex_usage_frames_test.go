@@ -1,7 +1,11 @@
 package proxy
 
 import (
+	"context"
+	"database/sql"
+	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -64,6 +68,10 @@ func TestApplyCodexRateLimitsFrameKeepsAbsent5hWindow(t *testing.T) {
 	pct5h, ok := acc.GetUsagePercent5h()
 	if !ok || pct5h != 77 {
 		t.Fatalf("partial frame cleared 5h snapshot: usage=%v valid=%v", pct5h, ok)
+	}
+	pct7d, ok := acc.GetUsagePercent7d()
+	if !ok || pct7d != 12 {
+		t.Fatalf("partial frame dropped its present 7d window: usage=%v valid=%v", pct7d, ok)
 	}
 }
 
@@ -514,6 +522,22 @@ func TestApplyCodexRateLimitsFrameIgnoresGPTCodexMeteredLimit(t *testing.T) {
 	}
 }
 
+func TestApplyCodexRateLimitsFrameAcceptsDefaultLimitName(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	now := time.Unix(1_700_000_000, 0)
+	frame := gjson.Parse(`{
+		"type":"codex.rate_limits",
+		"limit_name":"codex",
+		"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}
+	}`)
+
+	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", frame, now)
+
+	if pct, ok := acc.GetUsagePercent5h(); !ok || pct != 42 {
+		t.Fatalf("default limit_name frame rejected: usage=%v valid=%v", pct, ok)
+	}
+}
+
 func TestApplyCodexUsageHeaderObservationKeepsHigherUsageWithinSameWindow(t *testing.T) {
 	acc := newUsageFrameTestAccount()
 	t0 := time.Unix(1_700_000_000, 0)
@@ -559,4 +583,186 @@ func TestApplyCodexUsageHeaderObservationBoundsMissingReset(t *testing.T) {
 	if got, want := acc.GetReset7dAt(), t0.Add(7*24*time.Hour); !got.Equal(want) {
 		t.Fatalf("7d reset fallback = %v, want %v", got, want)
 	}
+}
+
+func TestApplyCodexUsageHeaderObservationStaleResetStartsNewWindow(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	t0 := time.Unix(1_700_000_000, 0)
+	// The stored window has already reset, but the new frame omits reset_at.
+	acc.SetUsageSnapshot5hAt(100, t0.Add(-time.Minute), t0.Add(-time.Hour))
+	acc.SetUsagePercent7d(100)
+	acc.SetReset7dAt(t0.Add(-time.Minute))
+
+	applyCodexUsageHeaderObservation(nil, acc, codexUsageHeaderObservation{
+		w5h:           codexWindowUsage{usedPct: 5, windowMin: 300, valid: true},
+		w7d:           codexWindowUsage{usedPct: 6, windowMin: 10080, valid: true},
+		authoritative: true,
+	}, t0, false)
+
+	if pct, ok := acc.GetUsagePercent5h(); !ok || pct != 5 {
+		t.Fatalf("5h usage = %v valid=%v, want 5 after the window rolled over", pct, ok)
+	}
+	if want := t0.Add(5 * time.Hour); !acc.GetReset5hAt().Equal(want) {
+		t.Fatalf("5h reset = %v, want %v", acc.GetReset5hAt(), want)
+	}
+	if pct, ok := acc.GetUsagePercent7d(); !ok || pct != 6 {
+		t.Fatalf("7d usage = %v valid=%v, want 6 after the window rolled over", pct, ok)
+	}
+	if want := t0.Add(7 * 24 * time.Hour); !acc.GetReset7dAt().Equal(want) {
+		t.Fatalf("7d reset = %v, want %v", acc.GetReset7dAt(), want)
+	}
+}
+
+func TestCodexResetPrefersAbsoluteOverZeroRelative(t *testing.T) {
+	observedAt := time.Unix(1_700_000_000, 0)
+	frame := gjson.Parse(`{"rate_limits":{"primary":{
+		"used_percent":50,"window_minutes":300,
+		"resets_in_seconds":0,"reset_at":1700003600
+	}}}`)
+
+	headers := codexRateLimitsHeaders(frame, observedAt)
+	if got := headers.Get("x-codex-primary-reset-after-seconds"); got != "3600" {
+		t.Fatalf("reset = %q, want the future absolute reset 3600", got)
+	}
+}
+
+func TestParseCodexWindowUsageRejectsTrailingGarbage(t *testing.T) {
+	if got := parseCodexWindowUsage("42abc", "300", "60"); got.valid {
+		t.Fatalf("trailing garbage in used_percent accepted: %+v", got)
+	}
+	if got := parseCodexWindowUsage("42", "300x", "60"); got.valid {
+		t.Fatalf("trailing garbage in window_minutes accepted: %+v", got)
+	}
+	if got := parseCodexWindowUsage("42", "300", "60abc"); !got.valid {
+		t.Fatal("valid window rejected because the reset value is malformed")
+	}
+}
+
+func TestCodexRateLimitsFrameUsesLimitIDWhenDisplayNameDiffers(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	now := time.Unix(1_700_000_000, 0)
+	frame := gjson.Parse(`{
+		"type":"codex.rate_limits",
+		"limit_id":"codex",
+		"limit_name":"gpt-5.2-codex-sonic",
+		"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}
+	}`)
+
+	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", frame, now)
+
+	if pct, ok := acc.GetUsagePercent5h(); !ok || pct != 42 {
+		t.Fatalf("main limit frame rejected: usage=%v valid=%v", pct, ok)
+	}
+}
+
+func TestApplyCodexIdleUsageFrameAppliesCredits(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	acc.ApplySparseCreditsHeaders(true, false, nil, nil, "workspace_member_credits_depleted")
+
+	ApplyCodexIdleUsageFrame(acc, "codex.rate_limits", []byte(`{
+		"type":"codex.rate_limits",
+		"credits":{"has_credits":false,"unlimited":false,"balance":"0"}
+	}`))
+
+	credits, ok := acc.GetCreditBalance()
+	if !ok || credits.HasCredits {
+		t.Fatalf("idle frame did not clear the credits flag: %+v valid=%v", credits, ok)
+	}
+	if got := acc.GetRateLimitReachedType(); got != "workspace_member_credits_depleted" {
+		t.Fatalf("idle credits frame cleared the workspace hard stop: %q", got)
+	}
+}
+
+func TestCodexRateLimitsFrameIgnoresSingleCreditsFlag(t *testing.T) {
+	observedAt := time.Unix(1_700_000_000, 0)
+	frame := gjson.Parse(`{"credits":{"has_credits":true}}`)
+
+	headers := codexRateLimitsHeaders(frame, observedAt)
+	if got := headers.Get("x-codex-credits-has-credits"); got != "" {
+		t.Fatalf("single credits flag was adopted: %q", got)
+	}
+}
+
+func TestApplyCodexUsageEventFrameIgnoresOlderObservation(t *testing.T) {
+	acc := newUsageFrameTestAccount()
+	t2 := time.Unix(1_700_000_000, 0)
+	t1 := t2.Add(-time.Minute)
+	newer := gjson.Parse(`{"rate_limits":{"primary":{"used_percent":60,"window_minutes":300}}}`)
+	older := gjson.Parse(`{"rate_limits":{"primary":{"used_percent":30,"window_minutes":300}}}`)
+
+	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", newer, t2)
+	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", older, t1)
+
+	if pct, _ := acc.GetUsagePercent5h(); pct != 60 {
+		t.Fatalf("older observation rolled usage back to %v, want 60", pct)
+	}
+}
+
+func TestCodexUsageFramePersistenceRespectsThrottle(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "usage-frame.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	accountID, err := db.InsertAccountWithCredentials(ctx, "frame-test", map[string]any{
+		"access_token": "at-test",
+		"plan_type":    "plus",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 4})
+	t.Cleanup(store.Stop)
+	account := newUsageFrameTestAccount()
+	account.DBID = accountID
+	account.AccessToken = "at-test"
+	store.AddAccount(account)
+
+	previous := codexUsageFramePersistInterval()
+	SetCodexUsageFramePersistInterval(time.Hour)
+	t.Cleanup(func() { SetCodexUsageFramePersistInterval(previous) })
+
+	t0 := time.Now()
+	apply := func(pct float64, at time.Time) {
+		frame := gjson.Parse(fmt.Sprintf(
+			`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":%v,"window_minutes":300,"reset_at":%d}}}`,
+			pct, at.Add(3*time.Hour).Unix(),
+		))
+		ApplyCodexUsageEventFrame(store, account, "codex.rate_limits", frame, at)
+	}
+
+	apply(10, t0)
+	if got := readPersisted5h(t, dbPath, accountID); got != 10 {
+		t.Fatalf("first frame persisted %v, want 10", got)
+	}
+
+	apply(12, t0.Add(time.Second))
+	if pct, _ := account.GetUsagePercent5h(); pct != 12 {
+		t.Fatalf("throttled frame did not update memory: %v", pct)
+	}
+	if got := readPersisted5h(t, dbPath, accountID); got != 10 {
+		t.Fatalf("throttled frame wrote %v, want the previous 10", got)
+	}
+
+	apply(100, t0.Add(2*time.Second))
+	if got := readPersisted5h(t, dbPath, accountID); got != 100 {
+		t.Fatalf("100%% frame persisted %v, want 100", got)
+	}
+}
+
+func readPersisted5h(t *testing.T, dbPath string, accountID int64) float64 {
+	t.Helper()
+	conn, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	var raw string
+	if err := conn.QueryRow(`SELECT credentials FROM accounts WHERE id = $1`, accountID).Scan(&raw); err != nil {
+		t.Fatalf("read credentials: %v", err)
+	}
+	return gjson.Get(raw, "codex_5h_used_percent").Float()
 }

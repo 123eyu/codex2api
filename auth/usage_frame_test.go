@@ -79,3 +79,39 @@ func TestGetAccountLiveUsageSnapshotProjectsStatusAndUsage(t *testing.T) {
 		t.Fatalf("7d snapshot = %+v", snapshot)
 	}
 }
+
+func TestTryApplyUsageObservationSkipsWhileLocked(t *testing.T) {
+	acc := &Account{}
+	acc.usageSyncMu.Lock()
+	applied := false
+	start := time.Now()
+	if acc.TryApplyUsageObservation(time.Now(), func() { applied = true }) {
+		t.Fatal("TryApply succeeded while the observation lock was held")
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("TryApply blocked for %v, want a non-blocking skip", elapsed)
+	}
+	acc.usageSyncMu.Unlock()
+	if applied {
+		t.Fatal("skipped observation still ran its callback")
+	}
+
+	if !acc.TryApplyUsageObservation(time.Now(), func() { applied = true }) || !applied {
+		t.Fatal("TryApply did not run after the lock was released")
+	}
+}
+
+func TestTryApplyUsageObservationRejectsOlderTimestamp(t *testing.T) {
+	acc := &Account{}
+	now := time.Now()
+	applied := 0
+	if !acc.TryApplyUsageObservation(now, func() { applied++ }) {
+		t.Fatal("first observation was rejected")
+	}
+	if acc.TryApplyUsageObservation(now.Add(-time.Minute), func() { applied++ }) {
+		t.Fatal("older observation was accepted")
+	}
+	if applied != 1 {
+		t.Fatalf("callbacks = %d, want 1", applied)
+	}
+}
