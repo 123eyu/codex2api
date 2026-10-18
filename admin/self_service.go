@@ -262,11 +262,11 @@ func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL s
 	// 的成功语义，而账号永远缺少联系人/标签等待审核信息。
 	note := "自助提交联系人: " + contactEmail
 	if err := h.db.UpdateAccountNote(ctx, id, note); err != nil {
-		h.rollbackSelfServiceAccountInsert(ctx, id)
+		h.rollbackSelfServiceAccountInsert(id)
 		return 0, err
 	}
 	if err := h.db.SetAccountTags(ctx, id, []string{selfServiceTag}); err != nil {
-		h.rollbackSelfServiceAccountInsert(ctx, id)
+		h.rollbackSelfServiceAccountInsert(id)
 		return 0, err
 	}
 	h.db.InsertAccountEventAsync(id, "added", selfServiceSource)
@@ -279,7 +279,10 @@ func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL s
 
 // rollbackSelfServiceAccountInsert 软删本次插入但未完成待审核设置的账号，
 // 使同一身份可以重新提交。软删失败时账号保持 disabled，仍不会进调度池。
-func (h *Handler) rollbackSelfServiceAccountInsert(ctx context.Context, id int64) {
+// 使用独立的有界上下文，避免请求超时后回滚也失败。
+func (h *Handler) rollbackSelfServiceAccountInsert(id int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if err := h.db.SoftDeleteAccount(ctx, id); err != nil {
 		log.Printf("回滚未完成的自助账号 %d 失败: %v", id, err)
 		return

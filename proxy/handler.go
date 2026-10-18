@@ -67,6 +67,8 @@ type Handler struct {
 	apiKeyGateMu    sync.Mutex
 	promptRiskMu    sync.Mutex
 	apiKeyGate      *apiKeyConcurrencyLimiter
+	admissionOnce   sync.Once
+	admission       *apiKeyAdmissionLimiter
 	scopeUsageMu    sync.Mutex
 	scopeUsage      *apiKeyScopeUsageTracker
 	scopeDeltaInit  sync.Once
@@ -89,6 +91,9 @@ const (
 	apiKeyCountCacheNamespace = "api-key-count"
 	apiKeyCacheTTL            = 5 * time.Minute
 	apiKeyCountCacheTTL       = 30 * time.Second
+	// 上游错误体只用于识别错误类型和回传给客户端；限制上限，避免恶意或
+	// 失控上游用超大 body 把网关内存打满。
+	maxUpstreamErrorBodyBytes = 1 << 20
 )
 
 type apiKeyRuntimeRecord struct {

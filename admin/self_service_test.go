@@ -195,7 +195,7 @@ func TestSelfServiceRollbackAllowsRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertDisabledAccountWithCredentials: %v", err)
 	}
-	handler.rollbackSelfServiceAccountInsert(ctx, id)
+	handler.rollbackSelfServiceAccountInsert(id)
 
 	if _, err := handler.upsertSelfServiceAccount(ctx, "rollback@example.com", "", seed, "c@x.com"); err != nil {
 		t.Fatalf("回滚后同一身份应可重新提交, got %v", err)

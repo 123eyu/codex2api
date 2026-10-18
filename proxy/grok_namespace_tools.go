@@ -1069,7 +1069,7 @@ func newGrokNamespaceReverser(body io.ReadCloser, streaming bool, aliases map[st
 		reverser := newGrokStreamReverser(aliases)
 		reader := bufio.NewReader(body)
 		for {
-			line, err := reader.ReadBytes('\n')
+			line, err := readBoundedSSELine(reader, maxSSELineBytes)
 			if len(line) > 0 {
 				rewritten := reverser.rewriteLine(line)
 				if len(rewritten) > 0 {

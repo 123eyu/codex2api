@@ -71,11 +71,16 @@ var (
 		regexp.MustCompile(`(?i)(refresh[_-]?token["']?\s*[:=]\s*["']?)([^"'\s&]+)`),
 		regexp.MustCompile(`(?i)(access[_-]?token["']?\s*[:=]\s*["']?)([^"'\s&]+)`),
 		regexp.MustCompile(`(?i)(id[_-]?token["']?\s*[:=]\s*["']?)([^"'\s&]+)`),
+		regexp.MustCompile(`(?i)(session[_-]?token["']?\s*[:=]\s*["']?)([^"'\s&]+)`),
 		regexp.MustCompile(`(?i)(bearer\s+)([^\s&]+)`),
 		regexp.MustCompile(`(?i)(["']?api[_-]?key["']?\s*[:=]\s*["']?)([^"'\s&]+)`),
+		regexp.MustCompile(`(?i)(["']?client[_-]?secret["']?\s*[:=]\s*["']?)([^"'\s&]+)`),
 		regexp.MustCompile(`(?i)(["']?secret["']?\s*[:=]\s*["']?)([^"'\s&]+)`),
 		regexp.MustCompile(`(?i)(["']?password["']?\s*[:=]\s*["']?)([^"'\s&]+)`),
-		regexp.MustCompile(`(?i)(sk-)([a-zA-Z0-9]{20,})`), // sk- 前缀单独作为组1
+		regexp.MustCompile(`(?i)(["']?agent[_-]?private[_-]?key["']?\s*[:=]\s*["']?)([^"'\s&]+)`),
+		regexp.MustCompile(`(?i)(sk-)([a-zA-Z0-9]{20,})`),                                    // sk- 前缀单独作为组1
+		regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`), // 裸 JWT
+		regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`),
 	}
 
 	// UUID pattern for token masking

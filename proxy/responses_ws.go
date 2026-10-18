@@ -893,7 +893,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 			}
-			errBody, _ := io.ReadAll(resp.Body)
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamErrorBodyBytes))
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if c.Request.Context().Err() != nil {

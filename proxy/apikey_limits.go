@@ -77,42 +77,40 @@ func (h *Handler) payloadRuleIdentity(c *gin.Context) *PayloadRuleIdentity {
 
 // EnforceAPIKeyLimits checks API key scoped model and rate/cost limits.
 func (h *Handler) EnforceAPIKeyLimits(c *gin.Context, model string) (int, string) {
-	return h.enforceAPIKeyLimits(c, model)
+	return h.enforceAPIKeyLimitsN(c, model, 1)
 }
 
 // EnforceAPIKeyLimitsForRequests performs the normal API-key checks and also
 // verifies that a batched request cannot cross the RPM/RPD boundary by issuing
-// multiple upstream calls after a single admission check. Each upstream call
-// still runs the normal handler checks and records its own usage entry.
+// multiple upstream calls after a single admission check. The whole batch is
+// reserved atomically so concurrent batches cannot overshoot the window.
 func (h *Handler) EnforceAPIKeyLimitsForRequests(c *gin.Context, model string, requests int) (int, string) {
-	if status, msg := h.enforceAPIKeyLimits(c, model); status != 0 {
-		return status, msg
+	if requests < 1 {
+		requests = 1
 	}
-	if requests <= 1 {
-		return 0, ""
-	}
+	// 先做批量边界检查，避免整批被拒绝时仍消耗一个 RPM 配额。
+	// Each upstream call still runs the normal handler checks and records its own
+	// usage entry, so the single admission below only reserves the batch size.
 	row := apiKeyRowFromContext(c)
-	if row == nil || row.ID <= 0 {
-		return 0, ""
-	}
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-	defer cancel()
-	if row.Limits.RPM > 0 {
-		count, err := h.apiKeyWindowRequests(ctx, row.ID, "rpm", apiKeyRPMWindow)
-		if err == nil && apiKeyBatchWouldExceed(count, row.Limits.RPM, requests) {
-			return http.StatusTooManyRequests,
-				fmt.Sprintf("API key rate limit exceeded: batch of %d would exceed %d requests per minute", requests, row.Limits.RPM)
+	if row != nil && row.ID > 0 && requests > 1 {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+		if row.Limits.RPM > 0 {
+			count, err := h.apiKeyWindowRequests(ctx, row.ID, "rpm", apiKeyRPMWindow)
+			if err == nil && apiKeyBatchWouldExceed(count, row.Limits.RPM, requests) {
+				return http.StatusTooManyRequests,
+					fmt.Sprintf("API key rate limit exceeded: batch of %d would exceed %d requests per minute", requests, row.Limits.RPM)
+			}
+		}
+		if row.Limits.RPD > 0 {
+			count, err := h.apiKeyWindowRequests(ctx, row.ID, "rpd", apiKeyRPDWindow)
+			if err == nil && apiKeyBatchWouldExceed(count, row.Limits.RPD, requests) {
+				return http.StatusTooManyRequests,
+					fmt.Sprintf("API key rate limit exceeded: batch of %d would exceed %d requests per day", requests, row.Limits.RPD)
+			}
 		}
 	}
-	if row.Limits.RPD > 0 {
-		count, err := h.apiKeyWindowRequests(ctx, row.ID, "rpd", apiKeyRPDWindow)
-		if err == nil && apiKeyBatchWouldExceed(count, row.Limits.RPD, requests) {
-			return http.StatusTooManyRequests,
-				fmt.Sprintf("API key rate limit exceeded: batch of %d would exceed %d requests per day", requests, row.Limits.RPD)
-		}
-	}
-	return 0, ""
+	return h.enforceAPIKeyLimitsN(c, model, requests)
 }
 
 func apiKeyBatchWouldExceed(current int64, limit, requests int) bool {
@@ -129,6 +127,15 @@ func apiKeyBatchWouldExceed(current int64, limit, requests int) bool {
 //   - http.StatusForbidden (403): 模型不在白名单 / 在黑名单
 //   - http.StatusTooManyRequests (429): rpm/rpd/cost/token 任一窗口超额
 func (h *Handler) enforceAPIKeyLimits(c *gin.Context, model string) (int, string) {
+	return h.enforceAPIKeyLimitsN(c, model, 1)
+}
+
+// enforceAPIKeyLimitsN 是准入检查的实际实现。requests 表示本次准入会消耗的
+// 上游请求数（批量生图一次可产生多个请求），用于原子预留 RPM/RPD 计数。
+func (h *Handler) enforceAPIKeyLimitsN(c *gin.Context, model string, requests int) (int, string) {
+	if requests < 1 {
+		requests = 1
+	}
 	var daybreakStatus int
 	var daybreakMessage string
 	model, daybreakStatus, daybreakMessage = h.checkDaybreakRequest(c, model)
@@ -262,6 +269,17 @@ func (h *Handler) enforceAPIKeyLimits(c *gin.Context, model string) (int, string
 		if gate != nil {
 			c.Set(contextScopeBudgetGate, gate)
 		}
+	}
+
+	// 7. 进程内准入计数。数据库聚合 + 60s 缓存读到的是同一份旧值，无法约束
+	// 缓存窗口内的并发突发；这里按实际请求数原子递增后再放行。
+	if !h.admissionLimiter().allow(row.ID, limits.RPM, limits.RPD, requests, time.Now()) {
+		if limits.RPM > 0 {
+			return http.StatusTooManyRequests,
+				fmt.Sprintf("API key rate limit exceeded: %d requests per minute", limits.RPM)
+		}
+		return http.StatusTooManyRequests,
+			fmt.Sprintf("API key rate limit exceeded: %d requests per day", limits.RPD)
 	}
 
 	return 0, ""

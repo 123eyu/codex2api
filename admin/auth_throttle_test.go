@@ -1,0 +1,96 @@
+package admin
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+func TestAdminAuthThrottleBlocksAfterFailures(t *testing.T) {
+	throttle := newAdminAuthThrottle()
+	now := time.Unix(1_700_000_000, 0)
+
+	for i := 0; i < adminAuthMaxFailures-1; i++ {
+		if blocked := throttle.recordFailure("203.0.113.9", now); blocked != 0 {
+			t.Fatalf("failure %d blocked early: %v", i+1, blocked)
+		}
+	}
+	if retry := throttle.retryAfter("203.0.113.9", now); retry != 0 {
+		t.Fatalf("retryAfter before threshold = %v, want 0", retry)
+	}
+
+	if blocked := throttle.recordFailure("203.0.113.9", now); blocked != adminAuthBlockDuration {
+		t.Fatalf("threshold failure blocked for %v, want %v", blocked, adminAuthBlockDuration)
+	}
+	if retry := throttle.retryAfter("203.0.113.9", now.Add(time.Minute)); retry != adminAuthBlockDuration-time.Minute {
+		t.Fatalf("retryAfter = %v, want %v", retry, adminAuthBlockDuration-time.Minute)
+	}
+	if retry := throttle.retryAfter("203.0.113.10", now); retry != 0 {
+		t.Fatalf("other IP should not be blocked, got %v", retry)
+	}
+	if retry := throttle.retryAfter("203.0.113.9", now.Add(adminAuthBlockDuration)); retry != 0 {
+		t.Fatalf("block should expire, got %v", retry)
+	}
+}
+
+func TestAdminAuthThrottleResetsOnSuccess(t *testing.T) {
+	throttle := newAdminAuthThrottle()
+	now := time.Unix(1_700_000_000, 0)
+	for i := 0; i < adminAuthMaxFailures-1; i++ {
+		throttle.recordFailure("203.0.113.11", now)
+	}
+	throttle.reset("203.0.113.11")
+	if blocked := throttle.recordFailure("203.0.113.11", now); blocked != 0 {
+		t.Fatalf("reset should clear failure count, blocked for %v", blocked)
+	}
+}
+
+func TestAdminAuthThrottleExpiresOldFailures(t *testing.T) {
+	throttle := newAdminAuthThrottle()
+	now := time.Unix(1_700_000_000, 0)
+	for i := 0; i < adminAuthMaxFailures-1; i++ {
+		throttle.recordFailure("203.0.113.12", now)
+	}
+	later := now.Add(adminAuthFailureWindow + time.Second)
+	if blocked := throttle.recordFailure("203.0.113.12", later); blocked != 0 {
+		t.Fatalf("failures outside the window should not accumulate, blocked for %v", blocked)
+	}
+}
+
+func TestAdminAuthMiddlewareThrottlesFailedAttempts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, _ := newSelfServiceHandler(t, false)
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	request := func(key string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/admin/stats", nil)
+		req.Header.Set("X-Admin-Key", key)
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for i := 0; i < adminAuthMaxFailures-1; i++ {
+		if rec := request("wrong-key"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d returned %d, want 401", i+1, rec.Code)
+		}
+	}
+	if rec := request("wrong-key"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("threshold failure returned %d, want 429", rec.Code)
+	}
+	if rec := request("wrong-key"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("failure during block returned %d, want 429", rec.Code)
+	} else if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("429 response missing Retry-After")
+	}
+	if rec := request("admin-secret"); rec.Code != http.StatusOK {
+		t.Fatalf("correct key during block returned %d, want 200", rec.Code)
+	}
+	if rec := request("wrong-key"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("failure after successful login returned %d, want 401", rec.Code)
+	}
+}

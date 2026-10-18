@@ -3,6 +3,8 @@ package security
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -148,14 +150,11 @@ func GenerateSecureToken(length int) (string, error) {
 
 // SecureCompare compares two strings in constant time to prevent timing attacks
 func SecureCompare(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var result byte
-	for i := 0; i < len(a); i++ {
-		result |= a[i] ^ b[i]
-	}
-	return result == 0
+	// Hash both values first so the comparison takes the same path regardless
+	// of length; a direct byte loop leaks the expected secret's length.
+	aHash := sha256.Sum256([]byte(a))
+	bHash := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(aHash[:], bHash[:]) == 1
 }
 
 // SanitizeLog sanitizes data for logging
@@ -163,6 +162,9 @@ func SanitizeLog(data string) string {
 	if data == "" {
 		return data
 	}
+	// Keep one log event per line: URL paths and query values can contain
+	// escaped newlines that would otherwise forge additional audit lines.
+	data = strings.NewReplacer("\r", " ", "\n", " ").Replace(data)
 	// Mask sensitive patterns
 	data = MaskSensitiveData(data)
 	// Truncate very long strings

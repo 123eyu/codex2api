@@ -1030,23 +1030,27 @@ func isCodexAccessRestrictedResponse(resp *http.Response) bool {
 	if resp == nil || resp.StatusCode != http.StatusForbidden || resp.Body == nil {
 		return false
 	}
-	body, err := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	resp.ContentLength = int64(len(body))
+	// 只读取用于识别的前缀，再把前缀和剩余流拼回去，避免把巨大的错误体
+	// 整体读进内存（上游可能由第三方中转控制）。
+	const peekLimit = 64 << 10
+	peek, err := io.ReadAll(io.LimitReader(resp.Body, peekLimit))
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(peek), resp.Body), resp.Body}
 	if err != nil {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()), "codex_access_restricted") {
+	if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(peek, "error.code").String()), "codex_access_restricted") {
 		return true
 	}
 	// 部分中转（sub2api 的 codex_cli_only、zzzcoding 等第三方网关）用
 	// {"error":{"message":"This account only allows Codex official clients",
 	// "type":"forbidden_error"}} 表达同样的官方客户端限制。
-	if !strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()), "forbidden_error") {
+	if !strings.EqualFold(strings.TrimSpace(gjson.GetBytes(peek, "error.type").String()), "forbidden_error") {
 		return false
 	}
-	msg := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	msg := strings.ToLower(strings.TrimSpace(gjson.GetBytes(peek, "error.message").String()))
 	return strings.Contains(msg, "official clients") ||
 		strings.Contains(msg, "codex client") ||
 		strings.Contains(msg, "codex 客户端")

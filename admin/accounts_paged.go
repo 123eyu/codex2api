@@ -300,6 +300,9 @@ func parseAccountPageQuery(c *gin.Context) (accountPageQuery, error) {
 		if err != nil || value < 1 {
 			return query, fmt.Errorf("page must be a positive integer")
 		}
+		if value > maxAdminPage {
+			return query, fmt.Errorf("page is too large")
+		}
 		query.Page = value
 	}
 	if raw := strings.TrimSpace(c.Query("page_size")); raw != "" {

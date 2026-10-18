@@ -110,6 +110,7 @@ type Handler struct {
 	cacheDriver                string
 	cacheLabel                 string
 	adminSecretEnv             string
+	adminAuthThrottle          *adminAuthThrottle
 	imageProxy                 *proxy.Handler
 	antigravitySyncAccount     func(context.Context, int64) antigravityRefreshItem
 	antigravityCapabilityProbe antigravityCapabilityExecutor
@@ -427,6 +428,9 @@ const (
 	importTierRecoveryDelay   = 5 * time.Second
 	importDBWaitBackoff       = 10 * time.Second
 )
+
+// maxAdminPage 限制分页页码，避免 (page-1)*page_size 溢出为负 OFFSET。
+const maxAdminPage = 100000
 
 type importRuntimeLoadSnapshot struct {
 	RPM         int64
@@ -1042,6 +1046,7 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 		cacheDriver:          tc.Driver(),
 		cacheLabel:           tc.Label(),
 		adminSecretEnv:       adminSecretEnv,
+		adminAuthThrottle:    newAdminAuthThrottle(),
 		imageProxy:           proxy.NewHandler(store, db, nil, nil),
 		chartCacheData:       make(map[string]*chartCacheEntry),
 		accountListCache:     make(map[string]*accountListSnapshot),
@@ -1436,19 +1441,43 @@ func (h *Handler) adminAuthMiddleware() gin.HandlerFunc {
 			}
 		}
 
+		clientIP := c.ClientIP()
+
 		// 清理输入
 		adminKey = security.SanitizeInput(adminKey)
 
 		// 使用安全比较防止时序攻击
 		if !security.SecureCompare(adminKey, adminSecret) {
 			// 记录安全审计日志
-			security.SecurityAuditLog("ADMIN_AUTH_FAILED", fmt.Sprintf("path=%s ip=%s source=%s", c.Request.URL.Path, c.ClientIP(), source))
+			security.SecurityAuditLog("ADMIN_AUTH_FAILED", fmt.Sprintf("path=%s ip=%s source=%s", c.Request.URL.Path, security.SanitizeLog(clientIP), source))
+			// 阻断只针对失败尝试；正确密钥仍可通过，避免攻击者用共享出口 IP 锁死管理员。
+			if retry := h.adminAuthThrottle.retryAfter(clientIP, time.Now()); retry > 0 {
+				c.Header("Retry-After", strconv.Itoa(int((retry+time.Second-1)/time.Second)))
+				c.JSON(http.StatusTooManyRequests, gin.H{
+					"error": "认证失败次数过多，请稍后再试",
+				})
+				c.Abort()
+				return
+			}
+			if blocked := h.adminAuthThrottle.recordFailure(clientIP, time.Now()); blocked > 0 {
+				c.Header("Retry-After", strconv.Itoa(int((blocked+time.Second-1)/time.Second)))
+				c.JSON(http.StatusTooManyRequests, gin.H{
+					"error": "认证失败次数过多，请稍后再试",
+				})
+				c.Abort()
+				return
+			}
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error": "管理密钥无效或缺失",
 			})
 			c.Abort()
 			return
 		}
+		h.adminAuthThrottle.reset(clientIP)
+
+		// 管理端响应包含 raw_key、auth.json、settings 等秘密，禁止中间缓存保存。
+		c.Header("Cache-Control", "no-store")
+		c.Header("Pragma", "no-cache")
 
 		// 成功认证，记录审计日志
 		if security.IsSensitiveEndpoint(c.Request.URL.Path) {
@@ -8618,10 +8647,12 @@ type createKeyReq struct {
 }
 
 // generateKey 生成随机 API Key
-func generateKey() string {
+func generateKey() (string, error) {
 	b := make([]byte, 24)
-	rand.Read(b)
-	return "sk-" + hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate api key: %w", err)
+	}
+	return "sk-" + hex.EncodeToString(b), nil
 }
 
 // CreateAPIKey 创建新 API 密钥（增强版，带输入验证）
@@ -8678,7 +8709,12 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 
 	key := req.Key
 	if key == "" {
-		key = generateKey()
+		var err error
+		key, err = generateKey()
+		if err != nil {
+			writeInternalError(c, err)
+			return
+		}
 	} else {
 		// 验证用户提供的key格式
 		key = security.SanitizeInput(key)

@@ -1,0 +1,128 @@
+package proxy
+
+import (
+	"sync"
+	"time"
+)
+
+const (
+	apiKeyAdmissionRPMSlots = 60
+	apiKeyAdmissionMaxKeys  = 8192
+	apiKeyAdmissionIdleTTL  = 10 * time.Minute
+)
+
+// apiKeyAdmissionLimiter 在进程内按实际请求递增 RPM/RPD 计数。
+//
+// 数据库聚合 + 60s 缓存适合展示和跨进程兜底，但不能约束同一缓存窗口内的并发
+// 突发：所有请求都读到同一个旧值。这里在准入点用原子计数补上这一段，缓存只负责
+// 历史用量。多实例部署时每个副本各有一份计数，跨副本仍需共享计数（见 issue）。
+type apiKeyAdmissionLimiter struct {
+	mu      sync.Mutex
+	entries map[int64]*apiKeyAdmissionEntry
+}
+
+type apiKeyAdmissionEntry struct {
+	rpmBuckets [apiKeyAdmissionRPMSlots]int64
+	rpmSecond  int64
+	rpdStart   time.Time
+	rpdCount   int64
+	lastSeen   time.Time
+}
+
+func newAPIKeyAdmissionLimiter() *apiKeyAdmissionLimiter {
+	return &apiKeyAdmissionLimiter{entries: make(map[int64]*apiKeyAdmissionEntry)}
+}
+
+func (h *Handler) admissionLimiter() *apiKeyAdmissionLimiter {
+	if h == nil {
+		return nil
+	}
+	h.admissionOnce.Do(func() {
+		h.admission = newAPIKeyAdmissionLimiter()
+	})
+	return h.admission
+}
+
+// allow 在 RPM/RPD 限额内为 requests 个上游请求预留计数。
+// limit <= 0 表示该维度不限制。
+func (l *apiKeyAdmissionLimiter) allow(keyID int64, rpm, rpd, requests int, now time.Time) bool {
+	if l == nil || keyID <= 0 || requests <= 0 {
+		return true
+	}
+	if rpm <= 0 && rpd <= 0 {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	entry := l.entries[keyID]
+	if entry == nil {
+		entry = &apiKeyAdmissionEntry{}
+		l.entries[keyID] = entry
+		l.evictLocked(now)
+	}
+	entry.lastSeen = now
+
+	if rpm > 0 && entry.rpmUsed(now)+int64(requests) > int64(rpm) {
+		return false
+	}
+	if rpd > 0 {
+		if entry.rpdStart.IsZero() || now.Sub(entry.rpdStart) >= apiKeyRPDWindow {
+			entry.rpdStart = now
+			entry.rpdCount = 0
+		}
+		if entry.rpdCount+int64(requests) > int64(rpd) {
+			return false
+		}
+	}
+
+	// 两个维度都通过后再一起记账，避免 RPD 拒绝时仍消耗 RPM 配额。
+	if rpm > 0 {
+		entry.rpmBuckets[now.Unix()%apiKeyAdmissionRPMSlots] += int64(requests)
+	}
+	if rpd > 0 {
+		entry.rpdCount += int64(requests)
+	}
+	return true
+}
+
+// rpmUsed 推进秒级桶并返回最近 60 秒的计数，不写入本次请求。
+func (e *apiKeyAdmissionEntry) rpmUsed(now time.Time) int64 {
+	second := now.Unix()
+	switch {
+	case e.rpmSecond == 0 || second < e.rpmSecond || second-e.rpmSecond >= apiKeyAdmissionRPMSlots:
+		e.rpmBuckets = [apiKeyAdmissionRPMSlots]int64{}
+		e.rpmSecond = second
+	default:
+		for s := e.rpmSecond + 1; s <= second; s++ {
+			e.rpmBuckets[s%apiKeyAdmissionRPMSlots] = 0
+		}
+		e.rpmSecond = second
+	}
+	var used int64
+	for _, count := range e.rpmBuckets {
+		used += count
+	}
+	return used
+}
+
+func (l *apiKeyAdmissionLimiter) evictLocked(now time.Time) {
+	if len(l.entries) <= apiKeyAdmissionMaxKeys {
+		return
+	}
+	for key, entry := range l.entries {
+		if now.Sub(entry.lastSeen) > apiKeyAdmissionIdleTTL && now.Sub(entry.rpdStart) >= apiKeyRPDWindow {
+			delete(l.entries, key)
+		}
+	}
+	for len(l.entries) > apiKeyAdmissionMaxKeys {
+		var oldestKey int64
+		var oldest time.Time
+		for key, entry := range l.entries {
+			if oldestKey == 0 || entry.lastSeen.Before(oldest) {
+				oldestKey, oldest = key, entry.lastSeen
+			}
+		}
+		delete(l.entries, oldestKey)
+	}
+}
