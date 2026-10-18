@@ -148,3 +148,21 @@ func TestAdminAuthThrottleSaturationPreservesLiveEntries(t *testing.T) {
 		t.Fatalf("later block must survive cleanup: %v", retry)
 	}
 }
+
+func TestAdminAuthMiddlewareRejectsUntrackedSourceWhenFull(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, _ := newSelfServiceHandler(t, false)
+	now := time.Now()
+	for i := 0; i < adminAuthMaxEntries; i++ {
+		handler.adminAuthThrottle.entries[fmt.Sprintf("source-%d", i)] = &adminAuthThrottleEntry{windowStart: now}
+	}
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/stats", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("untracked valid candidate at capacity = %d %s, want 429 with Retry-After", rec.Code, rec.Body.String())
+	}
+}

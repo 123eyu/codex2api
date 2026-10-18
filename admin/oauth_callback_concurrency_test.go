@@ -41,6 +41,10 @@ func TestOAuthCallbackConcurrentClaimAndPoll(t *testing.T) {
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/oauth/token") {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
 		if calls.Add(1) == 1 {
 			close(started)
 		}
