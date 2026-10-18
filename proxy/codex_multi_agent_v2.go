@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -673,86 +672,4 @@ func diagnoseCodexMultiAgentV2ToolCall(name string, item gjson.Result, state *co
 	message := gjson.Get(arguments, "message").String()
 	log.Printf("[multi-agent-v2] 上游 %s 调用未返回 encrypted_function_args: []，Codex 仍会按加密消息处理 (account=%d model=%s ciphertext_like=%t)",
 		name, accountID, model, looksLikeCodexCiphertext(message))
-}
-
-// rewriteCodexAgentMessageInput 把 Codex 客户端的 agent_message 历史转成
-// 第三方 Responses 后端可接受的普通 message/user 项。只有全部内容都是
-// 明文 input_text 时才转换；任何 encrypted_content 都拒绝，绝不把密文
-// 当作可读任务。
-//
-// 当前默认不接线：子 Agent 请求通常由上游网关直接转发，且原生 OpenAI
-// Responses relay 能自行处理 agent_message。只有在 Codex2API 作为第三方
-// 子 Agent 入口、并已确认该上游不支持 agent_message 时才应调用。
-func rewriteCodexAgentMessageInput(body []byte) ([]byte, error) {
-	if !bytes.Contains(body, []byte(`"agent_message"`)) {
-		return body, nil
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	var root map[string]any
-	if err := decoder.Decode(&root); err != nil {
-		return body, fmt.Errorf("invalid JSON request body")
-	}
-	input, ok := root["input"].([]any)
-	if !ok {
-		return body, nil
-	}
-	converted := false
-	for _, rawItem := range input {
-		item, ok := rawItem.(map[string]any)
-		if !ok {
-			continue
-		}
-		itemType, _ := item["type"].(string)
-		if itemType != "agent_message" {
-			continue
-		}
-		parts, ok := item["content"].([]any)
-		if !ok || len(parts) == 0 {
-			return body, fmt.Errorf("agent_message has no content")
-		}
-		for _, rawPart := range parts {
-			part, ok := rawPart.(map[string]any)
-			if !ok {
-				return body, fmt.Errorf("agent_message has an invalid content part")
-			}
-			partType, _ := part["type"].(string)
-			if partType == "encrypted_content" {
-				return body, fmt.Errorf("agent_message contains opaque encrypted_content")
-			}
-			if partType != "input_text" {
-				return body, fmt.Errorf("agent_message contains unsupported content type %q", partType)
-			}
-			text, _ := part["text"].(string)
-			if strings.TrimSpace(text) == "" {
-				return body, fmt.Errorf("agent_message contains empty text")
-			}
-		}
-		item["type"] = "message"
-		item["role"] = "user"
-		converted = true
-	}
-	if !converted {
-		return body, nil
-	}
-	// 只有确实转换了 agent_message 才清理 Codex 专有元数据，避免普通请求被
-	// 意外改写。第三方 Responses 后端通常不认识 author/recipient。
-	for _, rawItem := range input {
-		item, ok := rawItem.(map[string]any)
-		if !ok {
-			continue
-		}
-		itemType, _ := item["type"].(string)
-		if itemType != "message" && itemType != "agent_message" {
-			continue
-		}
-		delete(item, "author")
-		delete(item, "recipient")
-		delete(item, "internal_chat_message_metadata_passthrough")
-	}
-	rewritten, err := json.Marshal(root)
-	if err != nil {
-		return body, err
-	}
-	return rewritten, nil
 }

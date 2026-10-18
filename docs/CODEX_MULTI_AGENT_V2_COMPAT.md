@@ -125,7 +125,6 @@ CODEX_MULTI_AGENT_V2_COMPAT=true
 
 - 不解析任务正文，不解密，也不把 `encrypted_content` 重标为 `input_text`。
 - 补全 `encrypted_function_args: []` 前检查 `arguments` 是否为字符串、`message` 是否非空；缺字段、非法 JSON、空文本、非字符串和已知密文形态都保持原样。密文识别是启发式（`gAAAA`、JWE `eyJ`、`enc_`、长 base64url token），不是完整保证。
-- 可选的 `agent_message` 适配器只接受全部为 `input_text` 的内容；出现 `encrypted_content`、混合内容、空文本或未知 part 时拒绝转换。该适配器当前默认不接线。
 - 请求已有 `collaboration-optimize` 冲突、JSON 无效、嵌套或数量超限时，保持原请求并记录跳过日志，不做半转换。
 - 响应还原只在本次请求真的执行过改名时生效；未改名的请求不触发任何响应改写。
 - 日志记录账号、模型、工具名、是否生效、是否疑似密文和跳过原因，不记录任务正文、认证信息或原始 SSE。
@@ -135,9 +134,9 @@ CODEX_MULTI_AGENT_V2_COMPAT=true
 
 默认路径只处理父请求的 schema 和响应 namespace 还原，不处理 `agent_message`。子请求通常由上游网关直接转发给第三方模型。
 
-子侧是否可用取决于该网关：本仓自带的 Responses→Chat 转换目前不识别 `agent_message`，会返回 `cannot be represented by Chat Completions`；只有子侧网关原生支持 `agent_message`，或显式接线 `rewriteCodexAgentMessageInput` 后才成立。早期验证中的 NewAPI 会忽略该项；后续子侧规范化修复已合入 [NewAPI fork PR #259](https://github.com/DeliciousBuding/new-api/pull/259)，配合本兼容层完成了端到端验收。其他子网关仍需检查自己的处理能力。
+子侧是否可用取决于该网关：本仓自带的 Responses→Chat 转换目前不识别 `agent_message`，会返回 `cannot be represented by Chat Completions`；子网关需要原生支持全明文 `agent_message`，或做等价转换。早期验证中的 NewAPI 会忽略该项；后续子侧规范化修复已合入 [NewAPI fork PR #259](https://github.com/DeliciousBuding/new-api/pull/259)，配合本兼容层完成了端到端验收。其他子网关仍需检查自己的处理能力。
 
-如果接线适配器，它只接受全明文 `input_text`；密文、混合内容和空文本都会拒绝。适配器不是解密层。
+子侧转换只能处理全明文 `input_text`，不能把 `encrypted_content` 当作任务文本。本 PR 只负责父侧，不包含未接线的子侧适配器。
 
 ## 验证
 
@@ -158,7 +157,6 @@ CODEX_MULTI_AGENT_V2_COMPAT=true
 - 扁平工具定义、双下划线、点号形式还原；
 - 上游省略或返回 `null` 的 `encrypted_function_args`：明文字符串补全为 `[]`，密文、非法参数和缺字段保持原样；
 - `arguments` 不被改写、数字精度保持、幂等；
-- `agent_message` 明文转换与密文/混合内容拒绝。
 
 真实 Codex CLI + mock 上游：
 
@@ -206,7 +204,7 @@ python scripts/repro-codex-multi-agent-v2.py --codex-exe /path/to/codex --child-
 - 上游错误体不还原；客户端可能看到临时命名空间。
 - 请求历史中的 `function_call` 记录保持原 namespace；真实账号已接受该历史，上游策略变化时需要复验。
 - User-Agent 判断不是安全边界。
-- 子侧网关需支持全明文 `agent_message` 或做等价转换；本仓的 `rewriteCodexAgentMessageInput` 提供该转换，但当前默认未接线。已修复的 NewAPI fork 组合验收通过，其他组合需自行验证。
+- 子侧网关需支持全明文 `agent_message` 或做等价转换。已修复的 NewAPI fork 组合验收通过，其他组合需自行验证。
 - 第三方父模型强制 v2 不在本兼容层覆盖范围；已验收的选择是第三方父模型使用 v1、GPT 父模型使用 v2。
 
 ## 回滚
