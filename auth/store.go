@@ -163,7 +163,9 @@ type Account struct {
 	UpstreamRequestIDHeader   string
 	mu                        sync.RWMutex
 	usageSyncMu               sync.Mutex
-	modelCatalogMu            sync.Mutex
+	// Snapshot writes serialize per account without blocking other accounts or frame ingestion.
+	usageSnapshotPersistMu sync.Mutex
+	modelCatalogMu         sync.Mutex
 	// grokRuntimeFactsMu serializes inference-response observations for this
 	// account. The sink performs generation-fenced database writes before it
 	// publishes any hard gate or routing invalidation back to memory.
@@ -3883,14 +3885,10 @@ type Store struct {
 	lazyRefreshInFlight sync.Map
 	stopCh              chan struct{}
 	usageFramePersist   *usageFramePersistQueue
-	// usageSnapshotPersistMu serializes 5h/7d credential writes between the
-	// synchronous observation paths and the async frame-persist worker, so a
-	// queued older frame cannot overwrite a newer WHAM observation.
-	usageSnapshotPersistMu sync.Mutex
-	stopOnce               sync.Once
-	backgroundCtx          context.Context
-	backgroundCancel       context.CancelFunc
-	wg                     sync.WaitGroup
+	stopOnce            sync.Once
+	backgroundCtx       context.Context
+	backgroundCancel    context.CancelFunc
+	wg                  sync.WaitGroup
 
 	// 代理池
 	proxyPoolReloadMu    sync.Mutex
@@ -11138,7 +11136,7 @@ func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt tim
 		reset7dAt := acc.GetReset7dAt()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		err := s.withUsageSnapshotWrite(func() error {
+		err := s.withUsageSnapshotWrite(acc, func() error {
 			return s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, observedAt, acc.GetUsageUpdatedAt5h())
 		})
 		if err != nil {
@@ -11150,7 +11148,7 @@ func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt tim
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := s.withUsageSnapshotWrite(func() error {
+	err := s.withUsageSnapshotWrite(acc, func() error {
 		return s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, observedAt)
 	})
 	if err != nil {
@@ -11162,9 +11160,9 @@ func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt tim
 
 // withUsageSnapshotWrite serializes credential snapshot writes with the async
 // frame-persist worker.
-func (s *Store) withUsageSnapshotWrite(fn func() error) error {
-	s.usageSnapshotPersistMu.Lock()
-	defer s.usageSnapshotPersistMu.Unlock()
+func (s *Store) withUsageSnapshotWrite(acc *Account, fn func() error) error {
+	acc.usageSnapshotPersistMu.Lock()
+	defer acc.usageSnapshotPersistMu.Unlock()
 	return fn()
 }
 
@@ -11307,7 +11305,7 @@ func (s *Store) updateAccountPlanType(acc *Account, planType string, persist boo
 		return changed
 	}
 
-	if err := s.withUsageSnapshotWrite(func() error { return s.persistUsageFramePlan(acc) }); err != nil {
+	if err := s.withUsageSnapshotWrite(acc, func() error { return s.persistUsageFramePlan(acc) }); err != nil {
 		log.Printf("[账号 %d] 持久化 plan_type 失败: %v", acc.DBID, err)
 	}
 	return changed

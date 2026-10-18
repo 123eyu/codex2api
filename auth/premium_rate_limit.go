@@ -163,7 +163,7 @@ func (s *Store) PublishUsageSnapshot5hOnly(acc *Account, observedAt time.Time, p
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := s.withUsageSnapshotWrite(func() error {
+	err := s.withUsageSnapshotWrite(acc, func() error {
 		return s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, pct5h, reset5hAt, observedAt)
 	})
 	if err != nil {
@@ -266,7 +266,7 @@ func (s *Store) ClearAbsentUsageSnapshot5hAt(acc *Account, observedAt time.Time)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.withUsageSnapshotWrite(func() error {
+	if err := s.withUsageSnapshotWrite(acc, func() error {
 		return s.db.ClearUsageSnapshot5h(ctx, acc.DBID)
 	}); err != nil {
 		log.Printf("[账号 %d] 清除 5h 用量快照失败: %v", acc.DBID, err)
@@ -353,7 +353,7 @@ func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.withUsageSnapshotWrite(func() error {
+	if err := s.withUsageSnapshotWrite(acc, func() error {
 		return s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, 100, resetAt, now)
 	}); err != nil {
 		log.Printf("[账号 %d] 持久化 premium 5h 限流快照失败: %v", acc.DBID, err)

@@ -15,7 +15,7 @@ func (s *Store) persistUsageCooldown(acc *Account) {
 // All native account cooldown writers/clearers publish through this critical
 // section. Read current state only after acquiring the publication lock: a
 // delayed frame, 401, or clear must never publish a captured older state.
-// Never hold this lock while acquiring usageSnapshotPersistMu.
+// Never hold this lock while acquiring acc.usageSnapshotPersistMu.
 func (s *Store) persistAccountCooldownState(acc *Account, force, clearError bool) {
 	if s == nil || acc == nil {
 		return

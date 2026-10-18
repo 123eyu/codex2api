@@ -113,10 +113,10 @@ func (q *usageFramePersistQueue) persist(s *Store, job usageFramePersistJob) {
 	// Serialize with the synchronous snapshot writers and re-check inside the
 	// lock: a WHAM probe or a newer frame may apply while this job waits, and
 	// its write must win. Holding usageSyncMu here would stall the upstream
-	// read path, so use the store's snapshot-write lock instead.
-	s.usageSnapshotPersistMu.Lock()
-	defer s.usageSnapshotPersistMu.Unlock()
+	// read path, so use this account's snapshot-write lock instead.
+	acc.usageSnapshotPersistMu.Lock()
 	if s.FindByID(job.dbID) != acc {
+		acc.usageSnapshotPersistMu.Unlock()
 		return
 	}
 	acc.mu.RLock()
@@ -155,6 +155,11 @@ func (q *usageFramePersistQueue) persist(s *Store, job usageFramePersistJob) {
 			acc.mu.Unlock()
 		}
 	}
+	if err := s.persistUsageFramePlan(acc); err != nil {
+		log.Printf("[账号 %d] 异步持久化套餐失败: %v", acc.DBID, err)
+	}
+	acc.usageSnapshotPersistMu.Unlock()
+	// Credit/cooldown publication and subscription hooks own their synchronization.
 	acc.mu.RLock()
 	creditsValid := acc.CreditsValid
 	cooldownPending := acc.usageCooldownPersistPending && acc.Status == StatusCooldown
@@ -164,9 +169,6 @@ func (q *usageFramePersistQueue) persist(s *Store, job usageFramePersistJob) {
 	}
 	if cooldownPending {
 		s.persistUsageCooldown(acc)
-	}
-	if err := s.persistUsageFramePlan(acc); err != nil {
-		log.Printf("[账号 %d] 异步持久化套餐失败: %v", acc.DBID, err)
 	}
 	if job.planObserved {
 		s.ClearStaleSubscriptionExpiresAt(acc)
@@ -217,7 +219,7 @@ func (s *Store) EnqueueUsageFrameEffects(acc *Account, observedAt time.Time, per
 	s.usageFramePersist.enqueue(job)
 }
 
-// Called with usageSnapshotPersistMu held, including synchronous plan writes.
+// Called with acc.usageSnapshotPersistMu held, including synchronous plan writes.
 func (s *Store) persistUsageFramePlan(acc *Account) error {
 	acc.mu.RLock()
 	pending, plan := acc.usageFramePlanPending, acc.PlanType

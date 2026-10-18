@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,68 @@ import (
 	"github.com/codex2api/database"
 	"github.com/tidwall/gjson"
 )
+
+func TestUsageSnapshotWritesAreAccountScoped(t *testing.T) {
+	store := &Store{}
+	first, second := &Account{}, &Account{}
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	go func() {
+		_ = store.withUsageSnapshotWrite(first, func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+		close(done)
+	}()
+	<-entered
+	otherDone := make(chan struct{})
+	go func() {
+		_ = store.withUsageSnapshotWrite(second, func() error { return nil })
+		close(otherDone)
+	}()
+	select {
+	case <-otherDone:
+	case <-time.After(time.Second):
+		t.Error("a blocked account stalled another account's snapshot writer")
+	}
+	unblock()
+	<-done
+	<-otherDone
+}
+
+func TestUsageFramePersistReleasesSnapshotLockBeforeCredits(t *testing.T) {
+	store, db, acc := newUsageFramePersistenceFixture(t)
+	store.ObserveUsageFramePlan(acc, "pro")
+	acc.ApplySparseCreditsHeaders(true, false, nil, nil, "")
+	acc.creditsPersistMu.Lock()
+	var once sync.Once
+	unblock := func() { once.Do(acc.creditsPersistMu.Unlock) }
+	t.Cleanup(unblock)
+	done := make(chan struct{})
+	go func() {
+		newUsageFramePersistQueue().persist(store, usageFramePersistJob{account: acc, dbID: acc.DBID, observedAt: time.Now()})
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	released := false
+	for time.Now().Before(deadline) {
+		row, err := db.GetAccountByID(context.Background(), acc.DBID)
+		if err == nil && row.GetCredential("plan_type") == "pro" && acc.usageSnapshotPersistMu.TryLock() {
+			acc.usageSnapshotPersistMu.Unlock()
+			released = true
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	unblock()
+	<-done
+	if !released {
+		t.Fatal("snapshot lock remained held while credit persistence was blocked")
+	}
+}
 
 // TestUsageFramePersistSkipsSupersededJob verifies the worker re-checks the
 // observation order under the snapshot-write lock: a queued older frame must
@@ -40,13 +103,13 @@ func TestUsageFramePersistSkipsSupersededJob(t *testing.T) {
 
 	// Block the worker inside the write lock so the newer observation is
 	// applied before its superseded check runs.
-	store.usageSnapshotPersistMu.Lock()
+	account.usageSnapshotPersistMu.Lock()
 	store.EnqueueUsageFramePersist(account, t0)
 	t1 := t0.Add(30 * time.Second)
 	if !account.ApplyUsageObservation(t1, func() { account.SetUsageSnapshot(80, t1) }) {
 		t.Fatal("newer observation was rejected")
 	}
-	store.usageSnapshotPersistMu.Unlock()
+	account.usageSnapshotPersistMu.Unlock()
 
 	time.Sleep(200 * time.Millisecond)
 	conn, err := sql.Open("sqlite", dbPath)
