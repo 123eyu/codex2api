@@ -198,7 +198,7 @@ func (h *Handler) SubmitAccountPortalCode(c *gin.Context) {
 
 	tokenResp, accountInfo, err := doOAuthCodeExchange(c.Request.Context(), req.Code, sess.CodeVerifier, sess.RedirectURI, proxyURL, "oauth-"+req.SessionID)
 	if err != nil {
-		writeError(c, http.StatusBadGateway, "授权码兑换失败，请确认复制的授权码完整无误")
+		writeError(c, http.StatusBadGateway, "授权码兑换失败，请重新发起授权并获取新的授权码")
 		return
 	}
 	globalOAuthStore.delete(req.SessionID)
