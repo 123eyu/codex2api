@@ -323,6 +323,10 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return writeResponsesWSErrorForContext(c, conn, apiKeyModelRequestError(err).apiErr)
 	}
 	defer func() { c.Request = quotaParentRequest }()
+	multiAgentV2State := &codexMultiAgentV2State{}
+	if codexMultiAgentV2CompatEnabled() {
+		c.Request = c.Request.WithContext(withCodexMultiAgentV2State(c.Request.Context(), multiAgentV2State))
+	}
 	c.Set(promptGuardPolicyEventIDContextKey, policyEventID)
 	rawBody, model, apiErr := normalizeResponsesWebSocketClientPayload(rawPayload)
 	if apiErr != nil {
@@ -1178,6 +1182,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	emptyIncomplete := &emptyIncompleteTracker{}
 	terminalFailureEventType := ""
 	wroteAnyBody := false
+	multiAgentV2State := codexMultiAgentV2StateFromContext(c.Request.Context())
 	var wsReplay *continuousRetryWSReplay
 	if continuousRetryBuffersAttempts(continuousRetryPolicy) {
 		wsReplay = h.newContinuousRetryWSReplay()
@@ -1228,6 +1233,9 @@ func (h *Handler) streamResponsesWSUpstream(
 	}
 
 	readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, func(sseEvent string, data []byte) bool {
+		if multiAgentV2State != nil && multiAgentV2State.isOptimizedFor(account.ID()) {
+			data = restoreCodexMultiAgentV2Response(data, multiAgentV2State)
+		}
 		if wsReplay == nil {
 			h.recordCompactionProvenanceFromPayload(context.Background(), account, data)
 		}

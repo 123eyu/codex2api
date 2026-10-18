@@ -335,6 +335,10 @@ REDIS_ADDR=rediss://default:your-redis-password@your-redis-host:6379/0
 ```bash
 # 快速调度器
 FAST_SCHEDULER_ENABLED=true
+
+# 实验性：Codex Multi-Agent v2 第三方子 Agent 明文兼容（默认关闭）
+# CODEX_MULTI_AGENT_V2_COMPAT=false
+# 说明与灰度步骤见 docs/CODEX_MULTI_AGENT_V2_COMPAT.md
 ```
 
 ### 2. 系统设置（通过管理后台）
