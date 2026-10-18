@@ -15,6 +15,8 @@ const (
 	codexRateLimitsFrameType       = "codex.rate_limits"
 	codexResponseMetadataFrameType = "codex.response.metadata"
 	responseMetadataFrameType      = "response.metadata"
+	// Reset offsets are later converted to time.Duration in the shared parser.
+	maxCodexFrameResetSeconds = int64((1<<63 - 1) / time.Second)
 )
 
 // codexUsageFramePersistIntervalNanos bounds how often a WS frame observation
@@ -61,8 +63,9 @@ func codexUsageFramePersistInterval() time.Duration {
 // upstream Codex WebSocket sends in place of response headers. On the WS
 // transport there are no x-codex-* response headers per turn, so without this
 // path the account usage snapshot only advances on WHAM probes. Frames are
-// already on the wire (the gateway forwards them downstream), so this adds no
-// upstream requests and no new request headers.
+// already on the wire (the gateway forwards them downstream), so normal ingest
+// adds no upstream requests or request headers. Observation queue overflow can
+// request the existing authoritative probe to recover dropped partial frames.
 func ApplyCodexUsageEventFrame(store *auth.Store, account *auth.Account, eventType string, frame gjson.Result, observedAt time.Time) {
 	// Relay accounts can pass through their backend's quota frames. Those
 	// describe the relay's own upstream account, not this account's Codex
@@ -179,12 +182,23 @@ func codexResponseMetadataHeaders(frame gjson.Result, observedAt time.Time) http
 			epoch := codexFrameInt64(value)
 			if epoch > 0 {
 				seconds := epoch - observedAt.Unix()
+				if seconds > maxCodexFrameResetSeconds {
+					return true
+				}
 				if seconds < 0 {
 					seconds = 0
 				}
 				prefix := strings.TrimSuffix(name, "reset-at")
 				absoluteResets[prefix+"reset-after-seconds"] = strconv.FormatInt(seconds, 10)
 			}
+			return true
+		}
+		if strings.HasSuffix(name, "-reset-after-seconds") {
+			seconds, ok := codexFrameInt64Value(value)
+			if !ok || seconds > maxCodexFrameResetSeconds {
+				return true
+			}
+			headers.Set(name, strconv.FormatInt(max(seconds, 0), 10))
 			return true
 		}
 		raw, ok := codexFrameText(value.String(), 256)
@@ -279,7 +293,7 @@ func codexFrameResetSeconds(window gjson.Result, observedAt time.Time) string {
 	relativeSeen := false
 	for _, key := range []string{"resets_in_seconds", "reset_after_seconds"} {
 		if value := window.Get(key); value.Exists() {
-			if n, ok := codexFrameInt64Value(value); ok {
+			if n, ok := codexFrameInt64Value(value); ok && n <= maxCodexFrameResetSeconds {
 				relativeSeen = true
 				// Zero/negative means "resets now", matching the absolute form
 				// where a past epoch is clamped to zero. A positive relative
@@ -298,6 +312,9 @@ func codexFrameResetSeconds(window gjson.Result, observedAt time.Time) string {
 				continue
 			}
 			seconds := epoch - observedAt.Unix()
+			if seconds > maxCodexFrameResetSeconds {
+				continue
+			}
 			if seconds < 0 {
 				seconds = 0
 			}
@@ -311,10 +328,13 @@ func codexFrameResetSeconds(window gjson.Result, observedAt time.Time) string {
 }
 
 func codexFrameInt64Value(value gjson.Result) (int64, bool) {
+	// Parse the original textual integer, not gjson's permissive Int conversion:
+	// fractional/exponent numbers and overflow must not become reset deadlines.
+	raw := value.String()
 	if value.Type == gjson.Number {
-		return value.Int(), true
+		raw = value.Raw
 	}
-	n, err := strconv.ParseInt(strings.TrimSpace(value.String()), 10, 64)
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	if err != nil {
 		return 0, false
 	}

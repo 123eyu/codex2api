@@ -399,7 +399,7 @@ func TestApplyCodexRateLimitsFramePreservesKnownReset(t *testing.T) {
 	}
 }
 
-func TestApplyCodexIdleUsageFrameUpdatesMemoryOnly(t *testing.T) {
+func TestApplyCodexIdleUsageFrameWithoutStoreUpdatesRuntime(t *testing.T) {
 	acc := newUsageFrameTestAccount()
 	now := time.Now()
 	acc.SetUsageSnapshot5hAt(20, now.Add(time.Hour), now)
@@ -535,6 +535,44 @@ func TestCodexRateLimitsFrameTreatsZeroRelativeResetAsNow(t *testing.T) {
 	headers := codexRateLimitsHeaders(frame, observedAt)
 	if got := headers.Get("x-codex-primary-reset-after-seconds"); got != "0" {
 		t.Fatalf("relative zero reset = %q, want 0", got)
+	}
+}
+
+func TestCodexFrameResetRejectsNonIntegerNumbers(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0)
+	for _, raw := range []string{"1.5", "1e3", "9223372036854775808", "-9223372036854775809"} {
+		t.Run(raw, func(t *testing.T) {
+			for _, field := range []string{"reset_after_seconds", "reset_at"} {
+				window := gjson.Parse(`{"` + field + `":` + raw + `}`)
+				if got := codexFrameResetSeconds(window, at); got != "" {
+					t.Errorf("%s=%s accepted as reset %q", field, raw, got)
+				}
+			}
+			for _, field := range []string{"reset-at", "reset-after-seconds"} {
+				metadata := codexResponseMetadataHeaders(gjson.Parse(`{"headers":{"x-codex-primary-`+field+`":`+raw+`}}`), at)
+				if got := metadata.Get("x-codex-primary-reset-after-seconds"); got != "" {
+					t.Errorf("metadata %s=%s accepted as reset %q", field, raw, got)
+				}
+			}
+		})
+	}
+}
+
+func TestCodexFrameResetRejectsDurationOverflow(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0)
+	for _, test := range []struct {
+		field, header, raw string
+	}{
+		{"reset_after_seconds", "reset-after-seconds", "9223372037"},
+		{"reset_at", "reset-at", "10923372037"},
+	} {
+		if got := codexFrameResetSeconds(gjson.Parse(`{"`+test.field+`":`+test.raw+`}`), at); got != "" {
+			t.Errorf("duration-overflow %s accepted: %q", test.field, got)
+		}
+		headers := codexResponseMetadataHeaders(gjson.Parse(`{"headers":{"x-codex-primary-`+test.header+`":`+test.raw+`}}`), at)
+		if got := headers.Get("x-codex-primary-reset-after-seconds"); got != "" {
+			t.Errorf("metadata duration-overflow %s accepted: %q", test.header, got)
+		}
 	}
 }
 
