@@ -5977,6 +5977,12 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
 		return
 	}
+	if rejectDuplicateJSONField(c, rawBody, "input") {
+		return
+	}
+	if rejectExcessiveJSONArray(c, rawBody, "input", maxResponsesInputItems) {
+		return
+	}
 	if contextErr := responsesHTTPContextEnvelopeError(rawBody); contextErr != nil {
 		api.SendError(c, contextErr)
 		return

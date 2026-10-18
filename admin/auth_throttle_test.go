@@ -117,3 +117,34 @@ func TestAdminAuthThrottleBoundsTrackedIPs(t *testing.T) {
 		t.Fatalf("tracked IPs = %d, want <= %d", got, adminAuthMaxEntries)
 	}
 }
+
+func TestAdminAuthThrottleSaturationPreservesLiveEntries(t *testing.T) {
+	throttle := newAdminAuthThrottle()
+	now := time.Unix(1_700_000_000, 0)
+	for i := 0; i < adminAuthMaxEntries; i++ {
+		ip := fmt.Sprintf("source-%d", i)
+		throttle.entries[ip] = &adminAuthThrottleEntry{windowStart: now, failures: adminAuthMaxFailures - 1}
+	}
+	throttle.recordFailure("source-0", now)
+	if retry := throttle.retryAfter("untracked", now.Add(time.Minute)); retry != 9*time.Minute {
+		t.Fatalf("saturated admission retry = %v, want 9m", retry)
+	}
+	if retry := throttle.recordFailure("untracked", now.Add(time.Minute)); retry == 0 {
+		t.Fatal("saturated failure tracking accepted a new source")
+	}
+	if retry := throttle.retryAfter("source-0", now.Add(time.Minute)); retry != 9*time.Minute {
+		t.Fatalf("live block was evicted: %v", retry)
+	}
+	if got := throttle.recordFailure("source-1", now.Add(time.Minute)); got != adminAuthBlockDuration {
+		t.Fatalf("live failure count was lost: %v", got)
+	}
+	if len(throttle.entries) != adminAuthMaxEntries {
+		t.Fatalf("table size = %d", len(throttle.entries))
+	}
+	if retry := throttle.retryAfter("untracked", now.Add(adminAuthFailureWindow)); retry != 0 {
+		t.Fatalf("expired slots did not recover: %v", retry)
+	}
+	if retry := throttle.retryAfter("source-1", now.Add(adminAuthFailureWindow)); retry != time.Minute {
+		t.Fatalf("later block must survive cleanup: %v", retry)
+	}
+}

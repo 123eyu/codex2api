@@ -23,7 +23,6 @@ type adminAuthThrottleEntry struct {
 	failures     int
 	windowStart  time.Time
 	blockedUntil time.Time
-	lastSeen     time.Time
 }
 
 func newAdminAuthThrottle() *adminAuthThrottle {
@@ -38,7 +37,11 @@ func (t *adminAuthThrottle) retryAfter(ip string, now time.Time) time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	entry := t.entries[ip]
-	if entry == nil || !now.Before(entry.blockedUntil) {
+	if entry == nil {
+		t.evictLocked(now)
+		return t.capacityRetryAfterLocked(now)
+	}
+	if !now.Before(entry.blockedUntil) {
 		return 0
 	}
 	return entry.blockedUntil.Sub(now)
@@ -52,16 +55,20 @@ func (t *adminAuthThrottle) recordFailure(ip string, now time.Time) time.Duratio
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	entry := t.entries[ip]
-	if entry == nil || now.Sub(entry.windowStart) > adminAuthFailureWindow {
-		// 新来源也要触发清理：攻击者可以给大量 IP 各留 1–4 次失败，
-		// 只在达到阻断阈值时清理会让表无限增长。
+	if entry == nil {
 		t.evictLocked(now)
+		if retry := t.capacityRetryAfterLocked(now); retry > 0 {
+			return retry
+		}
 		entry = &adminAuthThrottleEntry{windowStart: now}
 		t.entries[ip] = entry
 	}
-	entry.lastSeen = now
 	if now.Before(entry.blockedUntil) {
 		return entry.blockedUntil.Sub(now)
+	}
+	if !now.Before(entry.windowStart.Add(adminAuthFailureWindow)) {
+		entry.failures = 0
+		entry.windowStart = now
 	}
 	entry.failures++
 	if entry.failures < adminAuthMaxFailures {
@@ -82,24 +89,32 @@ func (t *adminAuthThrottle) reset(ip string) {
 	t.mu.Unlock()
 }
 
-// evictLocked 在写入新条目之前清理，保证插入后不超过上限。
+// evictLocked only removes expired entries; live failures and blocks survive saturation.
 func (t *adminAuthThrottle) evictLocked(now time.Time) {
 	if len(t.entries) < adminAuthMaxEntries {
 		return
 	}
 	for ip, entry := range t.entries {
-		if !now.Before(entry.blockedUntil) && now.Sub(entry.lastSeen) > adminAuthFailureWindow {
+		if !now.Before(entry.blockedUntil) && !now.Before(entry.windowStart.Add(adminAuthFailureWindow)) {
 			delete(t.entries, ip)
 		}
 	}
-	for len(t.entries) >= adminAuthMaxEntries {
-		var oldestIP string
-		var oldest time.Time
-		for ip, entry := range t.entries {
-			if oldestIP == "" || entry.lastSeen.Before(oldest) {
-				oldestIP, oldest = ip, entry.lastSeen
-			}
-		}
-		delete(t.entries, oldestIP)
+}
+
+// Untracked sources wait for the first slot to expire before key comparison.
+func (t *adminAuthThrottle) capacityRetryAfterLocked(now time.Time) time.Duration {
+	if len(t.entries) < adminAuthMaxEntries {
+		return 0
 	}
+	var earliest time.Time
+	for _, entry := range t.entries {
+		expires := entry.windowStart.Add(adminAuthFailureWindow)
+		if entry.blockedUntil.After(expires) {
+			expires = entry.blockedUntil
+		}
+		if earliest.IsZero() || expires.Before(earliest) {
+			earliest = expires
+		}
+	}
+	return earliest.Sub(now)
 }

@@ -41,6 +41,8 @@ const (
 // ==================== 内存 Session 存储 ====================
 
 type oauthSession struct {
+	mu sync.Mutex // protects callback progress; authorization fields are immutable
+
 	State        string
 	CodeVerifier string
 	RedirectURI  string
@@ -54,6 +56,34 @@ type oauthSession struct {
 	CallbackState  string    // 回调收到的 state
 	CallbackAt     time.Time // 回调时间
 	ExchangeResult *oauthExchangeResult
+}
+
+// claimExchange consumes a session before network I/O. Failed exchanges require
+// a new authorization session because the upstream may already have used the code.
+func (s *oauthSession) claimExchange(code, state string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.CallbackAt.IsZero() || s.ExchangeResult != nil {
+		return false
+	}
+	s.CallbackCode, s.CallbackState, s.CallbackAt = code, state, time.Now()
+	return true
+}
+
+func (s *oauthSession) completeExchange(result *oauthExchangeResult) {
+	s.mu.Lock()
+	s.ExchangeResult = result
+	s.mu.Unlock()
+}
+
+func (s *oauthSession) callbackSnapshot() (*oauthExchangeResult, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ExchangeResult != nil {
+		result := *s.ExchangeResult
+		return &result, true
+	}
+	return nil, !s.CallbackAt.IsZero()
 }
 
 // oauthExchangeResult 自动回调完成后的兑换结果
@@ -241,6 +271,11 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "state 不匹配，请重新发起授权")
 		return
 	}
+	if !sess.claimExchange(req.Code, req.State) {
+		writeError(c, http.StatusBadRequest, "该授权会话已处理或正在处理，请重新发起授权")
+		return
+	}
+	defer sess.completeExchange(&oauthExchangeResult{Error: "请重新发起授权"})
 
 	proxyURL := sess.ProxyURL
 	if trimmed := strings.TrimSpace(req.ProxyURL); trimmed != "" {
@@ -581,6 +616,11 @@ func (h *Handler) UpdateOAuthAccountCode(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "state 不匹配，请重新发起授权")
 		return
 	}
+	if !sess.claimExchange(req.Code, req.State) {
+		writeError(c, http.StatusBadRequest, "该授权会话已处理或正在处理，请重新发起授权")
+		return
+	}
+	defer sess.completeExchange(&oauthExchangeResult{Error: "请重新发起授权"})
 
 	proxyURL := sess.ProxyURL
 	if req.ProxyURL != "" {
@@ -752,15 +792,12 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		c.String(http.StatusBadRequest, oauthCallbackPage("授权失败", "OAuth 会话不存在或已过期，请重新发起授权", false))
 		return
 	}
-	if sess.ExchangeResult != nil && sess.ExchangeResult.Success {
+	if !sess.claimExchange(code, state) {
 		c.String(http.StatusBadRequest, oauthCallbackPage("授权失败", "该授权回调已处理，请重新发起授权", false))
 		return
 	}
-
-	// 记录回调信息
-	sess.CallbackCode = code
-	sess.CallbackState = state
-	sess.CallbackAt = time.Now()
+	result := &oauthExchangeResult{Error: "授权失败，请重新发起授权"}
+	defer func() { sess.completeExchange(result) }()
 
 	// 执行 code exchange（Resin 临时身份）
 	proxyURL := sess.ProxyURL
@@ -770,16 +807,17 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 	resinTempID := "oauth-" + sessionID
 	tokenResp, accountInfo, err := doOAuthCodeExchange(c.Request.Context(), code, sess.CodeVerifier, sess.RedirectURI, proxyURL, resinTempID)
 	if err != nil {
-		sess.ExchangeResult = &oauthExchangeResult{
+		log.Printf("OAuth callback token exchange failed: %s", security.SanitizeLog(err.Error()))
+		result = &oauthExchangeResult{
 			Success: false,
-			Error:   err.Error(),
+			Error:   "兑换 token 失败，请重新发起授权",
 		}
-		c.String(http.StatusOK, oauthCallbackPage("授权失败", "兑换 token 失败: "+err.Error(), false))
+		c.String(http.StatusOK, oauthCallbackPage("授权失败", result.Error, false))
 		return
 	}
 
 	if tokenResp.RefreshToken == "" {
-		sess.ExchangeResult = &oauthExchangeResult{
+		result = &oauthExchangeResult{
 			Success: false,
 			Error:   "授权服务器未返回 refresh_token",
 		}
@@ -804,8 +842,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		}
 		id, err := h.upsertSelfServiceAccount(ctx, name, proxyURL, seed, sess.ContactEmail)
 		if err == errDuplicateOAuthIdentity {
-			globalOAuthStore.delete(sessionID)
-			sess.ExchangeResult = &oauthExchangeResult{
+			result = &oauthExchangeResult{
 				Success: true,
 				Message: "该账号已在系统中，无需重复提交",
 			}
@@ -813,20 +850,20 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 			return
 		}
 		if err != nil {
-			sess.ExchangeResult = &oauthExchangeResult{
+			log.Printf("OAuth callback account write failed: %s", security.SanitizeLog(err.Error()))
+			result = &oauthExchangeResult{
 				Success: false,
-				Error:   "账号写入数据库失败: " + err.Error(),
+				Error:   "账号保存失败，请联系管理员并重新发起授权",
 			}
-			c.String(http.StatusOK, oauthCallbackPage("授权失败", "写入数据库失败: "+err.Error(), false))
+			c.String(http.StatusOK, oauthCallbackPage("授权失败", result.Error, false))
 			return
 		}
-		globalOAuthStore.delete(sessionID)
 		email := seed.email
 		if accountInfo != nil && accountInfo.Email != "" {
 			email = accountInfo.Email
 		}
 		security.SecurityAuditLog("ACCOUNT_PORTAL_SUBMITTED", "ip="+security.SanitizeLog(c.ClientIP())+" contact="+security.SanitizeLog(sess.ContactEmail)+" account="+security.SanitizeLog(email))
-		sess.ExchangeResult = &oauthExchangeResult{
+		result = &oauthExchangeResult{
 			Success: true,
 			Message: "账号已提交，等待管理员审核",
 			ID:      id,
@@ -851,11 +888,12 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 
 	id, updated, err := h.upsertOAuthIdentityAccount(ctx, name, proxyURL, seed, "oauth_callback")
 	if err != nil {
-		sess.ExchangeResult = &oauthExchangeResult{
+		log.Printf("OAuth callback account write failed: %s", security.SanitizeLog(err.Error()))
+		result = &oauthExchangeResult{
 			Success: false,
-			Error:   "账号写入数据库失败: " + err.Error(),
+			Error:   "账号保存失败，请联系管理员并重新发起授权",
 		}
-		c.String(http.StatusOK, oauthCallbackPage("授权失败", "写入数据库失败: "+err.Error(), false))
+		c.String(http.StatusOK, oauthCallbackPage("授权失败", result.Error, false))
 		return
 	}
 
@@ -882,7 +920,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		message = fmt.Sprintf("账号已存在，已更新账号 %d", id)
 		pageMessage = fmt.Sprintf("账号已存在，已更新账号 %d，可以关闭此页面。", id)
 	}
-	sess.ExchangeResult = &oauthExchangeResult{
+	result = &oauthExchangeResult{
 		Success:  true,
 		Message:  message,
 		ID:       id,
@@ -909,17 +947,18 @@ func (h *Handler) PollOAuthCallback(c *gin.Context) {
 		return
 	}
 
-	if sess.ExchangeResult != nil {
+	result, processing := sess.callbackSnapshot()
+	if result != nil {
 		// 回调已完成，返回结果并清理 session
 		c.JSON(http.StatusOK, gin.H{
 			"status": "completed",
-			"result": sess.ExchangeResult,
+			"result": result,
 		})
 		globalOAuthStore.delete(sessionID)
 		return
 	}
 
-	if sess.CallbackCode != "" {
+	if processing {
 		// 收到回调但尚未完成兑换（罕见竞态）
 		c.JSON(http.StatusOK, gin.H{
 			"status": "processing",
