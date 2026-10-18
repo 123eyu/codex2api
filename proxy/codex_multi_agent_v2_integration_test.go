@@ -123,6 +123,57 @@ func TestResponsesCodexMultiAgentV2CompatRewritesParentAndRestoresResponse(t *te
 	}
 }
 
+func codexMultiAgentV2UpstreamSSEWithoutMarker(namespace string) string {
+	return `data: {"type":"response.created","response":{"id":"resp_ma"}}` + "\n\n" +
+		`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_ma","namespace":"` + namespace + `","name":"spawn_agent","arguments":"{\"task_name\":\"probe\",\"message\":\"PLAINTEXT_TASK\"}"}}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_ma","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"
+}
+
+func TestResponsesCodexMultiAgentV2CompatInjectsMissingMarker(t *testing.T) {
+	t.Setenv(codexMultiAgentV2CompatEnv, "1")
+	handler := newCodexMultiAgentV2TestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexMultiAgentV2UpstreamSSEWithoutMarker(codexOptimizedCollaborationNamespace)))
+	}))
+
+	recorder := runCodexMultiAgentV2Responses(t, handler, []byte(codexMultiAgentV2TestBody), "codex_exec/0.162.0-alpha.17.2")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	downstream := recorder.Body.String()
+	if strings.Contains(downstream, codexOptimizedCollaborationNamespace) {
+		t.Fatalf("downstream leaked optimized namespace: %s", downstream)
+	}
+	if !strings.Contains(downstream, `"namespace":"collaboration"`) {
+		t.Fatalf("downstream namespace was not restored: %s", downstream)
+	}
+	if !strings.Contains(downstream, `"encrypted_function_args":[]`) {
+		t.Fatalf("downstream plaintext marker was not injected: %s", downstream)
+	}
+}
+
+func TestResponsesCodexMultiAgentV2CompatInjectsMarkerWithCollaborationNamespace(t *testing.T) {
+	t.Setenv(codexMultiAgentV2CompatEnv, "1")
+	handler := newCodexMultiAgentV2TestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexMultiAgentV2UpstreamSSEWithoutMarker(codexCollaborationNamespace)))
+	}))
+
+	recorder := runCodexMultiAgentV2Responses(t, handler, []byte(codexMultiAgentV2TestBody), "codex_exec/0.162.0-alpha.17.2")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	downstream := recorder.Body.String()
+	if !strings.Contains(downstream, `"namespace":"collaboration"`) {
+		t.Fatalf("downstream namespace = %s", downstream)
+	}
+	if !strings.Contains(downstream, `"encrypted_function_args":[]`) {
+		t.Fatalf("downstream plaintext marker was not injected: %s", downstream)
+	}
+}
+
 func TestResponsesCodexMultiAgentV2CompatDisabledLeavesRequestAndResponseUntouched(t *testing.T) {
 	t.Setenv(codexMultiAgentV2CompatEnv, "0")
 	upstreamBodies := make(chan []byte, 1)

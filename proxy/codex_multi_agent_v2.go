@@ -58,6 +58,7 @@ var codexCollaborationMessageTools = map[string]struct{}{
 var (
 	codexCollaborationNamespaceBytes = []byte(codexCollaborationNamespace)
 	codexOptimizedNamespaceBytes     = []byte(codexOptimizedCollaborationNamespace)
+	codexFunctionCallBytes           = []byte("function_call")
 )
 
 // codexMultiAgentV2State 记录本次请求是否真的执行了命名空间改写。
@@ -90,6 +91,17 @@ func (s *codexMultiAgentV2State) isOptimizedFor(accountID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.optimized && s.accountID == accountID
+}
+
+// isOptimized 表示本次请求确实执行过命名空间改写。响应补全在函数内部再检查
+// 一次，避免未来新增响应路径忘记外层账号门槛时误补 marker。
+func (s *codexMultiAgentV2State) isOptimized() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.optimized
 }
 
 func (s *codexMultiAgentV2State) diagnosticContext() (int64, string) {
@@ -417,8 +429,15 @@ func isCodexOptimizedNamespaceName(name string) bool {
 // 这里按已知响应容器定向改写，而不是整包 decode 成 any 再 marshal：
 // response.completed 会回显完整工具数组，整包重编码会放大延迟和垃圾。
 func restoreCodexMultiAgentV2Response(payload []byte, state *codexMultiAgentV2State) []byte {
-	if len(payload) == 0 || !bytes.Contains(payload, codexOptimizedNamespaceBytes) {
+	if len(payload) == 0 {
 		return payload
+	}
+	if !bytes.Contains(payload, codexOptimizedNamespaceBytes) {
+		// 上游可能把 namespace 归一化回 collaboration；本次请求确实改写过时，
+		// 仍要检查 function_call 是否缺 encrypted_function_args。
+		if state == nil || !state.isOptimized() || !bytes.Contains(payload, codexFunctionCallBytes) {
+			return payload
+		}
 	}
 	if !gjson.ValidBytes(payload) {
 		return payload
@@ -478,12 +497,15 @@ func restoreCodexMultiAgentV2Item(updated []byte, path string, item gjson.Result
 			if err != nil {
 				return updated, err
 			}
-			injected := false
-			if itemType == "function_call" {
-				updated, injected, err = ensureCodexPlaintextFunctionArgs(updated, path, restoredName, item, state)
-				if err != nil {
-					return updated, err
-				}
+		}
+		// 上游可能直接返回 collaboration，而不是临时命名空间；只要本次请求
+		// 确实改写过，且是三个协作工具之一，就检查并按需补全明文标记。
+		if itemType == "function_call" && (restoreNamespace || namespace == codexCollaborationNamespace) {
+			var err error
+			var injected bool
+			updated, injected, err = ensureCodexPlaintextFunctionArgs(updated, path, restoredName, item, state)
+			if err != nil {
+				return updated, err
 			}
 			if !injected {
 				diagnoseCodexMultiAgentV2ToolCall(restoredName, item, state)
@@ -558,6 +580,9 @@ func restoreCodexMultiAgentV2Item(updated []byte, path string, item gjson.Result
 // 补全前校验 arguments 是合法 JSON、message 是字符串，且不像已知密文前缀。
 // 上游仍返回密文时保持原样，把判断留给诊断日志和上层错误。
 func ensureCodexPlaintextFunctionArgs(updated []byte, path, name string, item gjson.Result, state *codexMultiAgentV2State) ([]byte, bool, error) {
+	if state == nil || !state.isOptimized() {
+		return updated, false, nil
+	}
 	if _, ok := codexCollaborationMessageTools[name]; !ok {
 		return updated, false, nil
 	}
@@ -565,7 +590,11 @@ func ensureCodexPlaintextFunctionArgs(updated []byte, path, name string, item gj
 	if marker.Exists() && marker.Type != gjson.Null {
 		return updated, false, nil
 	}
-	arguments := strings.TrimSpace(item.Get("arguments").String())
+	argumentsResult := item.Get("arguments")
+	if argumentsResult.Type != gjson.String {
+		return updated, false, nil
+	}
+	arguments := strings.TrimSpace(argumentsResult.String())
 	if arguments == "" || !gjson.Valid(arguments) {
 		return updated, false, nil
 	}
@@ -573,9 +602,8 @@ func ensureCodexPlaintextFunctionArgs(updated []byte, path, name string, item gj
 	if !message.Exists() || message.Type != gjson.String {
 		return updated, false, nil
 	}
-	// OpenAI 的 encrypted_content 以 gAAAA 开头。兼容层删除 encrypted 标记后
-	// 上游应生成明文；若仍出现该前缀，不把密文伪装成明文。
-	if strings.HasPrefix(message.String(), "gAAAA") {
+	messageText := strings.TrimSpace(message.String())
+	if messageText == "" || looksLikeCodexCiphertext(messageText) {
 		return updated, false, nil
 	}
 	updated, err := sjson.SetBytes(updated, path+".encrypted_function_args", []string{})
@@ -588,6 +616,36 @@ func ensureCodexPlaintextFunctionArgs(updated []byte, path, name string, item gj
 			name, accountID, model)
 	}
 	return updated, true, nil
+}
+
+// looksLikeCodexCiphertext 是响应补全前的 fail-closed 启发式，不是完整的
+// 密文识别。已知的 Fernet 前缀、JWE 紧凑格式和 enc_ 前缀直接拒绝；长度较长
+// 且只含 base64url 字符的单 token 也按密文处理。命中时保持原样，让客户端
+// 继续按加密消息处理，避免把密文伪装成明文任务。
+func looksLikeCodexCiphertext(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, codexEncryptedContentPrefix) ||
+		strings.HasPrefix(value, "eyJ") ||
+		strings.HasPrefix(value, "enc_") {
+		return true
+	}
+	if len(value) < 64 || strings.ContainsAny(value, " \t\r\n") {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '=':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // diagnoseCodexMultiAgentV2ToolCall 在还原响应时检查上游是否真的返回了
@@ -614,7 +672,7 @@ func diagnoseCodexMultiAgentV2ToolCall(name string, item gjson.Result, state *co
 	}
 	message := gjson.Get(arguments, "message").String()
 	log.Printf("[multi-agent-v2] 上游 %s 调用未返回 encrypted_function_args: []，Codex 仍会按加密消息处理 (account=%d model=%s ciphertext_like=%t)",
-		name, accountID, model, strings.HasPrefix(message, "gAAAA"))
+		name, accountID, model, looksLikeCodexCiphertext(message))
 }
 
 // rewriteCodexAgentMessageInput 把 Codex 客户端的 agent_message 历史转成

@@ -504,6 +504,7 @@ func TestRestoreCodexMultiAgentV2ResponseInjectsPlaintextFunctionArgs(t *testing
 		wantInjected  bool
 		wantMarker    string
 		wantNamespace string
+		stateNil      bool
 	}{
 		{
 			name:          "missing marker",
@@ -554,6 +555,37 @@ func TestRestoreCodexMultiAgentV2ResponseInjectsPlaintextFunctionArgs(t *testing
 			wantNamespace: codexCollaborationNamespace,
 		},
 		{
+			name:          "empty message",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_7a","arguments":"{\"message\":\"\"}"}}`,
+			path:          "item",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "whitespace message",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_7b","arguments":"{\"message\":\"   \"}"}}`,
+			path:          "item",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "arguments object",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_7c","arguments":{"message":"do the task"}}}`,
+			path:          "item",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "long base64url message",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_7d","arguments":"{\"message\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}"}}`,
+			path:          "item",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "nil state does not inject",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"spawn_agent","call_id":"call_7e","arguments":"{\"message\":\"do the task\"}"}}`,
+			path:          "item",
+			wantNamespace: codexCollaborationNamespace,
+			stateNil:      true,
+		},
+		{
 			name:          "flat double underscore name",
 			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration-optimize__spawn_agent","call_id":"call_8","arguments":"{\"message\":\"do the task\"}"}}`,
 			path:          "item",
@@ -575,11 +607,37 @@ func TestRestoreCodexMultiAgentV2ResponseInjectsPlaintextFunctionArgs(t *testing
 			path:          "item",
 			wantNamespace: "business",
 		},
+		{
+			name:          "collaboration namespace missing marker",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"call_11","arguments":"{\"message\":\"do the task\"}"}}`,
+			path:          "item",
+			wantInjected:  true,
+			wantMarker:    "[]",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "collaboration namespace ciphertext",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"call_12","arguments":"{\"message\":\"gAAAAABciphertext\"}"}}`,
+			path:          "item",
+			wantNamespace: codexCollaborationNamespace,
+		},
+		{
+			name:          "collaboration namespace nil state",
+			payload:       `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"call_13","arguments":"{\"message\":\"do the task\"}"}}`,
+			path:          "item",
+			wantNamespace: codexCollaborationNamespace,
+			stateNil:      true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := restoreCodexMultiAgentV2Response([]byte(tc.payload), nil)
+			state := &codexMultiAgentV2State{}
+			state.markOptimized(1, "gpt-5.5")
+			if tc.stateNil {
+				state = nil
+			}
+			got := restoreCodexMultiAgentV2Response([]byte(tc.payload), state)
 			marker := gjson.GetBytes(got, tc.path+".encrypted_function_args")
 			if tc.wantMarker == "" {
 				if marker.Exists() {
@@ -593,11 +651,12 @@ func TestRestoreCodexMultiAgentV2ResponseInjectsPlaintextFunctionArgs(t *testing
 			}
 			if tc.wantInjected {
 				// arguments 是不透明字段，补标记不能改动正文。
-				args := gjson.GetBytes(got, tc.path+".arguments").String()
-				if !strings.Contains(args, `"message"`) {
-					t.Fatalf("arguments changed: %s", args)
+				beforeArgs := gjson.GetBytes([]byte(tc.payload), tc.path+".arguments").Raw
+				afterArgs := gjson.GetBytes(got, tc.path+".arguments").Raw
+				if afterArgs != beforeArgs {
+					t.Fatalf("arguments changed: before=%s after=%s", beforeArgs, afterArgs)
 				}
-				again := restoreCodexMultiAgentV2Response(got, nil)
+				again := restoreCodexMultiAgentV2Response(got, state)
 				if string(again) != string(got) {
 					t.Fatalf("injection is not idempotent:\nfirst=%s\nsecond=%s", got, again)
 				}

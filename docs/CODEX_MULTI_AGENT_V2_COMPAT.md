@@ -124,7 +124,7 @@ CODEX_MULTI_AGENT_V2_COMPAT=true
 ## 安全失败策略
 
 - 不解析任务正文，不解密，也不把 `encrypted_content` 重标为 `input_text`。
-- 补全 `encrypted_function_args: []` 前检查 `arguments` 和 `message`；缺字段、非法 JSON、空文本、非字符串或 `gAAAA` 前缀都保持原样。
+- 补全 `encrypted_function_args: []` 前检查 `arguments` 是否为字符串、`message` 是否非空；缺字段、非法 JSON、空文本、非字符串和已知密文形态都保持原样。密文识别是启发式（`gAAAA`、JWE `eyJ`、`enc_`、长 base64url token），不是完整保证。
 - 可选的 `agent_message` 适配器只接受全部为 `input_text` 的内容；出现 `encrypted_content`、混合内容、空文本或未知 part 时拒绝转换。该适配器当前默认不接线。
 - 请求已有 `collaboration-optimize` 冲突、JSON 无效、嵌套或数量超限时，保持原请求并记录跳过日志，不做半转换。
 - 响应还原只在本次请求真的执行过改名时生效；未改名的请求不触发任何响应改写。
@@ -194,6 +194,7 @@ python scripts/repro-codex-multi-agent-v2.py --codex-exe /path/to/codex --child-
 ## 已知限制
 
 - 依赖 Codex 上游遵守修改后的 schema 并生成明文 `arguments`。上游省略 `encrypted_function_args` 时网关会补全；若 `message` 仍像密文，则不补并保留诊断。
+- 密文识别是启发式，不是完整保证；当前原生 Codex 上游使用 `gAAAA` 前缀，未知格式可能被误判或漏判。命中时选择不补，保持原生加密行为。
 - 无法区分原生 OpenAI 和第三方子 Agent；开启后所有匹配的 v2 协作调用都走明文。
 - 上游拒绝时不会自动回退，表现为 4xx。
 - 临时 namespace 是内部兼容细节；如果上游 reserved schema 或客户端判定规则变化，需要重新评估。
