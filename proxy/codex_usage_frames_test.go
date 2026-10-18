@@ -230,7 +230,7 @@ func TestCodexUsageFrameIngestKillSwitch(t *testing.T) {
 	acc := newUsageFrameTestAccount()
 	frame := gjson.Parse(`{"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`)
 	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", frame, time.Now())
-	ApplyCodexIdleUsageFrame(acc, "codex.rate_limits", []byte(`{"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`))
+	ApplyCodexIdleUsageFrame(nil, acc, "codex.rate_limits", []byte(`{"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`))
 
 	if pct, ok := acc.GetUsagePercent5h(); ok {
 		t.Fatalf("disabled ingestion updated usage to %v", pct)
@@ -371,7 +371,7 @@ func TestApplyCodexIdleUsageFrameUpdatesMemoryOnly(t *testing.T) {
 	acc.SetUsageSnapshot5hAt(20, now.Add(time.Hour), now)
 	acc.SetUsagePercent7d(10)
 
-	ApplyCodexIdleUsageFrame(acc, "codex.rate_limits", []byte(`{
+	ApplyCodexIdleUsageFrame(nil, acc, "codex.rate_limits", []byte(`{
 		"type":"codex.rate_limits",
 		"rate_limits":{
 			"primary":{"used_percent":75,"window_minutes":300,"reset_at":1700000900},
@@ -661,7 +661,7 @@ func TestApplyCodexIdleUsageFrameAppliesCredits(t *testing.T) {
 	acc := newUsageFrameTestAccount()
 	acc.ApplySparseCreditsHeaders(true, false, nil, nil, "workspace_member_credits_depleted")
 
-	ApplyCodexIdleUsageFrame(acc, "codex.rate_limits", []byte(`{
+	ApplyCodexIdleUsageFrame(nil, acc, "codex.rate_limits", []byte(`{
 		"type":"codex.rate_limits",
 		"credits":{"has_credits":false,"unlimited":false,"balance":"0"}
 	}`))
@@ -693,7 +693,7 @@ func TestCodexUsageFramesSkipRelayAccounts(t *testing.T) {
 	frame := gjson.Parse(`{"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`)
 
 	ApplyCodexUsageEventFrame(nil, acc, "codex.rate_limits", frame, time.Now())
-	ApplyCodexIdleUsageFrame(acc, "codex.rate_limits", []byte(`{"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`))
+	ApplyCodexIdleUsageFrame(nil, acc, "codex.rate_limits", []byte(`{"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`))
 
 	if pct, ok := acc.GetUsagePercent5h(); ok {
 		t.Fatalf("relay account ingested a forwarded frame: usage=%v", pct)

@@ -343,7 +343,7 @@ func isDefaultCodexLimitName(name string) bool {
 // write. Persistence and the 100% cooldown markings stay on the preflight/WHAM
 // paths; this path exists to shrink the window between a turn finishing and
 // the scheduler seeing its consumption.
-func ApplyCodexIdleUsageFrame(account *auth.Account, eventType string, payload []byte) {
+func ApplyCodexIdleUsageFrame(store *auth.Store, account *auth.Account, eventType string, payload []byte) {
 	if account == nil || account.IsRelayStyle() || len(payload) == 0 || !codexUsageFrameIngestEnabled.Load() {
 		return
 	}
@@ -374,7 +374,7 @@ func ApplyCodexIdleUsageFrame(account *auth.Account, eventType string, payload [
 	if !observation.authoritative && !creditsObserved {
 		return
 	}
-	account.TryApplyUsageObservation(observedAt, func() {
+	applied := account.TryApplyUsageObservation(observedAt, func() {
 		account.MarkUsageFrameObserved(normalizedType, observedAt)
 		if observation.authoritative {
 			// Never clear an absent 5h window from a partial connection-level frame.
@@ -398,4 +398,10 @@ func ApplyCodexIdleUsageFrame(account *auth.Account, eventType string, payload [
 			account.ApplySparseCreditsHeaders(hasCredits, unlimited, balance, overage, account.GetRateLimitReachedType())
 		}
 	})
+	if applied {
+		// A frame can restore an account that crossed back under its threshold;
+		// queued dispatchers wait on the availability notification, so refresh
+		// the scheduler even though persistence stays on the preflight path.
+		store.RefreshUsageFrameScheduler(account)
+	}
 }

@@ -446,7 +446,9 @@ func main() {
 	// 注册 WebSocket 执行函数（避免 proxy ↔ wsrelay 循环依赖）
 	proxy.WebsocketExecuteFunc = wsrelay.ExecuteRequestWebsocket
 	// 连接级（终态后补发）的用量帧也交给 proxy 更新内存快照；observer 必须非阻塞。
-	wsrelay.SetIdleMetadataObserver(proxy.ApplyCodexIdleUsageFrame)
+	wsrelay.SetIdleMetadataObserver(func(account *auth.Account, eventType string, payload []byte) {
+		proxy.ApplyCodexIdleUsageFrame(store, account, eventType, payload)
+	})
 	// WS 逐帧用量落库节流；大号池可按数据库承压情况调大，0/非法值保持默认 30s。
 	if raw := strings.TrimSpace(os.Getenv("CODEX_WS_USAGE_FRAME_PERSIST_SECONDS")); raw != "" {
 		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {

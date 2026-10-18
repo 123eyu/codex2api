@@ -4679,6 +4679,14 @@ func (s *Store) fastSchedulerUpdate(acc *Account) {
 	s.notifySchedulerAccountAvailability(acc, true)
 }
 
+// RefreshUsageFrameScheduler applies an in-memory usage snapshot to the fast
+// scheduler and wakes queued dispatchers without touching the database. The
+// connection-level WS frame path updates the snapshot on the read pump, so the
+// scheduler is refreshed separately from the persistence-throttled path.
+func (s *Store) RefreshUsageFrameScheduler(acc *Account) {
+	s.fastSchedulerUpdate(acc)
+}
+
 func (s *Store) fastSchedulerRemove(dbID int64) {
 	if s == nil || dbID == 0 {
 		return
