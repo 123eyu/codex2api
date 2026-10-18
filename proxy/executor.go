@@ -20,6 +20,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy/internal/jsonbody"
+	"github.com/codex2api/security"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -260,7 +261,7 @@ func newCodexStandardTransport(proxyURL string) http.RoundTripper {
 	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport.DialContext = baseDialer.DialContext
 	if err := auth.ConfigureTransportProxy(transport, proxyURL, baseDialer); err != nil {
-		log.Printf("[CodexTransport] 代理配置失败，回退直连: proxy=%s err=%v", proxyURL, err)
+		log.Printf("[CodexTransport] 代理配置失败，回退直连: proxy=%s err=%v", security.MaskURLCredentials(proxyURL), err)
 		transport.Proxy = nil
 		transport.DialContext = baseDialer.DialContext
 	}

@@ -10955,7 +10955,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 	if req.ProxyURL != nil {
 		h.store.SetProxyURL(*req.ProxyURL)
-		log.Printf("设置已更新: proxy_url = %s", *req.ProxyURL)
+		log.Printf("设置已更新: proxy_url = %s", security.MaskURLCredentials(*req.ProxyURL))
 	}
 
 	if req.PgMaxConns != nil {
@@ -11140,7 +11140,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		v := strings.TrimSpace(*req.GithubProxyURL)
 		h.store.SetGithubProxyURL(v)
 		runtimeCfg.GithubProxyURL = v
-		log.Printf("设置已更新: github_proxy_url = %s", v)
+		log.Printf("设置已更新: github_proxy_url = %s", security.MaskURLCredentials(v))
 	}
 
 	// Codex 过载熔断（配置只存 RuntimeSettings，热更新生效）
