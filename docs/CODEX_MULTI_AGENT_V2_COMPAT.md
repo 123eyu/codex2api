@@ -172,8 +172,6 @@ python scripts/repro-codex-multi-agent-v2.py --codex-exe /path/to/codex --child-
 
 脚本验证客户端判定规则；Go 集成测试验证网关还原；真实上游结果见下。脚本自身不读取或输出凭据，模型请求只发往本地 mock，Codex CLI 的 `CODEX_HOME` 指向本次运行的临时目录。
 
-仓库 `.gitignore` 忽略 `scripts/`，该脚本需要随 PR 以 `git add -f scripts/repro-codex-multi-agent-v2.py` 加入，否则新克隆无法按本文复现。
-
 初次真实上游验证（2026-10-18，子侧修复前）：
 
 - 父请求已切换到明文协作工具，上游 `spawn_agent` 返回的调用被补全 `encrypted_function_args: []`；
