@@ -831,6 +831,19 @@ func TestCodexUsageFramePersistenceRespectsThrottle(t *testing.T) {
 // TestCodexUsageFramePersistDoesNotBlockOnLockedDB verifies the read path only
 // enqueues the snapshot; a database write lock must not stall the caller.
 func TestCodexUsageFramePersistDoesNotBlockOnLockedDB(t *testing.T) {
+	t.Run("usage", func(t *testing.T) {
+		testCodexFrameOnLockedDB(t, `{"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`, 42)
+	})
+	t.Run("exhaustion_credits_and_plan", func(t *testing.T) {
+		testCodexFrameOnLockedDB(t, `{"plan_type":"pro","rate_limits":{"primary":{"used_percent":100,"window_minutes":300},"secondary":{"used_percent":100,"window_minutes":10080}},"credits":{"has_credits":true,"unlimited":false,"balance":"10"}}`, 100)
+	})
+	t.Run("credits_only", func(t *testing.T) {
+		testCodexFrameOnLockedDB(t, `{"credits":{"has_credits":true,"unlimited":false,"balance":"10"}}`, -1)
+	})
+}
+
+func testCodexFrameOnLockedDB(t *testing.T, payload string, wantUsage float64) {
+	t.Helper()
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "usage-frame-locked.db")
 	db, err := database.New("sqlite", dbPath)
@@ -865,19 +878,50 @@ func TestCodexUsageFramePersistDoesNotBlockOnLockedDB(t *testing.T) {
 		t.Fatalf("begin immediate: %v", err)
 	}
 
-	frame := gjson.Parse(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}`)
-	start := time.Now()
-	ApplyCodexUsageEventFrame(store, account, "codex.rate_limits", frame, time.Now())
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("frame path blocked %s on a locked database, want enqueue-only", elapsed)
-	}
-	if pct, ok := account.GetUsagePercent5h(); !ok || pct != 42 {
-		t.Fatalf("memory usage = %v valid=%v, want 42", pct, ok)
+	frame := gjson.Parse(payload)
+	done := make(chan struct{})
+	go func() {
+		ApplyCodexUsageEventFrame(store, account, "codex.rate_limits", frame, time.Now())
+		close(done)
+	}()
+	returned := false
+	select {
+	case <-done:
+		returned = true
+	case <-time.After(500 * time.Millisecond):
+		t.Error("frame path waited on a locked database")
 	}
 	if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	waitPersisted5h(t, dbPath, accountID, 42)
+	if !returned {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("frame did not finish after the DB lock was released")
+		}
+	}
+	if wantUsage >= 0 {
+		if pct, ok := account.GetUsagePercent5h(); !ok || pct != wantUsage {
+			t.Fatalf("memory usage = %v valid=%v, want %v", pct, ok, wantUsage)
+		}
+		waitPersisted5h(t, dbPath, accountID, wantUsage)
+	} else {
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			row, err := db.GetAccountByID(ctx, accountID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.GetCredential("codex_credits") != "" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("credits-only frame was not persisted")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
 
 func waitUsageFrameThrottled(t *testing.T, account *auth.Account) {

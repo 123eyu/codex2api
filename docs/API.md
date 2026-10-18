@@ -824,6 +824,8 @@ Codex 的流式 remote compact v2（`POST /v1/responses`，`stream:true`，`inpu
 
 缺失的 key 表示旧后端，前端保留列表值；显式 `null` 表示窗口失效。Antigravity 行不使用 Codex 用量字段。
 
+终态后到达的连接级配额帧也会更新上述字段。只有通过观测排序门的帧才推进帧时间、credits 和用量；遇到并发观测锁争用时按原始时间排队应用，不等待数据库。用量、credits、套餐与冷却的数据库写入在后台合并执行，因此 live 结果可先于持久化结果可见。
+
 #### PATCH /api/admin/accounts/:id/scheduler
 
 更新账号调度配置。

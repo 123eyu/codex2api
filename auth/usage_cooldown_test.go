@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -233,5 +234,90 @@ func TestUsageCooldownRetriesFailedPersistence(t *testing.T) {
 				t.Fatal("persistence retry counted another failure")
 			}
 		})
+	}
+}
+
+func TestUsageCooldownDelayedPublisherRespectsCurrentState(t *testing.T) {
+	for _, action := range []string{"unauthorized", "clear", "error"} {
+		t.Run(action, func(t *testing.T) {
+			store, db, acc := newUsageFramePersistenceFixture(t)
+			reset := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+			acc.SetUsageSnapshot5h(100, reset)
+			store.MarkUsageFrameCooldowns(acc, time.Now())
+			// Pause the frame publisher before it can read/publish its state.
+			acc.usageCooldownPersistMu.Lock()
+			var release sync.Once
+			unlock := func() { release.Do(acc.usageCooldownPersistMu.Unlock) }
+			t.Cleanup(unlock)
+			oldDone := make(chan struct{})
+			go func() { store.persistUsageCooldown(acc); close(oldDone) }()
+			newDone := make(chan struct{})
+			go func() {
+				defer close(newDone)
+				switch action {
+				case "unauthorized":
+					store.MarkCooldownWithErrorExactDuration(acc, 6*time.Hour, "unauthorized", "synthetic auth error")
+				case "clear":
+					store.ClearCooldown(acc)
+				case "error":
+					store.MarkError(acc, "synthetic permanent error")
+				}
+			}()
+			deadline := time.Now().Add(3 * time.Second)
+			changed := false
+			for time.Now().Before(deadline) {
+				acc.mu.RLock()
+				changed = acc.CooldownReason != premium5hCooldownReason
+				acc.mu.RUnlock()
+				if changed {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			unlock()
+			for _, done := range []chan struct{}{oldDone, newDone} {
+				select {
+				case <-done:
+				case <-time.After(3 * time.Second):
+					t.Fatal("cooldown publication deadlocked")
+				}
+			}
+			if !changed {
+				t.Fatal("new runtime state did not precede delayed publication")
+			}
+			row, err := db.GetAccountByID(context.Background(), acc.DBID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, cached := store.getCachedAccountCooldown(acc.DBID)
+			switch action {
+			case "unauthorized":
+				if row.CooldownReason != "unauthorized" || !row.CooldownUntil.Valid || !row.CooldownUntil.Time.Equal(acc.CooldownUtil) || !cached || record.Reason != "unauthorized" || !record.ResetAt.Equal(row.CooldownUntil.Time) {
+					t.Fatalf("delayed usage publisher overwrote newer authentication cooldown: row=%v/%v runtime=%v cache=%+v present=%v", row.CooldownReason, row.CooldownUntil, acc.CooldownUtil, record, cached)
+				}
+			case "clear", "error":
+				if row.CooldownUntil.Valid || row.CooldownReason != "" || cached {
+					t.Fatal("delayed usage publisher resurrected cleared cooldown")
+				}
+				if action == "error" && row.Status != "error" {
+					t.Fatal("delayed usage publisher cleared newer error")
+				}
+			}
+		})
+	}
+}
+
+func TestUsageCooldownRepeatedResponses429FencesInflightSuccess(t *testing.T) {
+	store := NewStore(nil, nil, nil)
+	t.Cleanup(store.Stop)
+	reset := time.Now().Add(time.Hour)
+	acc := newPremium5hTestAccount("plus", reset)
+	store.SetIgnoreUsageLimitStatus(true)
+	store.AddAccount(acc)
+	store.MarkResponsesPremium5hRateLimited(acc, reset)
+	started := acc.LastRateLimitedAt.Add(time.Second)
+	store.markPremium5hRateLimited(acc, reset, started.Add(time.Second), ResponsesRateLimitedCooldownReason, true)
+	if store.ConfirmResponsesAvailableSince(acc, started) {
+		t.Fatal("an in-flight success cleared newer repeated Responses 429 evidence")
 	}
 }

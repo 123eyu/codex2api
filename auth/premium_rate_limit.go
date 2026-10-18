@@ -228,7 +228,6 @@ func (s *Store) ClearAbsentUsageSnapshot5hAt(acc *Account, observedAt time.Time)
 	acc.usageObservedAt = observedAt
 	had5h := acc.UsagePercent5hValid
 	cleared5hCooldown := s != nil && acc.Status == StatusCooldown && acc.CooldownReason == premium5hCooldownReason
-	priorCooldownUntil := acc.CooldownUtil
 	if !had5h && !cleared5hCooldown {
 		acc.mu.Unlock()
 		return false
@@ -258,20 +257,10 @@ func (s *Store) ClearAbsentUsageSnapshot5hAt(acc *Account, observedAt time.Time)
 		return true
 	}
 	s.fastSchedulerUpdate(acc)
-	if cleared5hCooldown {
-		s.deleteCachedAccountCooldown(acc.DBID)
-		// A newer 401/generic 429 can land after the in-memory transition but
-		// before the cache delete. Restore that newer cooldown if present.
-		acc.mu.RLock()
-		status := acc.Status
-		reason := acc.CooldownReason
-		until := acc.CooldownUtil
-		acc.mu.RUnlock()
-		if status == StatusCooldown && reason != "" {
-			s.setCachedAccountCooldown(acc.DBID, reason, until)
-		}
-	}
 	if s.db == nil {
+		if cleared5hCooldown {
+			s.persistAccountCooldownState(acc, true, false)
+		}
 		return true
 	}
 
@@ -283,9 +272,7 @@ func (s *Store) ClearAbsentUsageSnapshot5hAt(acc *Account, observedAt time.Time)
 		log.Printf("[账号 %d] 清除 5h 用量快照失败: %v", acc.DBID, err)
 	}
 	if cleared5hCooldown {
-		if _, err := s.db.ClearCooldownIfReasonAndUntil(ctx, acc.DBID, premium5hCooldownReason, priorCooldownUntil); err != nil {
-			log.Printf("[账号 %d] 清除 premium 5h 冷却状态失败: %v", acc.DBID, err)
-		}
+		s.persistAccountCooldownState(acc, true, false)
 	}
 	return true
 }
@@ -304,7 +291,7 @@ func (s *Store) MarkPremium5hRateLimitedAt(acc *Account, resetAt, observedAt tim
 	return acc.ApplyUsageObservation(observedAt, func() {
 		// observedAt orders competing upstream observations; stateAt reflects
 		// when the state is actually applied after any preceding DB/identity work.
-		s.markPremium5hRateLimited(acc, resetAt, time.Now(), premium5hCooldownReason)
+		s.markPremium5hRateLimited(acc, resetAt, time.Now(), premium5hCooldownReason, true)
 	})
 }
 
@@ -317,11 +304,11 @@ func (s *Store) MarkResponsesPremium5hRateLimited(acc *Account, resetAt time.Tim
 	}
 	now := time.Now()
 	_ = acc.ApplyUsageObservation(now, func() {
-		s.markPremium5hRateLimited(acc, resetAt, time.Now(), ResponsesRateLimitedCooldownReason)
+		s.markPremium5hRateLimited(acc, resetAt, time.Now(), ResponsesRateLimitedCooldownReason, true)
 	})
 }
 
-func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.Time, cooldownReason string) {
+func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.Time, cooldownReason string, persist bool) {
 	now := observedAt
 	if now.IsZero() {
 		now = time.Now()
@@ -337,6 +324,11 @@ func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.
 	acc.Reset5hAt = resetAt
 	acc.UsageUpdatedAt5h = now
 	until, reason, cooldownChanged := acc.usageCooldownTargetLocked(now, resetAt, cooldownReason)
+	// A repeated real 429 is new rejection evidence even when its deadline is
+	// unchanged. An older in-flight success must not clear that evidence.
+	if cooldownReason == ResponsesRateLimitedCooldownReason {
+		acc.LastRateLimitedAt = now
+	}
 	if cooldownChanged {
 		acc.LastRateLimitedAt = now
 		acc.Status = StatusCooldown
@@ -351,12 +343,11 @@ func (s *Store) markPremium5hRateLimited(acc *Account, resetAt, observedAt time.
 	acc.mu.Unlock()
 
 	s.fastSchedulerUpdate(acc)
-	if cooldownChanged {
-		s.setCachedAccountCooldown(acc.DBID, reason, until)
+	if persist {
+		s.persistUsageCooldown(acc)
 	}
-	s.persistUsageCooldown(acc)
 
-	if s.db == nil || (!cooldownChanged && !snapshotChanged) {
+	if !persist || s.db == nil || (!cooldownChanged && !snapshotChanged) {
 		return
 	}
 

@@ -8763,6 +8763,8 @@ type codexUsageSyncOptions struct {
 	// preserveAbsentHardStop is used by partial WS quota frames, which cannot
 	// clear a workspace stop unless they explicitly carry that field.
 	preserveAbsentHardStop bool
+	// observationLocked is only set by the WS ingress ordering gate.
+	observationLocked bool
 }
 
 func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Response, observedAt time.Time, opts codexUsageSyncOptions) CodexUsageSyncResult {
@@ -8779,10 +8781,14 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 	apply := func() {
 		if store != nil {
 			planHeader := resp.Header.Get("x-codex-plan-type")
-			store.UpdateAccountPlanType(account, planHeader)
-			// 权威付费 plan_type 与「订阅已过期」互斥，借每次响应校正陈旧到期时间。(issue #360)
-			if planHeader != "" {
-				store.ClearStaleSubscriptionExpiresAt(account)
+			if opts.asyncPersist {
+				store.ObserveUsageFramePlan(account, planHeader)
+			} else {
+				store.UpdateAccountPlanType(account, planHeader)
+				// 权威付费 plan_type 与「订阅已过期」互斥，借每次响应校正陈旧到期时间。(issue #360)
+				if planHeader != "" {
+					store.ClearStaleSubscriptionExpiresAt(account)
+				}
 			}
 		}
 
@@ -8802,7 +8808,7 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 					overagePtr = &ov
 				}
 			}
-			if store != nil {
+			if store != nil && !opts.asyncPersist {
 				store.PersistSparseCreditObservation(account, hasCredits, unlimited, balPtr, overagePtr, rateLimitReachedType)
 			} else {
 				account.ApplySparseCreditsHeaders(hasCredits, unlimited, balPtr, overagePtr, rateLimitReachedType)
@@ -8810,7 +8816,7 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 		} else if rateLimitReachedType != "" || observation.authoritative {
 			// reached-type 是逐响应字段：带用量头的响应没有它就是「未触达」，要把旧的
 			// workspace hard-stop 清掉，否则工作区充值后积分顶替永远回不来。
-			if store != nil {
+			if store != nil && !opts.asyncPersist {
 				store.PersistRateLimitReachedType(account, rateLimitReachedType)
 			} else {
 				account.SetRateLimitReachedType(rateLimitReachedType)
@@ -8844,21 +8850,15 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 					// Memory and scheduler update stay synchronous; the DB write
 					// is coalesced per account off the read path.
 					store.PublishUsageSnapshot(account, result.UsagePct7d, observedAt, false)
-					if persistUsage {
-						store.EnqueueUsageFramePersist(account, observedAt)
-					}
 				} else {
 					persistedUsage = store.PublishUsageSnapshot(account, result.UsagePct7d, observedAt, persistUsage)
 				}
-				if result.UsagePct7d >= 100 && persistUsage {
+				if result.UsagePct7d >= 100 && persistUsage && !opts.asyncPersist {
 					result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
 				}
 			} else if result.Used5hHeaders {
 				if opts.asyncPersist {
 					store.PublishUsageSnapshot5hOnly(account, observedAt, false)
-					if persistUsage {
-						store.EnqueueUsageFramePersist(account, observedAt)
-					}
 				} else {
 					persistedUsage = store.PublishUsageSnapshot5hOnly(account, observedAt, persistUsage)
 				}
@@ -8872,11 +8872,19 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 				pct7d, has7d := account.GetUsagePercent7d()
 				account.MarkUsageFramePersisted(observedAt, pct5h, has5h, pct7d, has7d)
 			}
+			if opts.asyncPersist && persistUsage {
+				result.Usage7dRateLimited, result.Premium5hRateLimited = store.MarkUsageFrameCooldowns(account, observedAt)
+			}
 		}
 	}
 	applied := false
 	if observation.authoritative || creditsObserved || rateLimitReachedType != "" || resp.Header.Get("x-codex-plan-type") != "" {
-		applied = account.ApplyUsageObservation(observedAt, apply)
+		if opts.observationLocked {
+			apply()
+			applied = true
+		} else {
+			applied = account.ApplyUsageObservation(observedAt, apply)
+		}
 	}
 	usageApplied := applied && observation.authoritative
 
@@ -8885,7 +8893,7 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 		// 被动 /responses 头刷新了 5h 窗口重置时刻：武装「到点即探」，窗口翻新即刷新进度条。
 		store.WakeBoundaryProbe(result.Reset5hAt)
 	}
-	if usageApplied && result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
+	if !opts.asyncPersist && usageApplied && result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
 		if store != nil {
 			// The per-frame path may decide not to persist this observation; a
 			// repeated 100% frame must not issue another cooldown write.
@@ -8898,6 +8906,10 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 	}
 
 	result.Applied = applied && (usageApplied || result.CreditsObserved)
+	if applied && opts.asyncPersist && store != nil {
+		store.RefreshUsageFrameScheduler(account)
+		store.EnqueueUsageFrameEffects(account, observedAt, result.PersistUsage, resp.Header.Get("x-codex-plan-type") != "")
+	}
 	return result
 }
 

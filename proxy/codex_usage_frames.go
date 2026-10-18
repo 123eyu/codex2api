@@ -87,9 +87,7 @@ func applyCodexRateLimitsFrame(store *auth.Store, account *auth.Account, frame g
 	if len(headers) == 0 {
 		return
 	}
-	if result := applyCodexUsageHeaders(store, account, headers, observedAt); result.Applied {
-		account.MarkUsageFrameObserved(codexRateLimitsFrameType, observedAt)
-	}
+	applyCodexUsageHeaders(store, account, headers, observedAt, codexRateLimitsFrameType)
 }
 
 func codexRateLimitsHeaders(frame gjson.Result, observedAt time.Time) http.Header {
@@ -145,9 +143,7 @@ func applyCodexResponseMetadataFrame(store *auth.Store, account *auth.Account, f
 	if len(headers) == 0 {
 		return
 	}
-	if result := applyCodexUsageHeaders(store, account, headers, observedAt); result.Applied {
-		account.MarkUsageFrameObserved(codexResponseMetadataFrameType, observedAt)
-	}
+	applyCodexUsageHeaders(store, account, headers, observedAt, codexResponseMetadataFrameType)
 }
 
 func codexResponseMetadataHeaders(frame gjson.Result, observedAt time.Time) http.Header {
@@ -223,9 +219,12 @@ func isCodexUsageFrameHeader(name string) bool {
 	return false
 }
 
-func applyCodexUsageHeaders(store *auth.Store, account *auth.Account, headers http.Header, observedAt time.Time) CodexUsageSyncResult {
+func applyCodexUsageHeaders(store *auth.Store, account *auth.Account, headers http.Header, observedAt time.Time, kind string) {
 	if len(headers) == 0 {
-		return CodexUsageSyncResult{}
+		return
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
 	}
 	// WS frames do not carry the per-response rate_limit_reached_type field, and
 	// the shared sync treats an absent value as "not reached" (correct for HTTP
@@ -236,14 +235,23 @@ func applyCodexUsageHeaders(store *auth.Store, account *auth.Account, headers ht
 	// WHAM probes remain the authority for window presence/absence. The persist
 	// decision runs inside ApplyUsageObservation so a stale/out-of-order frame
 	// cannot advance the throttling state without being applied.
-	return syncCodexUsageState(store, account, resp, observedAt, codexUsageSyncOptions{
-		persistUsageSnapshot:   true,
-		clearAbsent5h:          false,
-		asyncPersist:           true,
-		preserveAbsentHardStop: true,
-		shouldPersistUsage: func(pct5h float64, has5h bool, pct7d float64, has7d bool) bool {
-			return account.ShouldPersistUsageFrame(observedAt, pct5h, has5h, pct7d, has7d, codexUsageFramePersistInterval())
-		},
+	store.ApplyUsageFrameObservation(account, observedAt, func() {
+		if !codexUsageFrameIngestEnabled.Load() {
+			return
+		}
+		result := syncCodexUsageState(store, account, resp, observedAt, codexUsageSyncOptions{
+			persistUsageSnapshot:   true,
+			clearAbsent5h:          false,
+			asyncPersist:           true,
+			preserveAbsentHardStop: true,
+			observationLocked:      true,
+			shouldPersistUsage: func(pct5h float64, has5h bool, pct7d float64, has7d bool) bool {
+				return account.ShouldPersistUsageFrame(observedAt, pct5h, has5h, pct7d, has7d, codexUsageFramePersistInterval())
+			},
+		})
+		if result.Applied {
+			account.MarkUsageFrameObserved(kind, observedAt)
+		}
 	})
 }
 
@@ -335,11 +343,10 @@ func isDefaultCodexLimitName(name string) bool {
 
 // ApplyCodexIdleUsageFrame is the observer for connection-level metadata frames
 // that arrive after a response terminal (the wsrelay read pump drops those
-// instead of routing them to a request). It updates only the in-memory usage
-// snapshot, with a non-blocking try-lock, so the read pump never waits on a DB
-// write. Persistence and the 100% cooldown markings stay on the preflight/WHAM
-// paths; this path exists to shrink the window between a turn finishing and
-// the scheduler seeing its consumption.
+// instead of routing them to a request). Both frame paths share the same ordered
+// runtime update and coalescing persistence. A busy observation lock queues the
+// partial frames in order instead of blocking the read pump or discarding the
+// final update.
 func ApplyCodexIdleUsageFrame(store *auth.Store, account *auth.Account, eventType string, payload []byte) {
 	if account == nil || account.IsRelayStyle() || len(payload) == 0 || !codexUsageFrameIngestEnabled.Load() {
 		return
@@ -365,40 +372,5 @@ func ApplyCodexIdleUsageFrame(store *auth.Store, account *auth.Account, eventTyp
 	if len(headers) == 0 {
 		return
 	}
-	resp := &http.Response{Header: headers}
-	observation := parseCodexUsageHeaderObservation(resp)
-	hasCredits, unlimited, creditsObserved := parseCodexCreditsFlagHeaders(resp)
-	if !observation.authoritative && !creditsObserved {
-		return
-	}
-	applied := account.TryApplyUsageObservation(observedAt, func() {
-		account.MarkUsageFrameObserved(normalizedType, observedAt)
-		if observation.authoritative {
-			// Never clear an absent 5h window from a partial connection-level frame.
-			applyCodexUsageHeaderObservation(nil, account, observation, observedAt, false)
-		}
-		if creditsObserved {
-			// Connection-level frames also carry the post-turn credits snapshot.
-			// Apply it so the last spent credit can flip credit-based scheduling
-			// before the next WHAM probe. Keep the stored hard stop: the frame has
-			// no rate_limit_reached_type of its own.
-			var balance *string
-			if trimmed := strings.TrimSpace(headers.Get("x-codex-credits-balance")); trimmed != "" {
-				balance = &trimmed
-			}
-			var overage *bool
-			if raw := strings.TrimSpace(headers.Get("x-codex-credits-overage-reached")); raw != "" {
-				if value, err := strconv.ParseBool(raw); err == nil {
-					overage = &value
-				}
-			}
-			account.ApplySparseCreditsHeaders(hasCredits, unlimited, balance, overage, account.GetRateLimitReachedType())
-		}
-	})
-	if applied {
-		// A frame can restore an account that crossed back under its threshold;
-		// queued dispatchers wait on the availability notification, so refresh
-		// the scheduler even though persistence stays on the preflight path.
-		store.RefreshUsageFrameScheduler(account)
-	}
+	applyCodexUsageHeaders(store, account, headers, observedAt, normalizedType)
 }
