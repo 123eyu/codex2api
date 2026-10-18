@@ -1786,6 +1786,30 @@ func readRawRequestBody(c *gin.Context) ([]byte, error) {
 	return body, nil
 }
 
+const (
+	maxResponsesInputItems    = 20000
+	maxChatCompletionMessages = 20000
+)
+
+// rejectExcessiveJSONArray bounds item counts before the body is unmarshaled
+// into maps. A 24MB body containing hundreds of thousands of tiny objects can
+// expand into hundreds of MB during parsing; the request memory budget only
+// counts raw bytes.
+func rejectExcessiveJSONArray(c *gin.Context, rawBody []byte, path string, max int) bool {
+	if c == nil || len(rawBody) == 0 || max <= 0 {
+		return false
+	}
+	if count := gjson.GetBytes(rawBody, path+".#").Int(); count > int64(max) {
+		api.SendError(c, api.NewAPIError(
+			api.ErrCodeInvalidRequest,
+			fmt.Sprintf("%s contains too many items (max %d)", path, max),
+			api.ErrorTypeInvalidRequest,
+		))
+		return true
+	}
+	return false
+}
+
 const ingressRequestBodyContextKey = "ingress_raw_body"
 
 func setIngressRequestBodyIfAbsent(c *gin.Context, body []byte) {
@@ -3864,6 +3888,9 @@ func (h *Handler) Responses(c *gin.Context) {
 	rawBody, err := readRawRequestBody(c)
 	if err != nil {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
+		return
+	}
+	if rejectExcessiveJSONArray(c, rawBody, "input", maxResponsesInputItems) {
 		return
 	}
 	if contextErr := responsesHTTPContextEnvelopeError(rawBody); contextErr != nil {
@@ -6813,6 +6840,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	rawBody, err := readRawRequestBody(c)
 	if err != nil {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
+		return
+	}
+	if rejectExcessiveJSONArray(c, rawBody, "messages", maxChatCompletionMessages) {
 		return
 	}
 	h.capturePromptRequestIngress(c, rawBody)
