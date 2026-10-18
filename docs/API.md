@@ -2754,6 +2754,8 @@ Image Studio 的管理端、门户和外部任务入口对显式 `WIDTHxHEIGHT` 
 
 OAuth 会话在兑换前一次性认领，公开回调、手动兑换和账号更新共享此状态。并发或重复兑换被拒绝；失败后需要重新发起授权，不重用可能已被上游消费的 code。回调处理期间轮询返回 `processing`，完成后返回 `completed` 并清理会话；回调页面与轮询结果只提供通用错误，脱敏诊断保留在服务端日志。
 
+自助提交账号的凭据、禁用状态、联系人备注、`self-service` 标签及凭据族在同一数据库事务中保存。保存失败不留下半成品账号，也不占用该账号身份；重新发起授权后可以再次提交。待审核账号在管理员批准前不进入调度池。
+
 Responses、Chat、compact、Images、原生 Gemini 及下游 Responses WS 的上游 HTTP 错误处理最多读取 1 MiB 前缀；Responses/compact 直接聚合的成功 JSON 与 Grok namespace 非流式改写最多读取 64 MiB，超限成功 JSON 明确报错，不会作为截断 JSON 返回。新增 SSE 读取路径的单行上限为 8 MiB，Grok SSE 聚合还限制完整事件为 8 MiB，超限错误会向调用方传播。这些是本地资源边界，不代表更大的 Base64 图片或工具输出在上游协议中一定非法，也不代表 OAuth 等其他 HTTP 客户端都复用此预算。
 
 ### API Key 模型周请求次数预算

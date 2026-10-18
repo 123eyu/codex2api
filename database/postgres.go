@@ -8782,10 +8782,9 @@ func (db *DB) InsertAccountWithCredentials(ctx context.Context, name string, cre
 	)
 }
 
-// InsertDisabledAccountWithCredentials creates an account in the pending state
-// from the first write. Self-service submissions must not briefly exist as an
-// enabled account if a follow-up update fails.
-func (db *DB) InsertDisabledAccountWithCredentials(ctx context.Context, name string, credentials map[string]interface{}, proxyURL string) (int64, error) {
+// InsertPendingAccountWithCredentials atomically saves a disabled account and
+// its review metadata together with the credential family.
+func (db *DB) InsertPendingAccountWithCredentials(ctx context.Context, name string, credentials map[string]interface{}, proxyURL, note string, tags []string) (int64, error) {
 	if credentials == nil {
 		credentials = map[string]interface{}{}
 	}
@@ -8794,10 +8793,10 @@ func (db *DB) InsertDisabledAccountWithCredentials(ctx context.Context, name str
 		return 0, err
 	}
 	return db.insertAccountRowWithFamily(ctx,
-		`INSERT INTO accounts (name, credentials, proxy_url, enabled) VALUES ($1, $2, $3, FALSE) RETURNING id`,
-		`INSERT INTO accounts (name, credentials, proxy_url, enabled) VALUES ($1, $2, $3, FALSE)`,
+		`INSERT INTO accounts (name, credentials, proxy_url, enabled, note, tags) VALUES ($1, $2, $3, FALSE, $4, $5::jsonb) RETURNING id`,
+		`INSERT INTO accounts (name, credentials, proxy_url, enabled, note, tags) VALUES ($1, $2, $3, FALSE, $4, $5)`,
 		credentials,
-		name, credJSON, proxyURL,
+		name, credJSON, proxyURL, note, encodeTagsJSON(tags),
 	)
 }
 
