@@ -30,6 +30,10 @@ type accountLiveItem struct {
 	UsagePercent7d   *float64 `json:"usage_percent_7d"`
 	Reset7dAt        *string  `json:"reset_7d_at"`
 	UsageUpdatedAt   *string  `json:"codex_usage_updated_at"`
+	// Frame freshness proves the WS quota ingestion path is working for this
+	// account; omitted until the first frame is applied.
+	UsageFrameAt   *string `json:"codex_usage_frame_at,omitempty"`
+	UsageFrameKind *string `json:"codex_usage_frame_kind,omitempty"`
 }
 
 // GetAccountLiveState returns request-local runtime counters for the visible
@@ -80,6 +84,11 @@ func (h *Handler) GetAccountLiveState(c *gin.Context) {
 			}
 			item.Reset7dAt = optionalLiveTime(usage.Reset7dAt)
 			item.UsageUpdatedAt = optionalLiveTime(usage.UsageUpdatedAt)
+			if !usage.UsageFrameLastAt.IsZero() {
+				item.UsageFrameAt = optionalLiveTime(usage.UsageFrameLastAt)
+				kind := usage.UsageFrameLastKind
+				item.UsageFrameKind = &kind
+			}
 		}
 		live[id] = item
 	}

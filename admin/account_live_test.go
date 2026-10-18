@@ -113,3 +113,60 @@ func TestGetAccountLiveStateReturnsRuntimeUsage(t *testing.T) {
 		t.Fatalf("using_credits missing: %+v", item)
 	}
 }
+
+func TestGetAccountLiveStateSerializesNullWindowsAndSkipsAntigravityFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := auth.NewStore(nil, nil, nil)
+	codex := &auth.Account{
+		DBID:        11,
+		AccessToken: "token",
+		Status:      auth.StatusReady,
+		HealthTier:  auth.HealthTierHealthy,
+	}
+	antigravity := &auth.Account{
+		DBID:         12,
+		AccessToken:  "token",
+		UpstreamType: auth.UpstreamAntigravity,
+	}
+	store.AddAccount(codex)
+	store.AddAccount(antigravity)
+	codex.MarkUsageFrameObserved("codex.rate_limits", time.Now())
+	handler := &Handler{store: store}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts/live?ids=11,12", nil)
+	handler.GetAccountLiveState(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var raw struct {
+		Accounts map[string]map[string]json.RawMessage `json:"accounts"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	codexItem := raw.Accounts["11"]
+	if got := string(codexItem["usage_percent_5h"]); got != "null" {
+		t.Fatalf("codex usage_percent_5h = %s, want null", got)
+	}
+	if got := string(codexItem["status"]); got == "" || got == "null" {
+		t.Fatalf("codex status missing: %s", got)
+	}
+	if got := string(codexItem["codex_usage_frame_kind"]); got != `"codex.rate_limits"` {
+		t.Fatalf("codex frame kind = %s, want codex.rate_limits", got)
+	}
+	if got := string(codexItem["codex_usage_frame_at"]); got == "" || got == "null" {
+		t.Fatalf("codex frame time missing: %s", got)
+	}
+	antigravityItem := raw.Accounts["12"]
+	for _, key := range []string{"status", "using_credits", "codex_usage_frame_at", "codex_usage_frame_kind"} {
+		if value, ok := antigravityItem[key]; ok {
+			t.Fatalf("antigravity item unexpectedly carries %s=%s", key, value)
+		}
+	}
+	if got := string(antigravityItem["usage_percent_5h"]); got != "null" {
+		t.Fatalf("antigravity usage_percent_5h = %s, want null", got)
+	}
+}

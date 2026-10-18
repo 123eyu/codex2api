@@ -774,6 +774,56 @@ Codex 的流式 remote compact v2（`POST /v1/responses`，`stream:true`，`inpu
 | billed_5h                  | number/null  | 过去 5 小时窗口内的累计计费金额（USD）                            |
 | billed_7d                  | number/null  | 过去 7 天窗口内的累计计费金额（USD）                              |
 
+#### GET /api/admin/accounts/live
+
+返回当前页账号的运行时并发计数与用量投影，供账号页约每秒一次的轻量轮询。只读取内存状态，不查数据库、不重建调度快照。
+
+**请求参数:**
+
+| 参数 | 类型   | 说明                               |
+| ---- | ------ | ---------------------------------- |
+| ids  | string | 逗号分隔的账号 ID，最多 500 个     |
+
+**响应:**
+
+```json
+{
+  "accounts": {
+    "1": {
+      "active_requests": 1,
+      "occupied_requests": 1,
+      "dynamic_concurrency_limit": 2,
+      "base_concurrency_effective": 2,
+      "status": "quota_paused",
+      "using_credits": false,
+      "usage_percent_5h": 91.2,
+      "reset_5h_at": "2026-10-18T18:00:00+08:00",
+      "codex_5h_usage_updated_at": "2026-10-18T15:10:00+08:00",
+      "usage_percent_7d": 42,
+      "reset_7d_at": "2026-10-25T07:00:00+08:00",
+      "codex_usage_updated_at": "2026-10-18T15:10:00+08:00",
+      "codex_usage_frame_at": "2026-10-18T15:10:00+08:00",
+      "codex_usage_frame_kind": "codex.rate_limits"
+    }
+  },
+  "session_slot_buffer_enabled": false
+}
+```
+
+**字段说明:**
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| status / using_credits | string / bool | 运行时状态；旧后端或 Antigravity 行省略该 key，前端保留列表值 |
+| usage_percent_5h / usage_percent_7d | number/null | 运行时用量；显式 `null` 表示窗口已失效，前端清除列表值 |
+| reset_5h_at / reset_7d_at | string/null | 窗口重置时间（RFC3339） |
+| codex_5h_usage_updated_at / codex_usage_updated_at | string/null | 最近一次用量刷新时间；WS 每轮配额帧也会刷新 |
+| codex_usage_frame_at / codex_usage_frame_kind | string | 最近一次被应用的 WS 配额帧时间与事件类型；首帧前省略，可用于确认帧摄入是否生效 |
+| dynamic_concurrency_limit / base_concurrency_effective | integer | 调度器当前生效的并发上限与配置值 |
+| session_slot_buffer_enabled | bool | 全局会话槽缓冲开关 |
+
+缺失的 key 表示旧后端，前端保留列表值；显式 `null` 表示窗口失效。Antigravity 行不使用 Codex 用量字段。
+
 #### PATCH /api/admin/accounts/:id/scheduler
 
 更新账号调度配置。
