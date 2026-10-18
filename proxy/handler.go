@@ -8756,6 +8756,10 @@ type codexUsageSyncOptions struct {
 	// ordering gate. That gate rejects stale observers, so the throttling state
 	// must not advance for an observation that will not be applied.
 	shouldPersistUsage func(pct5h float64, has5h bool, pct7d float64, has7d bool) bool
+	// asyncPersist moves the frame snapshot write to the store's coalescing
+	// worker. The upstream read path only applies memory/scheduler state, so a
+	// slow or locked database cannot stall a streaming response.
+	asyncPersist bool
 }
 
 func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Response, observedAt time.Time, opts codexUsageSyncOptions) CodexUsageSyncResult {
@@ -8830,12 +8834,28 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 			result.PersistUsage = persistUsage
 			persistedUsage := false
 			if result.HasUsage7d {
-				persistedUsage = store.PublishUsageSnapshot(account, result.UsagePct7d, observedAt, persistUsage)
+				if opts.asyncPersist {
+					// Memory and scheduler update stay synchronous; the DB write
+					// is coalesced per account off the read path.
+					store.PublishUsageSnapshot(account, result.UsagePct7d, observedAt, false)
+					if persistUsage {
+						store.EnqueueUsageFramePersist(account, observedAt)
+					}
+				} else {
+					persistedUsage = store.PublishUsageSnapshot(account, result.UsagePct7d, observedAt, persistUsage)
+				}
 				if result.UsagePct7d >= 100 && persistUsage {
 					result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
 				}
 			} else if result.Used5hHeaders {
-				persistedUsage = store.PublishUsageSnapshot5hOnly(account, observedAt, persistUsage)
+				if opts.asyncPersist {
+					store.PublishUsageSnapshot5hOnly(account, observedAt, false)
+					if persistUsage {
+						store.EnqueueUsageFramePersist(account, observedAt)
+					}
+				} else {
+					persistedUsage = store.PublishUsageSnapshot5hOnly(account, observedAt, persistUsage)
+				}
 				result.Persisted5hOnly = persistUsage
 			}
 			if persistUsage && persistedUsage {

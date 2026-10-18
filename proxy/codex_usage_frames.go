@@ -244,6 +244,7 @@ func applyCodexUsageHeaders(store *auth.Store, account *auth.Account, headers ht
 	return syncCodexUsageState(store, account, resp, observedAt, codexUsageSyncOptions{
 		persistUsageSnapshot: true,
 		clearAbsent5h:        false,
+		asyncPersist:         true,
 		shouldPersistUsage: func(pct5h float64, has5h bool, pct7d float64, has7d bool) bool {
 			return account.ShouldPersistUsageFrame(observedAt, pct5h, has5h, pct7d, has7d, codexUsageFramePersistInterval())
 		},

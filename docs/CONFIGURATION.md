@@ -87,7 +87,7 @@ Codex2API 采用三层配置架构：
 | `USE_WEBSOCKET` | 否 | `false` | 旧版开关；未设置 `CODEX_UPSTREAM_TRANSPORT` 时，`true` 等价于 `CODEX_UPSTREAM_TRANSPORT=ws` |
 | `CODEX_TRANSPORT_MODE` | 否 | `standard` | Codex HTTP transport：默认标准 Go TLS；`utls_chrome` 可回滚旧 Chrome uTLS 行为 |
 | `CODEX_WS_SEND_USER_AGENT` | 否 | `true` | WS 握手是否发送 Codex `User-Agent`/`Version`；设为 `false` 可关闭 |
-| `CODEX_WS_USAGE_FRAME_PERSIST_SECONDS` | 否 | `30` | WS 逐帧用量快照落库的最小间隔（秒），正整数，重启生效。内存快照每帧更新；跨自动暂停阈值、5pp 变化或 100% 时仍强制落库。大号池可按数据库承压调大 |
+| `CODEX_WS_USAGE_FRAME_PERSIST_SECONDS` | 否 | `30` | WS 逐帧用量快照落库的最小间隔（秒），正整数，重启生效。内存快照每帧更新；落库由每账号合并的异步 worker 执行，不阻塞上游响应流；跨自动暂停阈值、5pp 变化或 100% 时仍强制落库。大号池可按数据库承压调大 |
 | `CODEX_WS_USAGE_FRAME_INGEST` | 否 | `true` | 是否消费 WS 上游每轮 `codex.rate_limits` / `codex.response.metadata` 配额帧；设为 `false` 时回退到 WHAM 探针与 HTTP 响应头，重启生效 |
 | `CODEX_SESSION_AFFINITY_TTL` | 否 | `1h` | Codex 会话到账号/代理的黏性 TTL，支持 `1h`、`90m` 或秒数 |
 | `CODEX_COMPACTION_AFFINITY_TTL` | 否 | `168h` | 加密压缩状态的来源亲和 TTL。缓存仅保存密文的 SHA-256 摘要、来源账号和兼容域；已知状态不会跨 Codex 官方、不同 Responses 中转或 Grok 上游流转 |

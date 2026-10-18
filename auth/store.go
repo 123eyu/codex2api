@@ -3809,6 +3809,7 @@ type Store struct {
 	armedBoundaryAt     atomic.Int64
 	lazyRefreshInFlight sync.Map
 	stopCh              chan struct{}
+	usageFramePersist   *usageFramePersistQueue
 	stopOnce            sync.Once
 	backgroundCtx       context.Context
 	backgroundCancel    context.CancelFunc
@@ -4463,6 +4464,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		backgroundRefreshWakeCh:    make(chan struct{}, 1),
 		boundaryProbeWakeCh:        make(chan struct{}, 1),
 		stopCh:                     make(chan struct{}),
+		usageFramePersist:          newUsageFramePersistQueue(),
 		backgroundCtx:              backgroundCtx,
 		backgroundCancel:           backgroundCancel,
 		schedulerMetrics:           newSchedulerRuntimeMetrics(),
@@ -4474,6 +4476,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		oauthRefreshLocks:          make(map[string]*oauthRefreshLocalLock),
 	}
 	s.maxConcurrency.Store(int64(settings.MaxConcurrency))
+	s.usageFramePersist.start(s)
 	s.testConcurrency.Store(int64(settings.TestConcurrency))
 	s.codexRequestCompression.Store(settings.CodexRequestCompression)
 	s.availability.Store(newAvailabilityHub())
