@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -98,16 +99,26 @@ func (s *oauthSessionStore) delete(id string) {
 	s.mu.Unlock()
 }
 
-// findByState 通过 state 查找 session（回调端点使用，返回 sessionID + session）
+// findByState 通过 state 查找 session（回调端点使用，返回 sessionID + session）。
+// 遍历全部条目并使用常量时间比较，避免按匹配位置提前返回。
 func (s *oauthSessionStore) findByState(state string) (string, *oauthSession, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var foundID string
+	var foundSess *oauthSession
 	for id, sess := range s.sessions {
-		if sess.State == state && time.Since(sess.CreatedAt) <= oauthSessionTTL {
-			return id, sess, true
+		if !security.SecureCompare(sess.State, state) {
+			continue
 		}
+		if time.Since(sess.CreatedAt) > oauthSessionTTL {
+			continue
+		}
+		foundID, foundSess = id, sess
 	}
-	return "", nil, false
+	if foundSess == nil {
+		return "", nil, false
+	}
+	return foundID, foundSess, true
 }
 
 func (s *oauthSessionStore) cleanupLoop() {
@@ -741,6 +752,10 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		c.String(http.StatusBadRequest, oauthCallbackPage("授权失败", "OAuth 会话不存在或已过期，请重新发起授权", false))
 		return
 	}
+	if sess.ExchangeResult != nil && sess.ExchangeResult.Success {
+		c.String(http.StatusBadRequest, oauthCallbackPage("授权失败", "该授权回调已处理，请重新发起授权", false))
+		return
+	}
 
 	// 记录回调信息
 	sess.CallbackCode = code
@@ -918,7 +933,8 @@ func (h *Handler) PollOAuthCallback(c *gin.Context) {
 	})
 }
 
-// oauthCallbackPage 生成简单的 HTML 回调结果页面
+// oauthCallbackPage 生成简单的 HTML 回调结果页面。
+// title/message 可能来自数据库错误或 token claims，必须转义后再插入。
 func oauthCallbackPage(title, message string, success bool) string {
 	color := "#e53e3e"
 	icon := "&#10060;"
@@ -926,6 +942,8 @@ func oauthCallbackPage(title, message string, success bool) string {
 		color = "#38a169"
 		icon = "&#10004;"
 	}
+	title = html.EscapeString(title)
+	message = html.EscapeString(message)
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>%s</title>
 <style>
