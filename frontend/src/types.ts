@@ -628,6 +628,15 @@ export interface AccountLiveStateResponse {
     // 调度器当前实际执行的并发上限与配置值；旧后端不返回时保留列表里的值。
     dynamic_concurrency_limit?: number
     base_concurrency_effective?: number
+    // 运行时用量投影：旧后端缺 key 时保留列表值；显式 null 表示窗口已失效。
+    status?: AccountStatus
+    using_credits?: boolean
+    usage_percent_5h?: number | null
+    reset_5h_at?: ISODateString | null
+    codex_5h_usage_updated_at?: ISODateString | null
+    usage_percent_7d?: number | null
+    reset_7d_at?: ISODateString | null
+    codex_usage_updated_at?: ISODateString | null
   }>
   session_slot_buffer_enabled: boolean
 }

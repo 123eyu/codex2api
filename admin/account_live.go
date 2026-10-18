@@ -2,6 +2,7 @@ package admin
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -15,11 +16,27 @@ type accountLiveItem struct {
 	// BaseConcurrencyEffective is the configured cap (account override,
 	// then group, then the global default) before any runtime reduction.
 	BaseConcurrencyEffective int64 `json:"base_concurrency_effective"`
+
+	// Runtime usage/status projection so the account page can reflect WS frame
+	// observations without waiting for a list reload. Optional pointers keep the
+	// backward-compat contract: an older backend omits the key (frontend keeps
+	// the list value); a pointer that is nil serializes as null (frontend clears
+	// the now-invalid window).
+	Status           *string  `json:"status,omitempty"`
+	UsingCredits     *bool    `json:"using_credits,omitempty"`
+	UsagePercent5h   *float64 `json:"usage_percent_5h"`
+	Reset5hAt        *string  `json:"reset_5h_at"`
+	UsageUpdatedAt5h *string  `json:"codex_5h_usage_updated_at"`
+	UsagePercent7d   *float64 `json:"usage_percent_7d"`
+	Reset7dAt        *string  `json:"reset_7d_at"`
+	UsageUpdatedAt   *string  `json:"codex_usage_updated_at"`
 }
 
 // GetAccountLiveState returns request-local runtime counters for the visible
 // account page. Scheduler counters use in-memory atomics; concurrency caps are
-// the scheduler's maintained values and are not recomputed here.
+// the scheduler's maintained values and are not recomputed here. The usage
+// projection is a single read lock per account and never rebuilds a snapshot,
+// so it stays cheap at the one-second cadence even for a full page.
 func (h *Handler) GetAccountLiveState(c *gin.Context) {
 	ids, err := parseAccountListIDs(c.Query("ids"))
 	if err != nil {
@@ -37,15 +54,45 @@ func (h *Handler) GetAccountLiveState(c *gin.Context) {
 		if account == nil {
 			continue
 		}
-		live[id] = accountLiveItem{
+		item := accountLiveItem{
 			ActiveRequests:           account.GetActiveRequests(),
 			OccupiedRequests:         account.GetOccupiedRequests(),
 			DynamicConcurrencyLimit:  account.GetDynamicConcurrencyLimit(),
 			BaseConcurrencyEffective: account.GetBaseConcurrencyEffective(),
 		}
+		// Antigravity rows use a persisted quota snapshot; runtimeStatusLocked
+		// does not model their display status, so leave the row's fields alone.
+		if !account.IsAntigravityAPI() {
+			usage := account.GetAccountLiveUsageSnapshot()
+			status := usage.Status
+			item.Status = &status
+			usingCredits := usage.UsingCredits
+			item.UsingCredits = &usingCredits
+			if usage.UsagePercent5hValid {
+				pct := usage.UsagePercent5h
+				item.UsagePercent5h = &pct
+			}
+			item.Reset5hAt = optionalLiveTime(usage.Reset5hAt)
+			item.UsageUpdatedAt5h = optionalLiveTime(usage.UsageUpdatedAt5h)
+			if usage.UsagePercent7dValid {
+				pct := usage.UsagePercent7d
+				item.UsagePercent7d = &pct
+			}
+			item.Reset7dAt = optionalLiveTime(usage.Reset7dAt)
+			item.UsageUpdatedAt = optionalLiveTime(usage.UsageUpdatedAt)
+		}
+		live[id] = item
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"accounts":                    live,
 		"session_slot_buffer_enabled": h.store.SessionSlotBufferEnabled(),
 	})
+}
+
+func optionalLiveTime(t time.Time) *string {
+	if t.IsZero() {
+		return nil
+	}
+	formatted := t.Format(time.RFC3339)
+	return &formatted
 }

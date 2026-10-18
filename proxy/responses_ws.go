@@ -1234,6 +1234,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		outputCollector.Add(data)
 		parsed := gjson.ParseBytes(data)
 		eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+		ApplyCodexUsageEventFrame(h.store, account, eventType, parsed, time.Now())
 		eventType, data, parsed = rewriteEmptyIncompleteTerminal(emptyIncomplete, eventType, data, parsed)
 		clientData := data
 		if options != nil && options.transformClientEvent != nil {

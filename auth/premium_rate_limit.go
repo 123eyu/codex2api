@@ -133,6 +133,12 @@ func (a *Account) GetUsageSnapshot5h() (pct float64, resetAt time.Time, ok bool)
 
 // PersistUsageSnapshot5hOnly 持久化仅包含 5h 数据的用量快照。
 func (s *Store) PersistUsageSnapshot5hOnly(acc *Account) {
+	s.PublishUsageSnapshot5hOnly(acc, time.Now(), true)
+}
+
+// PublishUsageSnapshot5hOnly updates the in-memory 5h snapshot and scheduler.
+// persist=false skips the DB write for the throttled WS frame path.
+func (s *Store) PublishUsageSnapshot5hOnly(acc *Account, observedAt time.Time, persist bool) {
 	if acc == nil || s == nil {
 		return
 	}
@@ -142,20 +148,22 @@ func (s *Store) PersistUsageSnapshot5hOnly(acc *Account) {
 		return
 	}
 
-	updatedAt := time.Now()
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
 	acc.mu.Lock()
-	acc.UsageUpdatedAt5h = updatedAt
+	acc.UsageUpdatedAt5h = observedAt
 	acc.mu.Unlock()
 
 	s.fastSchedulerUpdate(acc)
 
-	if s.db == nil {
+	if !persist || s.db == nil {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, pct5h, reset5hAt, updatedAt); err != nil {
+	if err := s.db.UpdateUsageSnapshot5h(ctx, acc.DBID, pct5h, reset5hAt, observedAt); err != nil {
 		log.Printf("[账号 %d] 持久化 5h 用量快照失败: %v", acc.DBID, err)
 	}
 }

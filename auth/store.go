@@ -298,6 +298,12 @@ type Account struct {
 	Reset5hAt           time.Time // 5h 窗口重置时间
 	UsageUpdatedAt      time.Time // 7d 用量快照刷新时间
 	UsageUpdatedAt5h    time.Time // 5h 用量快照刷新时间
+	// usageFramePersisted* 记录 WS 逐帧观测最近一次落库的时间与百分比。
+	// 内存快照每帧都实时更新；落库只为重启恢复，大号池下按时间/变化幅度节流，
+	// 避免把每个上游响应都变成一次数据库写入。
+	usageFramePersistedAt time.Time
+	usageFramePersisted5h float64
+	usageFramePersisted7d float64
 	// activated5hResetAt 是已经为其发送过「开窗」最小 /responses 的那个 Reset5hAt。
 	// 每个观测到的 5h 窗口最多激活一次（issue #581）。
 	activated5hResetAt time.Time
@@ -2418,11 +2424,143 @@ func (a *Account) ApplyUsageObservation(observedAt time.Time, apply func()) bool
 	return true
 }
 
+// TryApplyUsageObservation is the non-blocking variant used by connection-level
+// WS frame observers. It skips the observation when another goroutine is
+// already applying a usage observation (for example a preflight frame doing a
+// throttled DB write), so the WebSocket read pump is never stalled.
+func (a *Account) TryApplyUsageObservation(observedAt time.Time, apply func()) bool {
+	if a == nil || apply == nil {
+		return false
+	}
+	if !a.usageSyncMu.TryLock() {
+		return false
+	}
+	defer a.usageSyncMu.Unlock()
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+
+	a.mu.Lock()
+	if observedAt.Before(a.usageObservedAt) {
+		a.mu.Unlock()
+		return false
+	}
+	a.usageObservedAt = observedAt
+	a.mu.Unlock()
+
+	apply()
+	return true
+}
+
 // GetUsagePercent5h 获取 5h 用量百分比
 func (a *Account) GetUsagePercent5h() (float64, bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.UsagePercent5h, a.UsagePercent5hValid
+}
+
+// UsageFramePersistInterval is the default maximum cadence for persisting WS
+// frame observations. In-memory usage is updated on every frame; persistence
+// exists only so a restart does not begin from a badly stale snapshot.
+const UsageFramePersistInterval = 30 * time.Second
+
+// usageFramePersistMinDelta forces a write when the reported percentage has
+// moved this much since the last persisted observation, so a burst cannot hide
+// behind the interval. Threshold crossings and 100% always force a write.
+const usageFramePersistMinDelta = 5.0
+
+// ShouldPersistUsageFrame decides whether a WS usage-frame observation needs a
+// database write. The caller always applies the in-memory snapshot first; this
+// only throttles persistence for large pools.
+func (a *Account) ShouldPersistUsageFrame(now time.Time, pct5h float64, has5h bool, pct7d float64, has7d bool, interval time.Duration) bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if interval <= 0 {
+		interval = UsageFramePersistInterval
+	}
+	force := false
+	if has5h {
+		if pct5h >= 100 && a.usageFramePersisted5h < 100 {
+			force = true
+		}
+		if a.effectiveAutoPause5h > 0 {
+			threshold := a.effectiveAutoPause5h * 100
+			if pct5h >= threshold && a.usageFramePersisted5h < threshold {
+				force = true
+			}
+		}
+		if math.Abs(pct5h-a.usageFramePersisted5h) >= usageFramePersistMinDelta {
+			force = true
+		}
+	}
+	if has7d {
+		if pct7d >= 100 && a.usageFramePersisted7d < 100 {
+			force = true
+		}
+		if a.effectiveAutoPause7d > 0 {
+			threshold := a.effectiveAutoPause7d * 100
+			if pct7d >= threshold && a.usageFramePersisted7d < threshold {
+				force = true
+			}
+		}
+		if math.Abs(pct7d-a.usageFramePersisted7d) >= usageFramePersistMinDelta {
+			force = true
+		}
+	}
+	if !force && !a.usageFramePersistedAt.IsZero() && now.Sub(a.usageFramePersistedAt) < interval {
+		return false
+	}
+	a.usageFramePersistedAt = now
+	if has5h {
+		a.usageFramePersisted5h = pct5h
+	}
+	if has7d {
+		a.usageFramePersisted7d = pct7d
+	}
+	return true
+}
+
+// AccountLiveUsageSnapshot is a single-lock projection for the admin live poll.
+// It intentionally avoids GetSchedulerDebugSnapshot and other recomputing
+// getters, which are too expensive for a one-second cadence over a large page.
+type AccountLiveUsageSnapshot struct {
+	Status              string
+	UsingCredits        bool
+	UsagePercent5h      float64
+	UsagePercent5hValid bool
+	Reset5hAt           time.Time
+	UsageUpdatedAt5h    time.Time
+	UsagePercent7d      float64
+	UsagePercent7dValid bool
+	Reset7dAt           time.Time
+	UsageUpdatedAt      time.Time
+}
+
+// GetAccountLiveUsageSnapshot returns the runtime usage/status projection used
+// by the account list's live poll.
+func (a *Account) GetAccountLiveUsageSnapshot() AccountLiveUsageSnapshot {
+	if a == nil {
+		return AccountLiveUsageSnapshot{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	now := time.Now()
+	return AccountLiveUsageSnapshot{
+		Status:              a.runtimeStatusLocked(now),
+		UsingCredits:        a.usingCreditsLocked(now),
+		UsagePercent5h:      a.UsagePercent5h,
+		UsagePercent5hValid: a.UsagePercent5hValid,
+		Reset5hAt:           a.Reset5hAt,
+		UsageUpdatedAt5h:    a.UsageUpdatedAt5h,
+		UsagePercent7d:      a.UsagePercent7d,
+		UsagePercent7dValid: a.UsagePercent7dValid,
+		Reset7dAt:           a.Reset7dAt,
+		UsageUpdatedAt:      a.UsageUpdatedAt,
+	}
 }
 
 // Mark5hWindowActivated 记录已经为哪个 Reset5hAt 发送过开窗请求。
@@ -10890,15 +11028,24 @@ func (s *Store) ReportRequestFailure(acc *Account, kind string, latency time.Dur
 
 // PersistUsageSnapshot 持久化账号用量快照（7d + 5h）
 func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
-	if acc == nil {
+	s.PublishUsageSnapshot(acc, pct7d, time.Now(), true)
+}
+
+// PublishUsageSnapshot updates the in-memory usage snapshot and the scheduler.
+// persist=false skips the database write, used by the WS frame path where the
+// in-memory value must change immediately but persistence is throttled.
+func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt time.Time, persist bool) {
+	if acc == nil || s == nil {
 		return
 	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
 
-	now := time.Now()
-	acc.SetUsageSnapshot(pct7d, now)
+	acc.SetUsageSnapshot(pct7d, observedAt)
 	s.fastSchedulerUpdate(acc)
 
-	if s.db == nil {
+	if !persist || s.db == nil {
 		return
 	}
 
@@ -10908,7 +11055,7 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 		reset7dAt := acc.GetReset7dAt()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, now, acc.GetUsageUpdatedAt5h()); err != nil {
+		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, observedAt, acc.GetUsageUpdatedAt5h()); err != nil {
 			log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
 		}
 		return
@@ -10916,7 +11063,7 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, now); err != nil {
+	if err := s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, observedAt); err != nil {
 		log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
 	}
 }

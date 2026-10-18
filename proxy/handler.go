@@ -4688,6 +4688,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					parsed := gjson.ParseBytes(data)
 					eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+					ApplyCodexUsageEventFrame(h.store, account, eventType, parsed, time.Now())
 					ttftGuard.MarkProgress(eventType)
 					isFirstToken := isLooseFirstTokenResult(parsed)
 					if !ttftRecorded && isFirstToken {
@@ -5362,6 +5363,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				ApplyCodexUsageEventFrame(h.store, account, eventType, parsed, time.Now())
 
 				// TTFT: 记录第一个实际内容事件的时间
 				ttftGuard.MarkProgress(eventType)
@@ -5612,6 +5614,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				ApplyCodexUsageEventFrame(h.store, account, eventType, parsed, time.Now())
 				if eventType == "error" {
 					terminalFailurePayload = terminalUpstreamErrorPayload(data)
 					gotTerminal = true
@@ -7457,6 +7460,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			readErr = readSSEStreamWithContinuousRetryKeepalive(readCtx, resp.Body, func(sseEvent string, data []byte) bool {
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				ApplyCodexUsageEventFrame(h.store, account, eventType, parsed, time.Now())
 				if eventType == "response.failed" {
 					statusCode := classifyResponseFailedOutcome(data).logStatusCode
 					var incidentID string
@@ -7625,6 +7629,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				outputCollector.Add(data)
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				ApplyCodexUsageEventFrame(h.store, account, eventType, parsed, time.Now())
 				ttftGuard.MarkProgress(eventType)
 				if !ttftRecorded && isLooseFirstTokenResult(parsed) {
 					firstTokenMs = int(time.Since(start).Milliseconds())
@@ -8134,6 +8139,11 @@ type codexWindowUsage struct {
 	resetSec  float64
 	windowMin float64
 	valid     bool
+	// hasReset distinguishes an explicit reset (possibly "0", meaning the
+	// window resets now) from a payload that omitted reset information. A
+	// partial frame must not overwrite a known reset with "now" and disable
+	// the auto-pause fence.
+	hasReset bool
 }
 
 func parseCodexWindowUsage(usedStr, windowStr, resetStr string) codexWindowUsage {
@@ -8147,7 +8157,8 @@ func parseCodexWindowUsage(usedStr, windowStr, resetStr string) codexWindowUsage
 	if _, err := fmt.Sscanf(windowStr, "%f", &windowMin); err != nil || windowMin <= 0 {
 		return codexWindowUsage{}
 	}
-	if strings.TrimSpace(resetStr) != "" {
+	hasReset := strings.TrimSpace(resetStr) != ""
+	if hasReset {
 		if _, err := fmt.Sscanf(resetStr, "%f", &resetSec); err != nil {
 			resetSec = 0
 		}
@@ -8157,7 +8168,32 @@ func parseCodexWindowUsage(usedStr, windowStr, resetStr string) codexWindowUsage
 		windowMin: windowMin,
 		resetSec:  resetSec,
 		valid:     true,
+		hasReset:  hasReset,
 	}
+}
+
+// codexResetAfterSeconds returns the reset offset for one rate-limit window.
+// Upstreams have used both families: x-codex-<slot>-reset-after-seconds (relative)
+// and x-codex-<slot>-reset-at (absolute Unix seconds, the family the official
+// Codex client parses). Normalize the absolute form to a relative offset so the
+// existing snapshot code keeps one representation.
+func codexResetAfterSeconds(header http.Header, prefix string) string {
+	if raw := strings.TrimSpace(header.Get(prefix + "reset-after-seconds")); raw != "" {
+		return raw
+	}
+	raw := strings.TrimSpace(header.Get(prefix + "reset-at"))
+	if raw == "" {
+		return ""
+	}
+	var epoch int64
+	if _, err := fmt.Sscanf(raw, "%d", &epoch); err != nil || epoch <= 0 {
+		return ""
+	}
+	seconds := time.Until(time.Unix(epoch, 0)).Seconds()
+	if seconds < 0 {
+		seconds = 0
+	}
+	return strconv.FormatFloat(seconds, 'f', -1, 64)
 }
 
 func classifyCodex429Window(resp *http.Response, now time.Time) (codexRateLimitWindow, time.Time, bool) {
@@ -8168,12 +8204,12 @@ func classifyCodex429Window(resp *http.Response, now time.Time) (codexRateLimitW
 	primary := parseCodexWindowUsage(
 		resp.Header.Get("x-codex-primary-used-percent"),
 		resp.Header.Get("x-codex-primary-window-minutes"),
-		resp.Header.Get("x-codex-primary-reset-after-seconds"),
+		codexResetAfterSeconds(resp.Header, "x-codex-primary-"),
 	)
 	secondary := parseCodexWindowUsage(
 		resp.Header.Get("x-codex-secondary-used-percent"),
 		resp.Header.Get("x-codex-secondary-window-minutes"),
-		resp.Header.Get("x-codex-secondary-reset-after-seconds"),
+		codexResetAfterSeconds(resp.Header, "x-codex-secondary-"),
 	)
 
 	var exhausted []codexWindowUsage
@@ -8209,7 +8245,7 @@ func responseHasCodex5hHeaders(resp *http.Response) bool {
 	primary := parseCodexWindowUsage(
 		resp.Header.Get("x-codex-primary-used-percent"),
 		resp.Header.Get("x-codex-primary-window-minutes"),
-		resp.Header.Get("x-codex-primary-reset-after-seconds"),
+		codexResetAfterSeconds(resp.Header, "x-codex-primary-"),
 	)
 	if primary.valid && codexWindowType(primary.windowMin) == codexRateLimitWindow5h {
 		return true
@@ -8218,7 +8254,7 @@ func responseHasCodex5hHeaders(resp *http.Response) bool {
 	secondary := parseCodexWindowUsage(
 		resp.Header.Get("x-codex-secondary-used-percent"),
 		resp.Header.Get("x-codex-secondary-window-minutes"),
-		resp.Header.Get("x-codex-secondary-reset-after-seconds"),
+		codexResetAfterSeconds(resp.Header, "x-codex-secondary-"),
 	)
 	return secondary.valid && codexWindowType(secondary.windowMin) == codexRateLimitWindow5h
 }
@@ -8682,11 +8718,34 @@ func windowMinutesToCooldown(windowMinutes float64) time.Duration {
 
 // SyncCodexUsageState 解析 Codex 响应头并完成 7d / 5h 快照持久化与 premium 5h 提前限流。
 func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Response) CodexUsageSyncResult {
+	return syncCodexUsageState(store, account, resp, time.Now(), codexUsageSyncOptions{
+		persistUsageSnapshot: true,
+		clearAbsent5h:        true,
+	})
+}
+
+type codexUsageSyncOptions struct {
+	// persistUsageSnapshot=false keeps the in-memory/scheduler update but skips
+	// the DB write. WS frames use this for throttled persistence.
+	persistUsageSnapshot bool
+	// clearAbsent5h controls whether an authoritative observation that omits
+	// the 5h window clears a previous 5h snapshot. Per-turn WS frames may be
+	// partial, so they must not erase a valid window.
+	clearAbsent5h bool
+	// shouldPersistUsage, when set, is evaluated inside ApplyUsageObservation's
+	// ordering gate. That gate rejects stale observers, so the throttling state
+	// must not advance for an observation that will not be applied.
+	shouldPersistUsage func(pct5h float64, has5h bool, pct7d float64, has7d bool) bool
+}
+
+func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Response, observedAt time.Time, opts codexUsageSyncOptions) CodexUsageSyncResult {
 	result := CodexUsageSyncResult{}
 	if account == nil || resp == nil {
 		return result
 	}
-	observedAt := time.Now()
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
 	if store != nil {
 		planHeader := resp.Header.Get("x-codex-plan-type")
 		store.UpdateAccountPlanType(account, planHeader)
@@ -8732,21 +8791,30 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 	usageApplied := false
 	if observation.authoritative {
 		usageApplied = account.ApplyUsageObservation(observedAt, func() {
-			parsed := applyCodexUsageHeaderObservation(store, account, observation, observedAt)
+			parsed := applyCodexUsageHeaderObservation(store, account, observation, observedAt, opts.clearAbsent5h)
 			result.UsagePct7d = parsed.usagePct7d
 			result.HasUsage7d = parsed.hasUsage7d
 			result.Cleared5h = parsed.cleared5h
 			if store == nil {
 				return
 			}
+			persistUsage := opts.persistUsageSnapshot
+			if opts.shouldPersistUsage != nil {
+				persistUsage = opts.shouldPersistUsage(
+					observation.w5h.usedPct,
+					observation.w5h.valid,
+					observation.w7d.usedPct,
+					observation.w7d.valid,
+				)
+			}
 			if result.HasUsage7d {
-				store.PersistUsageSnapshot(account, result.UsagePct7d)
+				store.PublishUsageSnapshot(account, result.UsagePct7d, observedAt, persistUsage)
 				if result.UsagePct7d >= 100 {
 					result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
 				}
 			} else if result.Used5hHeaders {
-				store.PersistUsageSnapshot5hOnly(account)
-				result.Persisted5hOnly = true
+				store.PublishUsageSnapshot5hOnly(account, observedAt, persistUsage)
+				result.Persisted5hOnly = persistUsage
 			}
 		})
 	}
@@ -8791,7 +8859,7 @@ func parseCodexUsageHeaders(resp *http.Response, account *auth.Account) (float64
 	}
 	parsed := codexUsageHeaderParseResult{}
 	account.ApplyUsageObservation(observedAt, func() {
-		parsed = applyCodexUsageHeaderObservation(nil, account, observation, observedAt)
+		parsed = applyCodexUsageHeaderObservation(nil, account, observation, observedAt, true)
 	})
 	return parsed.usagePct7d, parsed.hasUsage7d
 }
@@ -8828,10 +8896,10 @@ func parseCodexUsageHeaderObservation(resp *http.Response) codexUsageHeaderObser
 	// 解析 primary 和 secondary 窗口
 	primaryUsedStr := resp.Header.Get("x-codex-primary-used-percent")
 	primaryWindowStr := resp.Header.Get("x-codex-primary-window-minutes")
-	primaryResetStr := resp.Header.Get("x-codex-primary-reset-after-seconds")
+	primaryResetStr := codexResetAfterSeconds(resp.Header, "x-codex-primary-")
 	secondaryUsedStr := resp.Header.Get("x-codex-secondary-used-percent")
 	secondaryWindowStr := resp.Header.Get("x-codex-secondary-window-minutes")
-	secondaryResetStr := resp.Header.Get("x-codex-secondary-reset-after-seconds")
+	secondaryResetStr := codexResetAfterSeconds(resp.Header, "x-codex-secondary-")
 
 	primary := parseCodexWindowUsage(primaryUsedStr, primaryWindowStr, primaryResetStr)
 	secondary := parseCodexWindowUsage(secondaryUsedStr, secondaryWindowStr, secondaryResetStr)
@@ -8855,18 +8923,23 @@ func parseCodexUsageHeaderObservation(resp *http.Response) codexUsageHeaderObser
 	return out
 }
 
-func applyCodexUsageHeaderObservation(store *auth.Store, account *auth.Account, observation codexUsageHeaderObservation, observedAt time.Time) codexUsageHeaderParseResult {
+func applyCodexUsageHeaderObservation(store *auth.Store, account *auth.Account, observation codexUsageHeaderObservation, observedAt time.Time, clearAbsent5h bool) codexUsageHeaderParseResult {
 	out := codexUsageHeaderParseResult{}
 	if observation.w5h.valid {
-		resetAt := observedAt.Add(time.Duration(observation.w5h.resetSec) * time.Second)
+		resetAt := account.GetReset5hAt()
+		if observation.w5h.hasReset {
+			resetAt = observedAt.Add(time.Duration(observation.w5h.resetSec) * time.Second)
+		}
 		account.SetUsageSnapshot5hAt(observation.w5h.usedPct, resetAt, observedAt)
-	} else if observation.authoritative {
+	} else if observation.authoritative && clearAbsent5h {
 		out.cleared5h = store.ClearAbsentUsageSnapshot5hAt(account, observedAt)
 	}
 
 	if observation.w7d.valid {
-		resetAt := observedAt.Add(time.Duration(observation.w7d.resetSec) * time.Second)
-		account.SetReset7dAt(resetAt)
+		if observation.w7d.hasReset {
+			resetAt := observedAt.Add(time.Duration(observation.w7d.resetSec) * time.Second)
+			account.SetReset7dAt(resetAt)
+		}
 		account.SetWindow7dSeconds(int64(observation.w7d.windowMin * 60))
 		account.SetUsagePercent7d(observation.w7d.usedPct)
 		out.usagePct7d = observation.w7d.usedPct
