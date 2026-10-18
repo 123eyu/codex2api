@@ -25,15 +25,21 @@ export function useAccountLiveState(
         return
       }
       controller?.abort()
-      controller = new AbortController()
+      const current = new AbortController()
+      controller = current
+      // A hung fetch must not stop the poll forever; abort it and let the next
+      // tick retry. The list reload remains the fallback for stale data.
+      const timeout = window.setTimeout(() => current.abort(), 5000)
       try {
         const response = await api.getAccountLiveState(
           idsKey.split(',').map(Number),
-          controller.signal,
+          current.signal,
         )
-        if (!stopped && !controller.signal.aborted) apply(response)
+        if (!stopped && !current.signal.aborted) apply(response)
       } catch {
         // The next tick retries; live counters must never disrupt the page.
+      } finally {
+        window.clearTimeout(timeout)
       }
       if (!stopped) timer = window.setTimeout(poll, 1000)
     }

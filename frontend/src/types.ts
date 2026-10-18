@@ -637,6 +637,9 @@ export interface AccountLiveStateResponse {
     usage_percent_7d?: number | null
     reset_7d_at?: ISODateString | null
     codex_usage_updated_at?: ISODateString | null
+    // 最近一次被应用的 WS 配额帧；旧后端不返回，仅用于观测帧摄入。
+    codex_usage_frame_at?: ISODateString
+    codex_usage_frame_kind?: string
   }>
   session_slot_buffer_enabled: boolean
 }

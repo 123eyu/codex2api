@@ -96,3 +96,43 @@ test("explicit null clears an invalid window", () => {
   assert.equal(merged[0].reset_5h_at, undefined);
   assert.equal(merged[0].codex_5h_usage_updated_at, undefined);
 });
+
+test("explicit null clears an invalid 7d window", () => {
+  const rows = [baseRow];
+  const merged = mergeAccountLiveState(rows, live({
+    usage_percent_7d: null,
+    reset_7d_at: null,
+    codex_usage_updated_at: null,
+  }));
+  assert.equal(merged[0].usage_percent_7d, null);
+  assert.equal(merged[0].reset_7d_at, undefined);
+  assert.equal(merged[0].codex_usage_updated_at, undefined);
+});
+
+test("missing status and credits fields keep the list values", () => {
+  const rows = [baseRow];
+  const payload = live();
+  delete payload.accounts["1"].status;
+  delete payload.accounts["1"].using_credits;
+  const merged = mergeAccountLiveState(rows, payload);
+  assert.equal(merged[0].status, "active");
+  assert.equal(merged[0].using_credits, false);
+});
+
+test("mixed rows only replace changed entries", () => {
+  const other = { ...baseRow, id: 2, usage_percent_7d: 20 };
+  const rows = [baseRow, other];
+  const payload = live({ usage_percent_7d: 35 });
+  payload.accounts["2"] = { ...payload.accounts["1"], usage_percent_7d: 20 };
+  const merged = mergeAccountLiveState(rows, payload);
+  assert.notEqual(merged[0], baseRow);
+  assert.equal(merged[1], other);
+});
+
+test("session slot buffer change is merged into rows", () => {
+  const rows = [baseRow];
+  const payload = live();
+  payload.session_slot_buffer_enabled = true;
+  const merged = mergeAccountLiveState(rows, payload);
+  assert.equal(merged[0].session_slot_buffer_enabled, true);
+});
