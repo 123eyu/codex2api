@@ -2750,7 +2750,7 @@ Image Studio 的管理端、门户和外部任务入口对显式 `WIDTHxHEIGHT` 
 
 管理端按客户端 IP 记录认证失败：10 分钟内 5 次失败后阻断 10 分钟，并返回 `429` 与 `Retry-After`。阻断在密钥比较前执行，因此期间正确密钥也会收到 `429`，共享出口的管理员需等待阻断过期。只有明确配置的可信反向代理才能提供可信客户端地址；不要把任意客户端提供的转发头视为身份。
 
-上游 HTTP 错误体最多读取 1 MiB 前缀；Responses/compact 直接聚合的成功 JSON 与 Grok namespace 非流式改写最多读取 64 MiB，超限成功 JSON 明确报错，不会作为截断 JSON 返回。新增 SSE 读取路径的单行上限为 8 MiB，Grok SSE 聚合还限制完整事件为 8 MiB，超限错误会向调用方传播。这些是本地资源边界，不代表更大的 Base64 图片或工具输出在上游协议中一定非法。
+Responses、Chat、compact、Images、原生 Gemini 及下游 Responses WS 的上游 HTTP 错误处理最多读取 1 MiB 前缀；Responses/compact 直接聚合的成功 JSON 与 Grok namespace 非流式改写最多读取 64 MiB，超限成功 JSON 明确报错，不会作为截断 JSON 返回。新增 SSE 读取路径的单行上限为 8 MiB，Grok SSE 聚合还限制完整事件为 8 MiB，超限错误会向调用方传播。这些是本地资源边界，不代表更大的 Base64 图片或工具输出在上游协议中一定非法，也不代表 OAuth 等其他 HTTP 客户端都复用此预算。
 
 ### API Key 模型周请求次数预算
 
