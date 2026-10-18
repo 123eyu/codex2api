@@ -187,7 +187,9 @@ test('save errors keep drafts and failed requests restore the manual action',asy
 async function assertConcurrencyInline(scope) {
  const concurrency = scope.locator('span[title*="当前正在处理 2 个请求"]').first()
  const detect = scope.getByRole('button', {name: '立即检测', exact: true})
+ await Promise.all([concurrency.waitFor(), detect.waitFor()])
  const [counter, action] = await Promise.all([concurrency.boundingBox(), detect.boundingBox()])
+ assert.ok(counter && action, 'concurrency and action must both be visible')
  assert.ok(Math.abs(counter.y + counter.height/2 - action.y - action.height/2) < 2, 'concurrency stays on the action row')
 }
 async function assertActionsFollowStatus(scope) {
