@@ -1543,7 +1543,7 @@
     "cleanBannedTitle": "Clear Banned Accounts",
     "cleanBannedDesc": "This clears all unauthorized status flags so those accounts can rejoin scheduling and testing.",
     "cleanRateLimitedTitle": "Clear Rate-Limited Accounts",
-    "cleanRateLimitedDesc": "This moves every rate-limited account in the pool to the recycle bin (restorable there), regardless of the current filter or page. Auto-paused accounts are not included and stay in the list.",
+    "cleanRateLimitedDesc": "This moves every rate-limited account in the pool to the recycle bin (restorable there), regardless of the current filter or page. Auto-paused accounts are included when their runtime status is rate-limited or usage_exhausted.",
     "cleanConfirm": "Confirm Cleanup",
     "cleanBannedProgressTitle": "Clearing banned accounts",
     "cleanBannedSuccess": "Banned account flags cleared",

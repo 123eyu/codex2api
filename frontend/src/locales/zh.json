@@ -1541,7 +1541,7 @@
     "cleanBannedTitle": "清理封禁账号",
     "cleanBannedDesc": "会清除所有 unauthorized 状态标记，让这些账号重新参与调度与测试。",
     "cleanRateLimitedTitle": "清理限流账号",
-    "cleanRateLimitedDesc": "会把全池处于限流状态的账号移入回收站（可在回收站恢复），不受当前筛选或分页影响；自动暂停的账号不在清理范围内，会保留。",
+    "cleanRateLimitedDesc": "会把全池处于限流状态的账号移入回收站（可在回收站恢复），不受当前筛选或分页影响；自动暂停的账号如果同时处于限流或 usage_exhausted 状态，也会被纳入清理范围。",
     "cleanConfirm": "确认清理",
     "cleanBannedProgressTitle": "正在清理封禁账号",
     "cleanBannedSuccess": "封禁账号状态已清理",
