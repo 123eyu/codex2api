@@ -90,6 +90,8 @@ func TestAdminAuthMiddlewareThrottlesFailedAttempts(t *testing.T) {
 	}
 	if rec := request("admin-secret"); rec.Code != http.StatusOK {
 		t.Fatalf("correct key during block returned %d, want 200", rec.Code)
+	} else if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("admin response Cache-Control = %q, want no-store", got)
 	}
 	if rec := request("wrong-key"); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("failure after successful login returned %d, want 401", rec.Code)
