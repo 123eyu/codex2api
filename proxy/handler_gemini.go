@@ -269,7 +269,7 @@ func (h *Handler) handleGeminiCountTokens(c *gin.Context, model string, rawBody 
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			errBody, _ := io.ReadAll(resp.Body)
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamErrorBodyBytes))
 			_ = resp.Body.Close()
 			lastStatusCode = resp.StatusCode
 			lastBody = errBody
@@ -541,7 +541,7 @@ func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawB
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			errBody, _ := io.ReadAll(resp.Body)
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamErrorBodyBytes))
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			_ = resp.Body.Close()
 			upstreamCancel()

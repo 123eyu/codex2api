@@ -251,7 +251,7 @@ Messages 的 `tool_use.input` 必须使用对象，因此自由文本工具输�
 
 OpenAI Responses 中转账号默认仍用 HTTP POST `/v1/responses`。账号设置 `responses_upstream_transport=websocket` 后，这个账号的 Responses 出站改为 WebSocket：地址由 Base URL 换成 `ws`/`wss`，路径仍是 `/v1/responses`，握手使用该账号的 API Key 和 `OpenAI-Beta: responses_websockets=2026-02-06`，上行帧为 `response.create`。这个开关只作用于 OpenAI Responses 中转账号，和全局 `codex_force_websocket` 无关；Grok、Antigravity、Claude 不会走这条连接。握手失败返回上游状态或传输错误，不会改回 HTTP。生图请求仍走 HTTP。连接按账号、Base URL 和 API Key 隔离；带 `previous_response_id` 时优先复用产出该响应的连接。客户端 `GET /v1/responses` 也会选中已打开该开关的中转账号。
 
-原生 WebSocket 入口为 `GET /v1/responses`。客户端每轮发送 `response.create`；当前网关明确拒绝 `response.append` 和官方 GPT-6 `response.steer`，返回 `status:400` 的 `unsupported_feature` WebSocket 错误帧，不会伪装成已完成的 steer。需要中途改向时，应等待当前轮结束后用 `previous_response_id` 发起新的 `response.create`。通过校验与 API Key 限制后，较新的同 API Key、同渠道/分组路由作用域、同会话请求会抢占仍在运行的旧请求，并先取消旧上游以释放账号与并发位。相同 `stream_id`（含缺省流）内 FIFO，不同独立流可并行；每连接最多 16 个活动轮次、32 个命名流。命名流事件和请求级错误带回 `stream_id`，命名流请求错误或抢占不会关闭其他健康流，缺省流保留原有协议错误关闭行为。上游连接池按流隔离；同一客户端连接可从另一流已提交的 `store:false` 响应分叉，仍须命中完整缓存并满足授权范围，且指向同一父响应时仍可能等待上游原连接租约。不同 API Key 或不同路由作用域不会互相取消。只有 `prompt_cache_key`、显式会话头、`previous_response_id`、turn state、专用 affinity key 或可稳定派生的内容会话存在时才启用，纯 API Key 兜底身份不会把无关请求合并。Redis 模式支持跨实例抢占，Memory 模式仅在当前进程内生效。
+原生 WebSocket 入口为 `GET /v1/responses`。客户端每轮发送 `response.create`；当前网关明确拒绝 `response.append` 和官方 GPT-6 `response.steer`，返回 `status:400` 的 `unsupported_feature` WebSocket 错误帧，不会伪装成已完成的 steer。需要中途改向时，应等待当前轮结束后用 `previous_response_id` 发起新的 `response.create`。通过校验与 API Key 限制后，较新的同 API Key、同渠道/分组路由作用域、同会话请求会抢占仍在运行的旧请求，并先取消旧上游以释放账号与并发位。相同 `stream_id`（含缺省流）内 FIFO，不同独立流可并行；每连接最多 16 个活动轮次、32 个命名流。每个 API Key 最多保留 64 条并发下游 WebSocket 连接，全局 4096 条；显式启用匿名访问时，匿名连接另按 IP 限制 16 条，超出返回 `503` 和 `Retry-After: 5`。命名流事件和请求级错误带回 `stream_id`，命名流请求错误或抢占不会关闭其他健康流，缺省流保留原有协议错误关闭行为。上游连接池按流隔离；同一客户端连接可从另一流已提交的 `store:false` 响应分叉，仍须命中完整缓存并满足授权范围，且指向同一父响应时仍可能等待上游原连接租约。不同 API Key 或不同路由作用域不会互相取消。只有 `prompt_cache_key`、显式会话头、`previous_response_id`、turn state、专用 affinity key 或可稳定派生的内容会话存在时才启用，纯 API Key 兜底身份不会把无关请求合并。Redis 模式支持跨实例抢占，Memory 模式仅在当前进程内生效。
 
 **响应示例:**
 
@@ -2822,6 +2822,26 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 
 - `global_rpm = 0`: 无限流
 - `global_rpm > 0`: 启用 RPM 限流
+
+### API Key 级窗口限额
+
+`limits.rpm`、`limits.rpd` 以及 cost/token 窗口在每次请求转发前检查。同一进程内另有原子准入计数；RPM 使用秒桶，RPD 使用滑动 24 小时计数。同一分钟内的 RPD 准入合并，在该桶最后一次准入满 24 小时后过期，因此最多保守多保留不到一分钟，不会提前释放额度。多实例部署时计数按副本独立，重启也会丢失进程内记录；持久历史检查仍依赖用量日志。准入表最多保留 8,192 个 Key；满表且没有可过期记录时，新 Key 返回 `503`，不会通过淘汰活跃计数来重置额度。
+
+批量生图在入队时只检查边界，不预留 RPM/RPD；每个实际图片调用各占一次准入。`202` 只代表任务已接收，执行时仍可能因额度不足失败，客户端必须检查任务终态。
+
+Responses（含直接 `/v1/responses/compact`）的 `input` 超过 20,000 条时在解析和改写前返回 `400`；Chat Completions 的 `messages` 保持已有 4,096 条校验上限，另有解析前守卫。两个字段的重复顶层键、大小写冲突或非规范拼写（如 `Messages`）均返回 `400`，避免前置检查与后续 JSON 解码选择不同字段。
+
+Image Studio 的管理端、门户和外部任务入口对显式 `WIDTHxHEIGHT` 限制为单边 16,384 像素、总像素 4,000 万；非法或超限目标在入队、外链下载及上游调用前返回 `400`，不会静默取消精确缩放。
+
+管理端按客户端 IP 记录认证失败：10 分钟内 5 次失败后阻断 10 分钟，并返回 `429` 与 `Retry-After`。阻断在密钥比较前执行，因此期间正确密钥也会收到 `429`，共享出口的管理员需等待阻断过期。只有明确配置的可信反向代理才能提供可信客户端地址；不要把任意客户端提供的转发头视为身份。
+
+认证失败表最多记录 4,096 个来源，保留有效的失败计数和封禁。满表且无过期条目时，未跟踪的新来源在密钥比较前收到 `429`，`Retry-After` 指向最早可释放的条目；已跟踪来源继续使用自己的计数和封禁，成功认证仍可清除该来源记录。
+
+OAuth 会话在兑换前一次性认领，公开回调、手动兑换和账号更新共享此状态。并发或重复兑换被拒绝；失败后需要重新发起授权，不重用可能已被上游消费的 code。回调处理期间轮询返回 `processing`，完成后返回 `completed` 并清理会话；回调页面与轮询结果只提供通用错误，脱敏诊断保留在服务端日志。
+
+自助提交账号的凭据、禁用状态、联系人备注、`self-service` 标签及凭据族在同一数据库事务中保存。保存失败不留下半成品账号，也不占用该账号身份；重新发起授权后可以再次提交。待审核账号在管理员批准前不进入调度池。
+
+Responses、Chat、compact、Images、原生 Gemini 及下游 Responses WS 的上游 HTTP 错误处理最多读取 1 MiB 前缀；Responses/compact 直接聚合的成功 JSON 与 Grok namespace 非流式改写最多读取 64 MiB，超限成功 JSON 明确报错，不会作为截断 JSON 返回。新增 SSE 读取路径的单行上限为 8 MiB，Grok SSE 聚合还限制完整事件为 8 MiB，超限错误会向调用方传播。这些是本地资源边界，不代表更大的 Base64 图片或工具输出在上游协议中一定非法，也不代表 OAuth 等其他 HTTP 客户端都复用此预算。
 
 ### API Key 模型周请求次数预算
 

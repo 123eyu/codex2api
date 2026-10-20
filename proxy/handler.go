@@ -68,6 +68,8 @@ type Handler struct {
 	apiKeyGateMu    sync.Mutex
 	promptRiskMu    sync.Mutex
 	apiKeyGate      *apiKeyConcurrencyLimiter
+	admissionOnce   sync.Once
+	admission       *apiKeyAdmissionLimiter
 	scopeUsageMu    sync.Mutex
 	scopeUsage      *apiKeyScopeUsageTracker
 	scopeDeltaInit  sync.Once
@@ -90,6 +92,9 @@ const (
 	apiKeyCountCacheNamespace = "api-key-count"
 	apiKeyCacheTTL            = 5 * time.Minute
 	apiKeyCountCacheTTL       = 30 * time.Second
+	// 上游错误体只用于识别错误类型和回传给客户端；限制上限，避免恶意或
+	// 失控上游用超大 body 把网关内存打满。
+	maxUpstreamErrorBodyBytes = 1 << 20
 )
 
 type apiKeyRuntimeRecord struct {
@@ -1792,6 +1797,30 @@ func readRawRequestBody(c *gin.Context) ([]byte, error) {
 	}
 	setRawRequestBody(c, body)
 	return body, nil
+}
+
+const (
+	maxResponsesInputItems    = 20000
+	maxChatCompletionMessages = 20000
+)
+
+// rejectExcessiveJSONArray bounds item counts before the body is unmarshaled
+// into maps. A 24MB body containing hundreds of thousands of tiny objects can
+// expand into hundreds of MB during parsing; the request memory budget only
+// counts raw bytes.
+func rejectExcessiveJSONArray(c *gin.Context, rawBody []byte, path string, max int) bool {
+	if c == nil || len(rawBody) == 0 || max <= 0 {
+		return false
+	}
+	if count := gjson.GetBytes(rawBody, path+".#").Int(); count > int64(max) {
+		api.SendError(c, api.NewAPIError(
+			api.ErrCodeInvalidRequest,
+			fmt.Sprintf("%s contains too many items (max %d)", path, max),
+			api.ErrorTypeInvalidRequest,
+		))
+		return true
+	}
+	return false
 }
 
 const ingressRequestBodyContextKey = "ingress_raw_body"
@@ -3874,6 +3903,12 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
 		return
 	}
+	if rejectDuplicateJSONField(c, rawBody, "input") {
+		return
+	}
+	if rejectExcessiveJSONArray(c, rawBody, "input", maxResponsesInputItems) {
+		return
+	}
 	if contextErr := responsesHTTPContextEnvelopeError(rawBody); contextErr != nil {
 		api.SendError(c, contextErr)
 		return
@@ -4406,7 +4441,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 				}
 				retryAfter := normalizedRetryAfter(resp.Header.Get("Retry-After"))
-				errBody, _ := readAllWithContinuousRetryKeepalive(readCtx, resp.Body)
+				errBody, _ := readUpstreamErrorBody(readCtx, resp.Body)
 				rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 				resp.Body.Close()
 				if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -4800,7 +4835,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 			} else {
 				var respBody []byte
-				respBody, readErr = readAllWithContinuousRetryKeepalive(readCtx, resp.Body)
+				respBody, readErr = readAllLimitedWithContinuousRetryKeepalive(readCtx, resp.Body, maxUpstreamResponseBodyBytes)
 				if readErr == nil {
 					if isEmptyIncompleteResponseBody(respBody) {
 						respBody = synthesizeEmptyIncompleteFailureBody(respBody)
@@ -5163,7 +5198,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 			}
 			retryAfter := normalizedRetryAfter(resp.Header.Get("Retry-After"))
-			errBody, _ := readAllWithContinuousRetryKeepalive(readCtx, resp.Body)
+			errBody, _ := readUpstreamErrorBody(readCtx, resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -5953,6 +5988,12 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
 		return
 	}
+	if rejectDuplicateJSONField(c, rawBody, "input") {
+		return
+	}
+	if rejectExcessiveJSONArray(c, rawBody, "input", maxResponsesInputItems) {
+		return
+	}
 	if contextErr := responsesHTTPContextEnvelopeError(rawBody); contextErr != nil {
 		api.SendError(c, contextErr)
 		return
@@ -6246,7 +6287,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
+				errBody, _ := readUpstreamErrorBody(c.Request.Context(), resp.Body)
 				rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 				resp.Body.Close()
 				if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -6324,7 +6365,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				return
 			}
 
-			respBody, readErr := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
+			respBody, readErr := readAllLimitedWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, maxUpstreamResponseBodyBytes)
 			resp.Body.Close()
 			if readErr != nil {
 				totalDuration := int(time.Since(start).Milliseconds())
@@ -6497,7 +6538,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
+			errBody, _ := readUpstreamErrorBody(c.Request.Context(), resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -6583,7 +6624,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		if compactViaResponses {
 			respBody, compactFailedPayload, readErr = collectCompactResponsesSSEWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 		} else {
-			respBody, readErr = readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
+			respBody, readErr = readAllLimitedWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, maxUpstreamResponseBodyBytes)
 		}
 		resp.Body.Close()
 		if readErr != nil {
@@ -6824,6 +6865,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	rawBody, err := readRawRequestBody(c)
 	if err != nil {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
+		return
+	}
+	if rejectDuplicateJSONField(c, rawBody, "messages") {
+		return
+	}
+	if rejectExcessiveJSONArray(c, rawBody, "messages", maxChatCompletionMessages) {
 		return
 	}
 	h.capturePromptRequestIngress(c, rawBody)
@@ -7221,7 +7268,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/chat/completions", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 			}
-			errBody, _ := readAllWithContinuousRetryKeepalive(readCtx, resp.Body)
+			errBody, _ := readUpstreamErrorBody(readCtx, resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolChat) {
