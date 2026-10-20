@@ -163,7 +163,9 @@ type Account struct {
 	UpstreamRequestIDHeader   string
 	mu                        sync.RWMutex
 	usageSyncMu               sync.Mutex
-	modelCatalogMu            sync.Mutex
+	// Snapshot writes serialize per account without blocking other accounts or frame ingestion.
+	usageSnapshotPersistMu sync.Mutex
+	modelCatalogMu         sync.Mutex
 	// grokRuntimeFactsMu serializes inference-response observations for this
 	// account. The sink performs generation-fenced database writes before it
 	// publishes any hard gate or routing invalidation back to memory.
@@ -279,11 +281,13 @@ type Account struct {
 	// 客户端压缩阈值。仅内存保留：值只能在收到响应后才知道，落库也救不了首个请求。
 	grokContextWindow int64
 	// grokFreeQuota 是免费额度耗尽 429 解析出的权威用量快照，随 credentials 落库。
-	grokFreeQuota  *GrokFreeQuotaSnapshot
-	Status         AccountStatus
-	CooldownUtil   time.Time
-	CooldownReason string // rate_limited / rate_limited_5h / responses_rate_limited / unauthorized / 空
-	ErrorMsg       string
+	grokFreeQuota               *GrokFreeQuotaSnapshot
+	Status                      AccountStatus
+	CooldownUtil                time.Time
+	CooldownReason              string // rate_limited / rate_limited_5h / responses_rate_limited / unauthorized / 空
+	usageCooldownPersistMu      sync.Mutex
+	usageCooldownPersistPending bool
+	ErrorMsg                    string
 
 	// 用量进度（从 Codex 响应头被动解析）
 	UsagePercent7d      float64 // 7d 窗口使用率 0-100+
@@ -298,6 +302,22 @@ type Account struct {
 	Reset5hAt           time.Time // 5h 窗口重置时间
 	UsageUpdatedAt      time.Time // 7d 用量快照刷新时间
 	UsageUpdatedAt5h    time.Time // 5h 用量快照刷新时间
+	// usageFramePersisted* 记录 WS 逐帧观测最近一次落库的时间与百分比。
+	// 内存快照每帧都实时更新；落库只为重启恢复，大号池下按时间/变化幅度节流，
+	// 避免把每个上游响应都变成一次数据库写入。
+	usageFramePersistedAt         time.Time
+	usageFramePersisted5h         float64
+	usageFramePersisted7d         float64
+	usageFramePersistPending      bool
+	usageFramePlanPending         bool
+	usageFrameObservationMu       sync.Mutex
+	usageFramePending             []usageFrameObservation
+	usageFrameObservationRunning  bool
+	usageFrameObservationOverflow bool
+	// usageFrameLastAt/Kind 记录最近一次被应用的 WS 配额帧，仅供管理端
+	// 验证帧摄入是否工作，不参与调度。
+	usageFrameLastAt   time.Time
+	usageFrameLastKind string
 	// activated5hResetAt 是已经为其发送过「开窗」最小 /responses 的那个 Reset5hAt。
 	// 每个观测到的 5h 窗口最多激活一次（issue #581）。
 	activated5hResetAt time.Time
@@ -334,6 +354,7 @@ type Account struct {
 	// 业务标志变化时落库，余额逐请求递减不能每次都写。
 	creditsPersistedKey      string
 	creditsPersistedFlagsKey string
+	creditsPersistMu         sync.Mutex
 	// resetCreditsProbedAt 记录最近一次成功 wham 用量探针的时间。
 	// 「主动重置次数」只能通过 wham 探针刷新（普通 /responses 流量不携带该字段），
 	// 因此用它独立判断重置次数是否过期，避免活跃账号因用量快照一直被流量刷新而长期不探针。
@@ -2345,32 +2366,113 @@ func (a *Account) GetUsagePercent7d() (float64, bool) {
 	return a.UsagePercent7d, a.UsagePercent7dValid
 }
 
+// cooldownMatchesReset reports whether an existing cooldown already ends at
+// the observed window reset. Repeated observations of the same exhausted
+// window (several in-flight turns, or a WHAM probe while the cooldown is
+// active) must not issue another DB write or inflate FailureStreak.
+func cooldownMatchesReset(cooldownUntil, resetAt time.Time) bool {
+	if resetAt.IsZero() {
+		return true
+	}
+	diff := cooldownUntil.Sub(resetAt)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= time.Minute
+}
+
+// usageCooldownTargetLocked keeps passive quota observations from weakening an
+// active cooldown. Preserve every existing reason rather than maintaining an
+// incomplete list of authoritative errors. A real Responses 429 also upgrades a
+// local usage cooldown so IgnoreUsageLimitStatus cannot bypass that rejection.
+// Authentication failures retain the higher priority used by the runtime cache.
+// The caller must hold a.mu.
+func (a *Account) usageCooldownTargetLocked(now, resetAt time.Time, reason string) (time.Time, string, bool) {
+	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
+		if reason == ResponsesRateLimitedCooldownReason && a.usageWindowCooldownLocked() {
+			if resetAt.Before(a.CooldownUtil) {
+				resetAt = a.CooldownUtil
+			}
+			return resetAt, reason, true
+		}
+		if !resetAt.After(a.CooldownUtil) ||
+			(a.CooldownReason == reason && cooldownMatchesReset(a.CooldownUtil, resetAt)) {
+			return a.CooldownUtil, a.CooldownReason, false
+		}
+		if reason != ResponsesRateLimitedCooldownReason || a.CooldownReason == "unauthorized" {
+			reason = a.CooldownReason
+		}
+	}
+	return resetAt, reason, true
+}
+
 // MarkUsage7dRateLimited marks an account as rate-limited when its active 7d
 // usage window is exhausted. A future reset time is preferred; missing reset
 // metadata falls back to a full 7d cooldown, while stale reset times are ignored.
 func (s *Store) MarkUsage7dRateLimited(acc *Account) bool {
-	if s == nil || acc == nil || acc.IsBanned() {
+	return s.markUsage7dRateLimited(acc, true)
+}
+
+func (s *Store) markUsage7dRateLimited(acc *Account, persist bool) bool {
+	if s == nil || acc == nil {
 		return false
 	}
-	if acc.SkipsUsageWindowLimits() {
+	acc.mu.Lock()
+	if acc.healthTierLocked() == HealthTierBanned || acc.skipsUsageWindowLimitsLocked() {
+		acc.mu.Unlock()
 		return false
 	}
 
-	pct, ok := acc.GetUsagePercent7d()
-	if !ok || pct < 100 {
+	if !acc.UsagePercent7dValid || acc.UsagePercent7d < 100 {
+		acc.mu.Unlock()
 		return false
 	}
 
-	duration := 7 * 24 * time.Hour
-	if resetAt := acc.GetReset7dAt(); !resetAt.IsZero() {
-		untilReset := time.Until(resetAt)
-		if untilReset <= 0 {
-			return false
+	now := time.Now()
+	resetAt := acc.Reset7dAt
+	if resetAt.IsZero() {
+		resetAt = now.Add(7 * 24 * time.Hour)
+	} else if !resetAt.After(now) {
+		acc.mu.Unlock()
+		return false
+	}
+
+	activeCooldown := acc.Status == StatusCooldown && now.Before(acc.CooldownUtil)
+	// With no reset metadata, an active cooldown already fences this account.
+	// Do not slide the fallback window forward on every observation.
+	if activeCooldown && acc.Reset7dAt.IsZero() {
+		acc.mu.Unlock()
+		if persist {
+			s.persistUsageCooldown(acc)
 		}
-		duration = untilReset
+		return true
+	}
+	until, reason, changed := acc.usageCooldownTargetLocked(now, resetAt, "rate_limited")
+	if !changed {
+		acc.mu.Unlock()
+		if persist {
+			s.persistUsageCooldown(acc)
+		}
+		return true
 	}
 
-	s.MarkCooldown(acc, duration, "rate_limited")
+	if activeCooldown {
+		acc.CooldownUtil = until
+	} else {
+		acc.LastRateLimitedAt = now
+		acc.LastFailureAt = now
+		acc.FailureStreak++
+		acc.SuccessStreak = 0
+		acc.setCooldownUntilLocked(until, reason)
+	}
+	acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
+	acc.usageCooldownPersistPending = true
+	acc.mu.Unlock()
+
+	s.fastSchedulerUpdate(acc)
+	if persist {
+		s.persistUsageCooldown(acc)
+	}
 	return true
 }
 
@@ -2418,11 +2520,184 @@ func (a *Account) ApplyUsageObservation(observedAt time.Time, apply func()) bool
 	return true
 }
 
+// TryApplyUsageObservation is the non-blocking variant used by connection-level
+// WS frame ingress. A false result lets ApplyUsageFrameObservation queue the
+// observation instead of blocking the WebSocket read pump.
+func (a *Account) TryApplyUsageObservation(observedAt time.Time, apply func()) bool {
+	if a == nil || apply == nil {
+		return false
+	}
+	if !a.usageSyncMu.TryLock() {
+		return false
+	}
+	defer a.usageSyncMu.Unlock()
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+
+	a.mu.Lock()
+	if observedAt.Before(a.usageObservedAt) {
+		a.mu.Unlock()
+		return false
+	}
+	a.usageObservedAt = observedAt
+	a.mu.Unlock()
+
+	apply()
+	return true
+}
+
 // GetUsagePercent5h 获取 5h 用量百分比
 func (a *Account) GetUsagePercent5h() (float64, bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.UsagePercent5h, a.UsagePercent5hValid
+}
+
+// UsageFramePersistInterval is the default maximum cadence for persisting WS
+// frame observations. In-memory usage is updated on every frame; persistence
+// exists only so a restart does not begin from a badly stale snapshot.
+const UsageFramePersistInterval = 30 * time.Second
+
+// usageFramePersistMinDelta forces a write when the reported percentage has
+// moved this much since the last persisted observation, so a burst cannot hide
+// behind the interval. Threshold crossings and 100% always force a write.
+const usageFramePersistMinDelta = 5.0
+
+// ShouldPersistUsageFrame decides whether a WS usage-frame observation needs a
+// database write. The caller always applies the in-memory snapshot first; this
+// only throttles persistence for large pools. The throttle state advances only
+// via MarkUsageFramePersisted after a successful write, so a failed write is
+// retried on the next frame instead of being suppressed for the interval.
+func (a *Account) ShouldPersistUsageFrame(now time.Time, pct5h float64, has5h bool, pct7d float64, has7d bool, interval time.Duration) bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	if interval <= 0 {
+		interval = UsageFramePersistInterval
+	}
+	force := false
+	if has5h {
+		if pct5h >= 100 && a.usageFramePersisted5h < 100 {
+			force = true
+		}
+		if a.effectiveAutoPause5h > 0 {
+			threshold := a.effectiveAutoPause5h * 100
+			if pct5h >= threshold && a.usageFramePersisted5h < threshold {
+				force = true
+			}
+		}
+		if math.Abs(pct5h-a.usageFramePersisted5h) >= usageFramePersistMinDelta {
+			force = true
+		}
+	}
+	if has7d {
+		if pct7d >= 100 && a.usageFramePersisted7d < 100 {
+			force = true
+		}
+		if a.effectiveAutoPause7d > 0 {
+			threshold := a.effectiveAutoPause7d * 100
+			if pct7d >= threshold && a.usageFramePersisted7d < threshold {
+				force = true
+			}
+		}
+		if math.Abs(pct7d-a.usageFramePersisted7d) >= usageFramePersistMinDelta {
+			force = true
+		}
+	}
+	if !force && !a.usageFramePersistedAt.IsZero() && now.Sub(a.usageFramePersistedAt) < interval {
+		return false
+	}
+	return true
+}
+
+// MarkUsageFramePersisted records a successful frame snapshot write.
+func (a *Account) MarkUsageFramePersisted(now time.Time, pct5h float64, has5h bool, pct7d float64, has7d bool) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.usageFramePersistedAt = now
+	if has5h {
+		a.usageFramePersisted5h = pct5h
+	}
+	if has7d {
+		a.usageFramePersisted7d = pct7d
+	}
+}
+
+// MarkUsageFrameObserved records the last WS quota frame ingested for the
+// account. The admin live projection exposes it so operators can tell
+// frame-driven updates apart from WHAM probes; it does not affect scheduling.
+func (a *Account) MarkUsageFrameObserved(kind string, at time.Time) {
+	if a == nil {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if at.Before(a.usageFrameLastAt) {
+		return
+	}
+	a.usageFrameLastAt = at
+	a.usageFrameLastKind = strings.TrimSpace(kind)
+}
+
+// AccountLiveUsageSnapshot is a single-lock projection for the admin live poll.
+// It intentionally avoids GetSchedulerDebugSnapshot and other recomputing
+// getters, which are too expensive for a one-second cadence over a large page.
+type AccountLiveUsageSnapshot struct {
+	Status              string
+	UsingCredits        bool
+	PlanType            string
+	CreditsValid        bool
+	Credits             CreditBalanceSnapshot
+	UsagePercent5h      float64
+	UsagePercent5hValid bool
+	Reset5hAt           time.Time
+	UsageUpdatedAt5h    time.Time
+	UsagePercent7d      float64
+	UsagePercent7dValid bool
+	Reset7dAt           time.Time
+	UsageUpdatedAt      time.Time
+	// UsageFrameLastAt/Kind record the last WS quota frame ingested for this
+	// account, as opposed to snapshots that only advance on WHAM probes.
+	UsageFrameLastAt   time.Time
+	UsageFrameLastKind string
+}
+
+// GetAccountLiveUsageSnapshot returns the runtime usage/status projection used
+// by the account list's live poll.
+func (a *Account) GetAccountLiveUsageSnapshot() AccountLiveUsageSnapshot {
+	if a == nil {
+		return AccountLiveUsageSnapshot{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	now := time.Now()
+	return AccountLiveUsageSnapshot{
+		Status:              a.runtimeStatusLocked(now),
+		UsingCredits:        a.usingCreditsLocked(now),
+		PlanType:            a.PlanType,
+		CreditsValid:        a.CreditsValid,
+		Credits:             a.creditSnapshotLocked(),
+		UsagePercent5h:      a.UsagePercent5h,
+		UsagePercent5hValid: a.UsagePercent5hValid,
+		Reset5hAt:           a.Reset5hAt,
+		UsageUpdatedAt5h:    a.UsageUpdatedAt5h,
+		UsagePercent7d:      a.UsagePercent7d,
+		UsagePercent7dValid: a.UsagePercent7dValid,
+		Reset7dAt:           a.Reset7dAt,
+		UsageUpdatedAt:      a.UsageUpdatedAt,
+		UsageFrameLastAt:    a.usageFrameLastAt,
+		UsageFrameLastKind:  a.usageFrameLastKind,
+	}
 }
 
 // Mark5hWindowActivated 记录已经为哪个 Reset5hAt 发送过开窗请求。
@@ -2568,6 +2843,18 @@ func (a *Account) SetRateLimitReachedType(kind string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.CreditsRateLimitReachedType = strings.TrimSpace(kind)
+}
+
+// GetRateLimitReachedType returns the last workspace hard-stop marker. WS
+// frames do not carry the per-response field, so the frame path preserves this
+// value until WHAM or an explicit header observation clears it.
+func (a *Account) GetRateLimitReachedType() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.CreditsRateLimitReachedType
 }
 
 // ApplySparseCreditsHeaders 应用普通 Codex 响应头携带的 sparse credits 观测信息。
@@ -2740,6 +3027,8 @@ func (s *Store) persistCreditSnapshot(acc *Account, flagsOnly bool) {
 	if s == nil || s.db == nil || acc == nil {
 		return
 	}
+	acc.creditsPersistMu.Lock()
+	defer acc.creditsPersistMu.Unlock()
 	acc.mu.Lock()
 	snap := acc.creditSnapshotLocked()
 	fullKey := creditBalanceKey(snap)
@@ -3595,6 +3884,7 @@ type Store struct {
 	armedBoundaryAt     atomic.Int64
 	lazyRefreshInFlight sync.Map
 	stopCh              chan struct{}
+	usageFramePersist   *usageFramePersistQueue
 	stopOnce            sync.Once
 	backgroundCtx       context.Context
 	backgroundCancel    context.CancelFunc
@@ -4249,6 +4539,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		backgroundRefreshWakeCh:    make(chan struct{}, 1),
 		boundaryProbeWakeCh:        make(chan struct{}, 1),
 		stopCh:                     make(chan struct{}),
+		usageFramePersist:          newUsageFramePersistQueue(),
 		backgroundCtx:              backgroundCtx,
 		backgroundCancel:           backgroundCancel,
 		schedulerMetrics:           newSchedulerRuntimeMetrics(),
@@ -4260,6 +4551,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		oauthRefreshLocks:          make(map[string]*oauthRefreshLocalLock),
 	}
 	s.maxConcurrency.Store(int64(settings.MaxConcurrency))
+	s.usageFramePersist.start(s)
 	s.testConcurrency.Store(int64(settings.TestConcurrency))
 	s.codexRequestCompression.Store(settings.CodexRequestCompression)
 	s.availability.Store(newAvailabilityHub())
@@ -4463,6 +4755,14 @@ func (s *Store) fastSchedulerUpdate(acc *Account) {
 		scheduler.Update(acc)
 	}
 	s.notifySchedulerAccountAvailability(acc, true)
+}
+
+// RefreshUsageFrameScheduler applies an in-memory usage snapshot to the fast
+// scheduler and wakes queued dispatchers without touching the database. The
+// connection-level WS frame path updates the snapshot on the read pump, so the
+// scheduler is refreshed separately from the persistence-throttled path.
+func (s *Store) RefreshUsageFrameScheduler(acc *Account) {
+	s.fastSchedulerUpdate(acc)
 }
 
 func (s *Store) fastSchedulerRemove(dbID int64) {
@@ -10066,16 +10366,7 @@ func (s *Store) markCooldownUntil(acc *Account, until time.Time, reason string, 
 	if updateScheduler {
 		s.fastSchedulerUpdate(acc)
 	}
-	s.setCachedAccountCooldown(acc.DBID, reason, until)
-
-	if s.db == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := s.db.SetCooldown(ctx, acc.DBID, reason, until); err != nil {
-		log.Printf("[账号 %d] 持久化冷却状态失败: %v", acc.DBID, err)
-	}
+	s.persistAccountCooldownState(acc, true, false)
 }
 
 // markCooldown 根据 exactDuration 选择自适应或精确时长并应用账号冷却。
@@ -10128,23 +10419,7 @@ func (s *Store) markCooldown(acc *Account, duration time.Duration, reason string
 	acc.setCooldownUntilLocked(until, reason)
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
-	s.setCachedAccountCooldown(acc.DBID, reason, until)
-
-	if s.db == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	var err error
-	if errorMsg != "" {
-		err = s.db.SetCooldownWithError(ctx, acc.DBID, reason, until, errorMsg)
-	} else {
-		err = s.db.SetCooldown(ctx, acc.DBID, reason, until)
-	}
-	if err != nil {
-		log.Printf("[账号 %d] 持久化冷却状态失败: %v", acc.DBID, err)
-	}
+	s.persistAccountCooldownState(acc, true, false)
 }
 
 func (s *Store) MarkModelCooldown(acc *Account, model string, duration time.Duration, reason string) ModelCooldown {
@@ -10548,17 +10823,7 @@ func (s *Store) MarkError(acc *Account, errorMsg string) {
 	acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
-	s.deleteCachedAccountCooldown(acc.DBID)
-
-	if s.db == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := s.db.SetError(ctx, acc.DBID, errorMsg); err != nil {
-		log.Printf("[账号 %d] 持久化错误状态失败: %v", acc.DBID, err)
-	}
+	s.persistAccountCooldownState(acc, true, false)
 }
 
 // ClearCooldown 清除账号冷却状态，并同步清理数据库
@@ -10594,17 +10859,7 @@ func (s *Store) ClearCooldown(acc *Account) {
 	acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
-	s.deleteCachedAccountCooldown(acc.DBID)
-
-	if s.db == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := s.db.ClearError(ctx, acc.DBID); err != nil {
-		log.Printf("[账号 %d] 清理账号状态失败: %v", acc.DBID, err)
-	}
+	s.persistAccountCooldownState(acc, true, true)
 }
 
 // ReleaseUsageWindowCooldownForCredits 在积分门打开后释放由本地用量窗口判罚产生的 cooldown。
@@ -10649,8 +10904,6 @@ func (s *Store) ClearUsageLimitCooldownSince(acc *Account, observedAt time.Time)
 		acc.mu.Unlock()
 		return false
 	}
-	reason := acc.CooldownReason
-	until := acc.CooldownUtil
 	acc.Status = StatusReady
 	acc.CooldownUtil = time.Time{}
 	acc.CooldownReason = ""
@@ -10663,24 +10916,7 @@ func (s *Store) ClearUsageLimitCooldownSince(acc *Account, observedAt time.Time)
 	acc.mu.Unlock()
 
 	s.fastSchedulerUpdate(acc)
-	s.deleteCachedAccountCooldown(acc.DBID)
-	acc.mu.RLock()
-	status := acc.Status
-	currentReason := acc.CooldownReason
-	currentUntil := acc.CooldownUtil
-	acc.mu.RUnlock()
-	if status == StatusCooldown && currentReason != "" {
-		s.setCachedAccountCooldown(acc.DBID, currentReason, currentUntil)
-	}
-	if s.db == nil {
-		return true
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if _, err := s.db.ClearCooldownIfReasonAndUntil(ctx, acc.DBID, reason, until); err != nil {
-		log.Printf("[账号 %d] 清理过期用量冷却状态失败: %v", acc.DBID, err)
-	}
+	s.persistAccountCooldownState(acc, true, false)
 	return true
 }
 
@@ -10732,14 +10968,7 @@ func (s *Store) confirmResponsesAvailable(acc *Account, requestStartedAt time.Ti
 	acc.mu.Unlock()
 
 	s.fastSchedulerUpdate(acc)
-	s.deleteCachedAccountCooldown(acc.DBID)
-	if s.db != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := s.db.ClearCooldown(ctx, acc.DBID); err != nil {
-			log.Printf("[账号 %d] Responses 成功后清理用量限流冷却失败: %v", acc.DBID, err)
-		}
-	}
+	s.persistAccountCooldownState(acc, true, false)
 	return true
 }
 
@@ -10784,17 +11013,7 @@ func (s *Store) RecordManualTestSuccess(acc *Account, latency time.Duration) {
 	acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
-	s.deleteCachedAccountCooldown(acc.DBID)
-
-	if s.db == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := s.db.ClearError(ctx, acc.DBID); err != nil {
-		log.Printf("[账号 %d] 清理账号测试成功状态失败: %v", acc.DBID, err)
-	}
+	s.persistAccountCooldownState(acc, true, true)
 }
 
 // ReportRequestSuccess 记录一次成功请求，用于动态调度评分
@@ -10890,16 +11109,25 @@ func (s *Store) ReportRequestFailure(acc *Account, kind string, latency time.Dur
 
 // PersistUsageSnapshot 持久化账号用量快照（7d + 5h）
 func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
-	if acc == nil {
-		return
+	s.PublishUsageSnapshot(acc, pct7d, time.Now(), true)
+}
+
+// PublishUsageSnapshot updates the in-memory usage snapshot and the scheduler.
+// persist=false skips the database write, used by the WS frame path where the
+// in-memory value must change immediately but persistence is throttled.
+func (s *Store) PublishUsageSnapshot(acc *Account, pct7d float64, observedAt time.Time, persist bool) bool {
+	if acc == nil || s == nil {
+		return false
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
 	}
 
-	now := time.Now()
-	acc.SetUsageSnapshot(pct7d, now)
+	acc.SetUsageSnapshot(pct7d, observedAt)
 	s.fastSchedulerUpdate(acc)
 
-	if s.db == nil {
-		return
+	if !persist || s.db == nil {
+		return false
 	}
 
 	// 如果有 5h 数据，使用完整存储
@@ -10908,17 +11136,34 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 		reset7dAt := acc.GetReset7dAt()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, now, acc.GetUsageUpdatedAt5h()); err != nil {
+		err := s.withUsageSnapshotWrite(acc, func() error {
+			return s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, observedAt, acc.GetUsageUpdatedAt5h())
+		})
+		if err != nil {
 			log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
+			return false
 		}
-		return
+		return true
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, now); err != nil {
+	err := s.withUsageSnapshotWrite(acc, func() error {
+		return s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, observedAt)
+	})
+	if err != nil {
 		log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
+		return false
 	}
+	return true
+}
+
+// withUsageSnapshotWrite serializes credential snapshot writes with the async
+// frame-persist worker.
+func (s *Store) withUsageSnapshotWrite(acc *Account, fn func() error) error {
+	acc.usageSnapshotPersistMu.Lock()
+	defer acc.usageSnapshotPersistMu.Unlock()
+	return fn()
 }
 
 // UpdateAccountSubscriptionExpiresAt persists the latest subscription expiration observed from upstream.
@@ -11026,6 +11271,15 @@ func (s *Store) ClearStaleSubscriptionExpiresAt(acc *Account) bool {
 
 // UpdateAccountPlanType persists the latest Codex plan type observed from upstream headers.
 func (s *Store) UpdateAccountPlanType(acc *Account, planType string) bool {
+	return s.updateAccountPlanType(acc, planType, true)
+}
+
+// ObserveUsageFramePlan updates runtime routing without writing on a WS reader.
+func (s *Store) ObserveUsageFramePlan(acc *Account, planType string) bool {
+	return s.updateAccountPlanType(acc, planType, false)
+}
+
+func (s *Store) updateAccountPlanType(acc *Account, planType string, persist bool) bool {
 	if s == nil || acc == nil {
 		return false
 	}
@@ -11038,6 +11292,7 @@ func (s *Store) UpdateAccountPlanType(acc *Account, planType string) bool {
 	changed := acc.PlanType != plan
 	if changed {
 		acc.PlanType = plan
+		acc.usageFramePlanPending = true
 		acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
 	}
 	acc.mu.Unlock()
@@ -11046,13 +11301,11 @@ func (s *Store) UpdateAccountPlanType(acc *Account, planType string) bool {
 		s.fastSchedulerUpdate(acc)
 	}
 
-	if s.db == nil || !changed {
+	if s.db == nil || !persist {
 		return changed
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := s.db.UpdateCredentials(ctx, acc.DBID, map[string]interface{}{"plan_type": plan}); err != nil {
+	if err := s.withUsageSnapshotWrite(acc, func() error { return s.persistUsageFramePlan(acc) }); err != nil {
 		log.Printf("[账号 %d] 持久化 plan_type 失败: %v", acc.DBID, err)
 	}
 	return changed
@@ -11706,12 +11959,7 @@ func (s *Store) parallelRecoveryProbe(ctx context.Context) {
 					}
 					account.mu.Unlock()
 					// 清理数据库冷却状态
-					s.deleteCachedAccountCooldown(account.DBID)
-					if s.db != nil {
-						clearCtx, clearCancel := context.WithTimeout(ctx, 2*time.Second)
-						_ = s.db.ClearCooldown(clearCtx, account.DBID)
-						clearCancel()
-					}
+					s.persistAccountCooldownState(account, true, false)
 				}
 			}
 		}(acc)

@@ -87,6 +87,8 @@ Codex2API 采用三层配置架构：
 | `USE_WEBSOCKET` | 否 | `false` | 旧版开关；未设置 `CODEX_UPSTREAM_TRANSPORT` 时，`true` 等价于 `CODEX_UPSTREAM_TRANSPORT=ws` |
 | `CODEX_TRANSPORT_MODE` | 否 | `standard` | Codex HTTP transport：默认标准 Go TLS；`utls_chrome` 可回滚旧 Chrome uTLS 行为 |
 | `CODEX_WS_SEND_USER_AGENT` | 否 | `true` | WS 握手是否发送 Codex `User-Agent`/`Version`；设为 `false` 可关闭 |
+| `CODEX_WS_USAGE_FRAME_PERSIST_SECONDS` | 否 | `30` | WS 逐帧用量快照落库的最小间隔（秒），正整数，重启生效。内存快照每帧更新；落库由每账号合并的异步 worker 执行，不阻塞上游响应流；跨自动暂停阈值、5pp 变化或 100% 时仍强制落库。大号池可按数据库承压调大 |
+| `CODEX_WS_USAGE_FRAME_INGEST` | 否 | `true` | 是否消费 WS 上游每轮及终态后连接级 `codex.rate_limits` / `codex.response.metadata` 配额帧；设为 `false` 时回退到 WHAM 探针与 HTTP 响应头，重启生效 |
 | `CODEX_SESSION_AFFINITY_TTL` | 否 | `1h` | Codex 会话到账号/代理的黏性 TTL，支持 `1h`、`90m` 或秒数 |
 | `CODEX_COMPACTION_AFFINITY_TTL` | 否 | `168h` | 加密压缩状态的来源亲和 TTL。缓存仅保存密文的 SHA-256 摘要、来源账号和兼容域；已知状态不会跨 Codex 官方、不同 Responses 中转或 Grok 上游流转 |
 | `CODEX_FINGERPRINT_DEBUG` | 否 | `false` | 输出脱敏指纹策略诊断日志，不记录 token |
@@ -98,7 +100,11 @@ Codex2API 采用三层配置架构：
 | `DOWNSTREAM_HTTP_KEEPALIVE_INTERVAL` | 否 | `30s` | 下游 HTTP/SSE 保活周期，使用 Go duration；`0` 关闭。流式端点从首个心跳起建立 SSE 200，发送注释或 Messages ping；非流式端点发送 HTTP 102 |
 | `DOWNSTREAM_WS_KEEPALIVE_INTERVAL` | 否 | `45s` | 下游 WebSocket Ping 周期，使用 Go duration；`0` 关闭。覆盖 Responses、Realtime 与 Live Sideband |
 
+配额帧读路径只更新内存和调度器；用量、credits、套餐及冷却的写库共用后台合并路径。并发观测锁争用时，每账号最多保留 64 个待应用 partial 帧，按原始时间顺序处理；溢出保留最新的有界尾部，并通过已有探针补齐权威快照。停机丢弃未完成的缓存写，重启后由探针重建。冷却写失败会在后续观测重试，不重复计入失败次数。
+
 > `CODEX_UPSTREAM_TRANSPORT` 只控制 HTTP 入站请求转发到 Codex 上游时使用 `http` 还是 `ws`。客户端侧 WebSocket 入口独立可用：使用 `GET ws://<host>/v1/responses` 建连，首帧发送 `response.create` JSON，服务端会通过 Codex 上游 WS 返回 Responses 事件帧。
+>
+> WS 传输下，服务端会消费上游每轮下发的 `codex.rate_limits` 帧，以及响应终态后 1–2 秒补发的连接级用量帧，实时更新账号的 5h/7d 用量快照；自动暂停阈值不再需要等待 WHAM 探针周期即可生效。这些帧随对话本身下发，不产生额外上游请求。
 
 ### 数据库配置
 
