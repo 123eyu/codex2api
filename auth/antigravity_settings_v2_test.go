@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestAntigravitySettings_V2DefaultsAndNormalization 覆盖 V2 设置项的缺省填充、范围钳位与往返序列化保真。
 func TestAntigravitySettings_V2DefaultsAndNormalization(t *testing.T) {
 	raw := `{}`
 	var s AntigravitySettings
@@ -59,6 +60,7 @@ func TestAntigravitySettings_V2DefaultsAndNormalization(t *testing.T) {
 	}
 }
 
+// TestApplyConfiguredAntigravitySettingsRevisionRollback 覆盖设置版本回退检测：基线自适应重建与强制应用。
 func TestApplyConfiguredAntigravitySettingsRevisionRollback(t *testing.T) {
 	previous := ConfiguredAntigravitySettings()
 	previousBaseline := appliedAntigravityConfigRevision.Load()
@@ -103,6 +105,7 @@ func TestApplyConfiguredAntigravitySettingsRevisionRollback(t *testing.T) {
 	}
 }
 
+// TestAntigravityQuotaFieldsLostDetectsMixedVersionDamage 覆盖多实例混布时的丢失字段探测与深拷贝隔离。
 func TestAntigravityQuotaFieldsLostDetectsMixedVersionDamage(t *testing.T) {
 	gateOff := false
 	interval := 15

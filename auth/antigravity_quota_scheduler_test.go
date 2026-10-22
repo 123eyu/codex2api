@@ -46,6 +46,7 @@ type antigravityQuotaHarness struct {
 	onRefresh func(*Account)
 }
 
+// newAntigravityQuotaHarness 构造默认相位的调度测试套件实例。
 func newAntigravityQuotaHarness(t *testing.T, accounts ...*Account) *antigravityQuotaHarness {
 	t.Helper()
 	return newAntigravityQuotaHarnessWithPhase(t, time.Duration(0), false, accounts...)
@@ -79,6 +80,7 @@ func newAntigravityQuotaHarnessWithPhase(t *testing.T, theta time.Duration, fixe
 	return h
 }
 
+// refresh 模拟单次配额刷新操作，记录调用时标并触发可选的回调。
 func (h *antigravityQuotaHarness) refresh(_ context.Context, acc *Account) error {
 	h.mu.Lock()
 	h.calls = append(h.calls, antigravityQuotaCall{dbID: acc.DBID, at: h.clock.Now()})
@@ -151,12 +153,14 @@ func (h *antigravityQuotaHarness) advance(steps int, step time.Duration) {
 	}
 }
 
+// setRefreshErr 设置后续刷新模拟调用的预期返回错误。
 func (h *antigravityQuotaHarness) setRefreshErr(err error) {
 	h.mu.Lock()
 	h.refreshErr = err
 	h.mu.Unlock()
 }
 
+// callsFor 筛选指定账号 ID 发生的所有刷新调用记录。
 func (h *antigravityQuotaHarness) callsFor(dbID int64) []antigravityQuotaCall {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -169,6 +173,7 @@ func (h *antigravityQuotaHarness) callsFor(dbID int64) []antigravityQuotaCall {
 	return out
 }
 
+// calledIDs 按调用顺序返回被刷新的账号 ID 列表。
 func (h *antigravityQuotaHarness) calledIDs() []int64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -179,6 +184,7 @@ func (h *antigravityQuotaHarness) calledIDs() []int64 {
 	return out
 }
 
+// totalCalls 返回当前记录的总刷新调用次数。
 func (h *antigravityQuotaHarness) totalCalls() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -590,4 +596,5 @@ func TestAntigravityQuotaSchedulerResetsPendingOnReenable(t *testing.T) {
 	}
 }
 
+// ptr 返回指向给定布尔值的指针辅助函数。
 func ptr(v bool) *bool { return &v }

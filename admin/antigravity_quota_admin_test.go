@@ -30,6 +30,7 @@ func callClearAntigravityQuota(t *testing.T, handler *Handler, body string) (int
 	return recorder.Code, recorder.Body.String()
 }
 
+// TestAdmin_ClearAntigravityQuotaAPI 断言单账号清除配额事实接口成功递增 epoch 并清空门禁。
 func TestAdmin_ClearAntigravityQuotaAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := newTestAdminDB(t)
@@ -91,6 +92,7 @@ func TestAdmin_ClearAntigravityQuotaAPI(t *testing.T) {
 	}
 }
 
+// TestAdmin_ClearAntigravityQuotaAPIRejectsInvalidBatches 断言空批量或超出 100 限制的请求被 400 拒绝且不推进纪元。
 func TestAdmin_ClearAntigravityQuotaAPIRejectsInvalidBatches(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := newTestAdminDB(t)
@@ -126,6 +128,7 @@ func TestAdmin_ClearAntigravityQuotaAPIRejectsInvalidBatches(t *testing.T) {
 	}
 }
 
+// TestAdmin_ClearAntigravityQuotaAPIRejectsNonAntigravityAccount 断言非 Antigravity 渠道账号被 400 拦截且零副作用。
 func TestAdmin_ClearAntigravityQuotaAPIRejectsNonAntigravityAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := newTestAdminDB(t)
@@ -149,6 +152,7 @@ func TestAdmin_ClearAntigravityQuotaAPIRejectsNonAntigravityAccount(t *testing.T
 	}
 }
 
+// TestAdmin_ClearAntigravityQuotaRouteRegistered 断言 /api/admin/accounts/antigravity/quota/clear 路由正确挂载。
 func TestAdmin_ClearAntigravityQuotaRouteRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := newTestAdminDB(t)

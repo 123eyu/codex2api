@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+// TestStore_DispatchQuotaGateLinearizationAndSessionBinding 断言硬门禁线性化拦截、
+// 新请求借号重绑（D4=C）、续链保留绑定与止血开关放行。
 func TestStore_DispatchQuotaGateLinearizationAndSessionBinding(t *testing.T) {
 	// 生产选号路径以 time.Now() 求值门禁，测试事实必须以「当前时刻」为观测基准，
 	// 否则 resetAt/TTL 相对真实时钟滚动，断言会随时钟漂移而失真。
@@ -85,6 +87,8 @@ func TestStore_DispatchQuotaGateLinearizationAndSessionBinding(t *testing.T) {
 	store.Release(selectedAfterKillSwitch)
 }
 
+// TestStore_DispatchQuotaGateLinearizationBlockReason 断言类型化阻断原因上浮：
+// known_zero 与 stale_zero 统一归为 quota_exhausted，且不冒充上游用量受限。
 func TestStore_DispatchQuotaGateLinearizationBlockReason(t *testing.T) {
 	now := time.Now().UTC()
 	zero := 0.0

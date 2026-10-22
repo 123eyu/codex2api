@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// TestRescheduleDebouncer_CoalescesEvents 断言静默窗内连续事件正确合并并在 max_wait 强制结算。
 func TestRescheduleDebouncer_CoalescesEvents(t *testing.T) {
 	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	clk := NewFakeClock(start)
@@ -36,6 +37,7 @@ func TestRescheduleDebouncer_CoalescesEvents(t *testing.T) {
 	debouncer.Stop()
 }
 
+// TestRescheduleDebouncer_StopPreventsExecution 断言防抖器 Stop 后放弃未决事件且不执行回调。
 func TestRescheduleDebouncer_StopPreventsExecution(t *testing.T) {
 	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	clk := NewFakeClock(start)

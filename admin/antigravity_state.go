@@ -139,6 +139,8 @@ func antigravityAuthKindFromRow(row *database.AccountRow) string {
 	return auth.AntigravityAuthKindOAuth
 }
 
+// antigravityQuotaEpochFromRow 从账号持久化凭据中提取 antigravity_quota_epoch 整型纪元；
+// 缺失、无效或负数时均归一为 0。
 func antigravityQuotaEpochFromRow(row *database.AccountRow) int64 {
 	if row == nil {
 		return 0

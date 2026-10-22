@@ -1977,6 +1977,8 @@ type antigravityStoreSyncCoordinator interface {
 	SyncAntigravityAccountForAdmin(ctx context.Context, accountID int64) error
 }
 
+// antigravityStoreCoordinator 尝试从 store 提取 antigravityStoreSyncCoordinator 接口实现；
+// 未装配或类型不匹配时返回 nil, false。
 func antigravityStoreCoordinator(store *auth.Store) (antigravityStoreSyncCoordinator, bool) {
 	if store == nil {
 		return nil, false
@@ -2036,6 +2038,8 @@ func (h *Handler) refreshAntigravityAccountViaStore(ctx context.Context, id int6
 	return item, true
 }
 
+// refreshAntigravityAccount 执行单个 Antigravity 账号的刷新：优先走 Store 协调器统一入口，
+// 协调器未装配时平滑回退到控制面直连同步路径。
 func (h *Handler) refreshAntigravityAccount(ctx context.Context, id int64) antigravityRefreshItem {
 	if item, handled := h.refreshAntigravityAccountViaStore(ctx, id); handled {
 		return item

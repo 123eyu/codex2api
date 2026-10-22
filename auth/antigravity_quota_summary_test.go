@@ -45,6 +45,8 @@ func antigravityQuotaFactsForTest(t *testing.T, raw string) map[string]any {
 	return doc
 }
 
+// TestRefreshAntigravityQuotaSummaryPersistsAndPublishes 验证单账号配额刷新成功完成预约、
+// 远程获取、合并与提交，并正确推进运行时投影而不触碰 OAuth 令牌。
 func TestRefreshAntigravityQuotaSummaryPersistsAndPublishes(t *testing.T) {
 	var summaryCalls atomic.Int32
 	var tokenCalls atomic.Int32
@@ -113,6 +115,8 @@ func TestRefreshAntigravityQuotaSummaryPersistsAndPublishes(t *testing.T) {
 	}
 }
 
+// TestRefreshAntigravityQuotaSummaryEmptyResponseKeepsPrevious 验证空配额响应返回 Incomplete 错误，
+// 且原有持久化配额事实保持不变（不推进成功，不洗新时标）。
 func TestRefreshAntigravityQuotaSummaryEmptyResponseKeepsPrevious(t *testing.T) {
 	var body atomic.Value
 	body.Store(antigravityQuotaSummaryBody(time.Now().UTC().Add(2 * time.Hour)))
@@ -166,6 +170,7 @@ func TestRefreshAntigravityQuotaSummaryEmptyResponseKeepsPrevious(t *testing.T) 
 	}
 }
 
+// TestRefreshAntigravityQuotaSummarySkipsDisabledAccount 验证禁用账号在入口处直接被拦截，不发生任何远程网络请求。
 func TestRefreshAntigravityQuotaSummarySkipsDisabledAccount(t *testing.T) {
 	var summaryCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -342,6 +347,7 @@ type antigravityQuotaAuthFixture struct {
 	lastSummaryAuth   atomic.Value
 }
 
+// newAntigravityQuotaAuthFixture 构造用于鉴权刷新与重试测试的仿真上游服务器。
 func newAntigravityQuotaAuthFixture(t *testing.T, newToken string, summaryAlwaysUnauthorized bool) *antigravityQuotaAuthFixture {
 	t.Helper()
 	fixture := &antigravityQuotaAuthFixture{newToken: newToken, summaryAlwaysUnauthorized: summaryAlwaysUnauthorized}
@@ -351,11 +357,13 @@ func newAntigravityQuotaAuthFixture(t *testing.T, newToken string, summaryAlways
 	return fixture
 }
 
+// lastSummaryAuthorization 获取上一次配额请求收到的 Authorization 头部信息。
 func (f *antigravityQuotaAuthFixture) lastSummaryAuthorization() string {
 	value, _ := f.lastSummaryAuth.Load().(string)
 	return value
 }
 
+// handle 模拟上游端点鉴权分支逻辑。
 func (f *antigravityQuotaAuthFixture) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	authorized := r.Header.Get("Authorization") == "Bearer "+f.newToken

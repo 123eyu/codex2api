@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+// TestComputeQuotaPressure_Scenarios 覆盖配额压力计算的典型场景：双窗口均值、
+// absent 省略、models 回退、权威中性分、过期桶兜底与最紧桶选择。
 func TestComputeQuotaPressure_Scenarios(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 

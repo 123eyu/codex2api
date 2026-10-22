@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// TestAntigravityQuotaSnapshot_V2SchemaAndCompatibility 覆盖 V2 快照格式升级与对历史单精度快照的反序列化兼容。
 func TestAntigravityQuotaSnapshot_V2SchemaAndCompatibility(t *testing.T) {
 	legacyJSON := `{"groups":[{"display_name":"Weekly","buckets":[{"window":"weekly","remaining_fraction":0.0}]}]}`
 	var snap AntigravityQuotaSnapshot

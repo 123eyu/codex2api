@@ -24,16 +24,26 @@ type Clock interface {
 // RealClock 是基于 time 包的真实时钟实现。
 type RealClock struct{}
 
-func (RealClock) Now() time.Time                  { return time.Now() }
-func (RealClock) Sleep(d time.Duration)           { time.Sleep(d) }
+// Now 返回真实时钟的当前本地时间。
+func (RealClock) Now() time.Time { return time.Now() }
+
+// Sleep 挂起当前协程指定时长。
+func (RealClock) Sleep(d time.Duration) { time.Sleep(d) }
+
+// Since 返回指定时刻距今流逝的时长。
 func (RealClock) Since(t time.Time) time.Duration { return time.Since(t) }
+
+// Until 返回当前时刻距目标时间尚需的时长。
 func (RealClock) Until(t time.Time) time.Duration { return time.Until(t) }
-func (RealClock) NewTimer(d time.Duration) Timer  { return &realTimer{Timer: time.NewTimer(d)} }
+
+// NewTimer 创建并返回基于真实时钟的 Timer 适配器实例。
+func (RealClock) NewTimer(d time.Duration) Timer { return &realTimer{Timer: time.NewTimer(d)} }
 
 type realTimer struct {
 	*time.Timer
 }
 
+// C 返回真实定时器的到期通道。
 func (r *realTimer) C() <-chan time.Time {
 	return r.Timer.C
 }
@@ -49,10 +59,12 @@ type fakeTimer struct {
 	active   bool
 }
 
+// C 返回假定时器的触发事件通道。
 func (ft *fakeTimer) C() <-chan time.Time {
 	return ft.ch
 }
 
+// Stop 停止假定时器并报告此前是否处于活跃状态。
 func (ft *fakeTimer) Stop() bool {
 	ft.clk.mu.Lock()
 	defer ft.clk.mu.Unlock()
@@ -61,6 +73,7 @@ func (ft *fakeTimer) Stop() bool {
 	return wasActive
 }
 
+// Reset 重置假定时器的到期时刻并重新激活。
 func (ft *fakeTimer) Reset(d time.Duration) bool {
 	ft.clk.mu.Lock()
 	defer ft.clk.mu.Unlock()
@@ -82,24 +95,29 @@ func NewFakeClock(initial time.Time) *FakeClock {
 	return &FakeClock{now: initial}
 }
 
+// Now 返回假时钟记录的当前模拟时刻。
 func (fc *FakeClock) Now() time.Time {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	return fc.now
 }
 
+// Sleep 在假时钟上通过 Advance 步进指定时间。
 func (fc *FakeClock) Sleep(d time.Duration) {
 	fc.Advance(d)
 }
 
+// Since 计算目标时间相对于假时钟当前时刻的时长差。
 func (fc *FakeClock) Since(t time.Time) time.Duration {
 	return fc.Now().Sub(t)
 }
 
+// Until 计算假时钟当前时刻到目标时间的距离。
 func (fc *FakeClock) Until(t time.Time) time.Duration {
 	return t.Sub(fc.Now())
 }
 
+// NewTimer 在假时钟上注册一个新的模拟定时器。
 func (fc *FakeClock) NewTimer(d time.Duration) Timer {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()

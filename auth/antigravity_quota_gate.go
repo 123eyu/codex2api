@@ -21,6 +21,7 @@ type QuotaExhaustedError struct {
 	RetryAfter time.Duration
 }
 
+// Error 返回类型化配额耗尽错误描述，区分续链绑定账号与整池耗尽场景。
 func (e *QuotaExhaustedError) Error() string {
 	if e.Bound {
 		return "antigravity bound account quota exhausted"

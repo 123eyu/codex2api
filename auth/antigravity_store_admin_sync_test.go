@@ -25,6 +25,7 @@ func adminSyncExpiredCredentials() map[string]any {
 	return map[string]any{"expires_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)}
 }
 
+// newAdminSyncTestServer 构造带并发跟踪的手动同步测试服务器。
 func newAdminSyncTestServer(t *testing.T, accessPrefix string) (*httptest.Server, *atomic.Int32, *atomic.Int32) {
 	t.Helper()
 	var tokenCalls atomic.Int32

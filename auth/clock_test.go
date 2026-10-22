@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// TestFakeClock_AdvanceAndTimer 验证 FakeClock 的时间前进及定时器到期事件派发。
 func TestFakeClock_AdvanceAndTimer(t *testing.T) {
 	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	clk := NewFakeClock(start)
@@ -39,6 +40,7 @@ func TestFakeClock_AdvanceAndTimer(t *testing.T) {
 	}
 }
 
+// TestFakeClock_TimerResetAndStop 验证 FakeClock 上定时器的重置与主动停止语义。
 func TestFakeClock_TimerResetAndStop(t *testing.T) {
 	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	clk := NewFakeClock(start)

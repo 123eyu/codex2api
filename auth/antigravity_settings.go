@@ -96,6 +96,7 @@ func (s AntigravitySettings) clone() AntigravitySettings {
 	return out
 }
 
+// cloneOptionalBool 深拷贝可选布尔指针，避免外部修改造成内存逃逸或别名污染。
 func cloneOptionalBool(v *bool) *bool {
 	if v == nil {
 		return nil
@@ -104,6 +105,7 @@ func cloneOptionalBool(v *bool) *bool {
 	return &copied
 }
 
+// cloneOptionalInt 深拷贝可选整型指针，隔离配置快照内存副本。
 func cloneOptionalInt(v *int) *int {
 	if v == nil {
 		return nil
@@ -142,6 +144,7 @@ const (
 	AntigravityApplyRevisionRollback
 )
 
+// String 返回 AntigravityApplyOutcome 的文本枚举描述。
 func (o AntigravityApplyOutcome) String() string {
 	switch o {
 	case AntigravityApplyRevisionRollback:
@@ -173,6 +176,7 @@ func ApplyConfiguredAntigravitySettings(next AntigravitySettings) AntigravityApp
 	return AntigravityApplyRevisionRollback
 }
 
+// raiseConfiguredAntigravityRevision 原子递增本机配置 revision 基线，确保版本单调不减。
 func raiseConfiguredAntigravityRevision(revision int64) {
 	if revision <= 0 {
 		return

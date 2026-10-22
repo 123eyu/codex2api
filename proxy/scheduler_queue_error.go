@@ -34,6 +34,7 @@ func schedulerQueueFullAPIError() *api.APIError {
 	return api.NewAPIError(api.ErrCodeServiceUnavailable, schedulerQueueFullMessage, api.ErrorTypeServer)
 }
 
+// schedulerQuotaExhaustedMessage 根据阻断原因生成标准化的错误提示文本。
 func schedulerQuotaExhaustedMessage(reason string) string {
 	return "Antigravity account quota exhausted (" + reason + ")"
 }
@@ -114,6 +115,7 @@ func writeSchedulerQuotaExhaustedError(c *gin.Context, retryAfterSeconds int, re
 	writeSchedulerQuotaExhaustedErrorForProtocol(c, retryAfterSeconds, reason, continuousRetryProtocolOf(c))
 }
 
+// writeSchedulerQuotaExhaustedErrorForProtocol 按指定协议信封格式输出 429 配额阻断错误。
 func writeSchedulerQuotaExhaustedErrorForProtocol(c *gin.Context, retryAfterSeconds int, reason string, protocol continuousRetryHTTPProtocol) {
 	if c == nil {
 		return

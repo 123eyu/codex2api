@@ -60,6 +60,7 @@ func newAntigravitySnapshotTestAccount(t *testing.T, store *Store, raw string, e
 	return account
 }
 
+// antigravityQuotaState 读取账号运行时的配额与纪元相关内存状态。
 func antigravityQuotaState(t *testing.T, account *Account) (float64, bool, int64, int) {
 	t.Helper()
 	account.mu.RLock()

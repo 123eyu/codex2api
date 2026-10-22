@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+// TestAntigravityCoordinator_DualChannelAndFlightMutualExclusion 断言协调器单账号单飞互斥，
+// 且交互通道不占用后台 4 并发许可。
 func TestAntigravityCoordinator_DualChannelAndFlightMutualExclusion(t *testing.T) {
 	coord := NewAntigravityCoordinator(4)
 	ctx := context.Background()
@@ -55,6 +57,8 @@ func TestAntigravityCoordinator_DualChannelAndFlightMutualExclusion(t *testing.T
 	}
 }
 
+// TestAntigravityCoordinator_LeaseReleaseIsIdempotent 断言同一个租约重复 Release 幂等无 panic，
+// 且旧租约的重复释放不会错误解开后续获取者的锁。
 func TestAntigravityCoordinator_LeaseReleaseIsIdempotent(t *testing.T) {
 	coord := NewAntigravityCoordinator(4)
 	ctx := context.Background()
@@ -89,6 +93,8 @@ func TestAntigravityCoordinator_LeaseReleaseIsIdempotent(t *testing.T) {
 	next.Release()
 }
 
+// TestAntigravityCoordinator_StaleReleaseDoesNotBreakNewLease 断言持有旧 channel 的过期租约
+// 无法越权释放新持有者的租约，确保单飞互斥不被静默破坏。
 func TestAntigravityCoordinator_StaleReleaseDoesNotBreakNewLease(t *testing.T) {
 	coord := NewAntigravityCoordinator(4)
 	ctx := context.Background()
@@ -125,6 +131,7 @@ func TestAntigravityCoordinator_StaleReleaseDoesNotBreakNewLease(t *testing.T) {
 	next.Release()
 }
 
+// TestAntigravityCoordinator_ReleaseWakesBlockedWaiter 断言持有者释放后能及时唤醒阻塞等待中的获取者。
 func TestAntigravityCoordinator_ReleaseWakesBlockedWaiter(t *testing.T) {
 	coord := NewAntigravityCoordinator(4)
 	ctx := context.Background()

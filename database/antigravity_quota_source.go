@@ -73,6 +73,7 @@ const (
 	RTConflictIsolateIdentity
 )
 
+// String 返回 RTConflictOutcome 分流决策的枚举文本表示。
 func (o RTConflictOutcome) String() string {
 	switch o {
 	case RTConflictTrustWinner:
@@ -763,6 +764,7 @@ func antigravityMergeSourceMetadata(facts map[string]any, incomingValue any, sou
 	}
 }
 
+// antigravityGroupIdentity 计算配额组在聚合比对时的稳定标识字符串。
 func antigravityGroupIdentity(group map[string]any, position int) string {
 	for _, key := range []string{"display_name", "group_id", "name"} {
 		if value := strings.TrimSpace(credentialStringFromMap(group, key)); value != "" {
@@ -772,6 +774,7 @@ func antigravityGroupIdentity(group map[string]any, position int) string {
 	return fmt.Sprintf("#g%d", position)
 }
 
+// antigravityBucketIdentity 计算单个配额桶在合并与局部覆盖时的稳定键名。
 func antigravityBucketIdentity(bucket map[string]any, position int) string {
 	for _, key := range []string{"window", "bucket_id"} {
 		if value := strings.TrimSpace(credentialStringFromMap(bucket, key)); value != "" {
@@ -781,6 +784,7 @@ func antigravityBucketIdentity(bucket map[string]any, position int) string {
 	return fmt.Sprintf("#b%d", position)
 }
 
+// cloneJSONObject 浅拷贝 JSON 键值对映射对象。
 func cloneJSONObject(source map[string]any) map[string]any {
 	clone := make(map[string]any, len(source))
 	for key, value := range source {

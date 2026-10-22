@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// TestNormalizeAntigravityWindow 覆盖窗口名规整：白名单映射与非法窗口过滤。
 func TestNormalizeAntigravityWindow(t *testing.T) {
 	cases := []struct {
 		input string
@@ -32,6 +33,7 @@ func TestNormalizeAntigravityWindow(t *testing.T) {
 	}
 }
 
+// TestValidateResetTime 覆盖配额重置时间的解析、严格未来判定与窗口上限检查。
 func TestValidateResetTime(t *testing.T) {
 	observed := time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC)
 	// 合法 5h
@@ -51,6 +53,7 @@ func TestValidateResetTime(t *testing.T) {
 	}
 }
 
+// TestClassifyAntigravityFraction_FourStates 覆盖剩余额度四态分类：合法正数、归零、未知及越界值处理。
 func TestClassifyAntigravityFraction_FourStates(t *testing.T) {
 	tiny, zero, neg, over := 0.001, 0.0, -0.5, 1.5
 	nan := math.NaN()
@@ -78,6 +81,7 @@ func TestClassifyAntigravityFraction_FourStates(t *testing.T) {
 	}
 }
 
+// TestApplyQuotaGroupsV2_BadBucketIsolationAndMerge 覆盖 V2 快照合并逻辑：空响应保序、损坏桶隔离与权威整体替换。
 func TestApplyQuotaGroupsV2_BadBucketIsolationAndMerge(t *testing.T) {
 	oldZero := 0.0
 	prevObserved := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)

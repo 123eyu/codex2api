@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+// TestIsAntigravityQuotaExhaustedLocked_Rules 覆盖门禁核心规则：周 0 阻断、
+// 超龄已知零 stale 阻断、正余额 TTL 后转 unknown、旧快照放行与止血开关放行。
 func TestIsAntigravityQuotaExhaustedLocked_Rules(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	zero := 0.0

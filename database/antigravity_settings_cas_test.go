@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+// TestSaveAntigravityConfigCAS_WholeJSONCompareAndSwap 覆盖整 JSON CAS 保存与过期快照拒绝语义。
 func TestSaveAntigravityConfigCAS_WholeJSONCompareAndSwap(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {

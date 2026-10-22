@@ -184,6 +184,7 @@ func antigravityQuotaAppliedSeq(snapshot AntigravityQuotaSnapshot) int64 {
 	return seq
 }
 
+// cloneAntigravityModelMaxOutput 深拷贝 Antigravity 模型的最大输出 token 映射表。
 func cloneAntigravityModelMaxOutput(values map[string]int) map[string]int {
 	if len(values) == 0 {
 		return nil

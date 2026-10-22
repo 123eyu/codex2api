@@ -104,6 +104,7 @@ func newAntigravityQuotaSchedulerWithPhase(store *Store, clock Clock, refresh fu
 	}
 }
 
+// antigravityQuotaInterval 从 Antigravity 渠道设置中提取配额刷新周期时长。
 func antigravityQuotaInterval(settings AntigravitySettings) time.Duration {
 	return time.Duration(settings.GetQuotaRefreshIntervalMinutes()) * time.Minute
 }

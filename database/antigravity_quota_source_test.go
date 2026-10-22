@@ -69,6 +69,8 @@ func loadAntigravityCredentialsDoc(t *testing.T, ctx context.Context, db *DB, ac
 	return doc
 }
 
+// TestAntigravityQuotaSource_LatestSuccessWinsAndEpochBarrier 覆盖 Latest-Success-Wins
+// 并发提交判定、旧成功拒绝与 clear 动作同事务递增 epoch 屏障。
 func TestAntigravityQuotaSource_LatestSuccessWinsAndEpochBarrier(t *testing.T) {
 	ctx := context.Background()
 	db, accID := newAntigravityQuotaTestDB(t, ctx,
@@ -127,6 +129,8 @@ func TestAntigravityQuotaSource_LatestSuccessWinsAndEpochBarrier(t *testing.T) {
 	}
 }
 
+// TestAntigravityQuotaSource_UpdateCASSameIdentityCarryforward 覆盖例行同身份令牌轮换时的
+// 配额事实受控继承：不洗新时标，不递增 epoch。
 func TestAntigravityQuotaSource_UpdateCASSameIdentityCarryforward(t *testing.T) {
 	ctx := context.Background()
 	quotaFacts := `{"schema_version":2,"source_metadata":{"groups":{"applied_seq":5,"observed_at":"2026-10-21T10:00:00Z"}},"quota_groups":[{"display_name":"Weekly","buckets":[{"window":"weekly","remaining_fraction":0,"fraction_present":true,"observed_at":"2026-10-21T10:00:00Z","observation_seq":5,"ttl_seconds":3600}]}]}`
@@ -195,6 +199,8 @@ type AntigravityQuotaSnapshotLite struct {
 	} `json:"source_metadata"`
 }
 
+// TestAntigravityQuotaSource_RTConflictThreeBranches 覆盖 RT 冲突的三分支处置决策：
+// 信任 winner、凭据单次重放与身份断裂隔离。
 func TestAntigravityQuotaSource_RTConflictThreeBranches(t *testing.T) {
 	ctx := context.Background()
 	pre := `{"access_token":"pre-at","refresh_token":"pre-rt","credential_family_id":"fam1","upstream_type":"antigravity","antigravity_quota_epoch":1}`

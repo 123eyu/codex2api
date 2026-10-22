@@ -19,6 +19,7 @@ import (
 // /v1beta/models/*action 路由），429 必须回落到 Gemini 原生错误信封。
 const quotaGateTestGeminiPath = "/v1beta/models/gemini-3-pro:generateContent"
 
+// quotaGateTestContext 构造指定请求路径的 Gin 测试上下文与录制器。
 func quotaGateTestContext(t *testing.T, path string) (*gin.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 	recorder := httptest.NewRecorder()
@@ -106,6 +107,8 @@ func quotaGateTestUnhealthyAccount(id int64) *auth.Account {
 	}
 }
 
+// TestProxy_QuotaGate429MappingAndSkipQueue 覆盖代理层对配额阻断的 429 映射、
+// 跳过排队等待、续链绑定保留及 native countTokens 的受控阻断。
 func TestProxy_QuotaGate429MappingAndSkipQueue(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

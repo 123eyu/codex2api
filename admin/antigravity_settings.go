@@ -73,11 +73,13 @@ type antigravitySettingsPatch struct {
 	quotaGateEnabledPresent     bool
 }
 
+// empty 报告 patch 是否未包含任何更新字段。
 func (p antigravitySettingsPatch) empty() bool {
 	return p.modelRedirects == nil && p.redirectOverridesEffort == nil && p.exposeThoughts == nil &&
 		!p.quotaRefreshEnabledPresent && !p.quotaRefreshIntervalPresent && !p.quotaGateEnabledPresent
 }
 
+// isJSONNull 报告原始 JSON 字段是否显式为 null 字面量。
 func isJSONNull(raw json.RawMessage) bool {
 	return strings.TrimSpace(string(raw)) == "null"
 }
@@ -160,6 +162,7 @@ func parseAntigravitySettingsPatch(body []byte) (antigravitySettingsPatch, error
 	return patch, nil
 }
 
+// decodeAntigravityBool 解析 JSON 原始布尔字段，非布尔类型返回格式化错误。
 func decodeAntigravityBool(raw json.RawMessage, field string) (*bool, error) {
 	var value bool
 	if err := json.Unmarshal(raw, &value); err != nil {

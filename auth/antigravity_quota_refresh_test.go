@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// TestComputeBackoff 覆盖连续失败指数退避公式、封顶值计算及大失败次数的溢出防护。
 func TestComputeBackoff(t *testing.T) {
 	// I=60min: k=1 -> 120m (2h); k=2 -> 240m (4h); 封顶 max(4I, 60m)=240m
 	i60 := 60 * time.Minute
@@ -47,6 +48,7 @@ func TestComputeBackoff(t *testing.T) {
 	}
 }
 
+// TestCheckCoverageWindow 覆盖名义槽位覆盖窗 (nominalDue - period, nominalDue] 的半开半闭区间判定。
 func TestCheckCoverageWindow(t *testing.T) {
 	due := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	period := 60 * time.Minute
@@ -65,6 +67,7 @@ func TestCheckCoverageWindow(t *testing.T) {
 	}
 }
 
+// TestNominalSlotTime_UniformSpacingAndSharedTheta 覆盖名义槽位的均匀分布计算与共有相位旋转等距性。
 func TestNominalSlotTime_UniformSpacingAndSharedTheta(t *testing.T) {
 	epoch := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	interval := 60 * time.Minute

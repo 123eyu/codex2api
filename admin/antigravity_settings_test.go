@@ -93,6 +93,7 @@ func TestAntigravitySettingsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAntigravitySettingsPUTQuotaFieldsWithRevision 断言 PUT 支持新配额字段并严格按 revision 单调递增更新。
 func TestAntigravitySettingsPUTQuotaFieldsWithRevision(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previous := auth.ConfiguredAntigravitySettings()
@@ -185,6 +186,7 @@ func TestAntigravitySettingsPUTQuotaFieldsWithRevision(t *testing.T) {
 	}
 }
 
+// TestAntigravitySettingsPUTRestoresQuotaFieldsDroppedByOldWriter 断言混布覆盖时自动恢复被旧版本写者抹除的配额字段。
 func TestAntigravitySettingsPUTRestoresQuotaFieldsDroppedByOldWriter(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previous := auth.ConfiguredAntigravitySettings()
