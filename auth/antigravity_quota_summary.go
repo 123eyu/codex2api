@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/codex2api/database"
 )
 
 // ErrAntigravityQuotaSummaryIncomplete 表示一次 groups summary 观测没有拿到可用的
@@ -39,13 +42,35 @@ func antigravityQuotaSummaryTTLSeconds(interval time.Duration) int {
 	return seconds
 }
 
+// reloadAntigravityQuotaSummaryRow 在认证恢复（换票）之后重读 durable 行并复检栅栏：
+// 换票会推进 credential_generation 并替换 access_token，后续的预约、提交栅栏与最终
+// 运行时投影都必须以新代际为准——沿用旧代际会让观测被 Latest-Success-Wins 拒绝，
+// 甚至把旧代际的观测盖到新代际上（Spec §4.1）。
+func (s *Store) reloadAntigravityQuotaSummaryRow(ctx context.Context, dbID int64) (*database.AccountRow, string, error) {
+	row, err := s.db.GetAccountByID(ctx, dbID)
+	if err != nil {
+		return nil, "", fmt.Errorf("reload Antigravity account %d after credential recovery: %w", dbID, err)
+	}
+	if reason, _ := antigravityPersistedHardFence(row); reason != "" {
+		return nil, "", fmt.Errorf("Antigravity account %d carries a durable hard fence: %s", dbID, reason)
+	}
+	familyScope := strings.TrimSpace(row.GetCredential("credential_family_id"))
+	if familyScope == "" {
+		return nil, "", fmt.Errorf("Antigravity account %d has no credential family for quota summary identity fence", dbID)
+	}
+	return row, familyScope, nil
+}
+
 // RefreshAntigravityQuotaSummary 对单个 AG OAuth 账号执行一次 groups summary 观测：
-// 预约 → 网络 → 合并 → 提交 → 运行时投影。调用方负责调度与退避。
+// （必要时认证恢复）→ 预约 → 网络 → 合并 → 提交 → 运行时投影。调用方负责调度与退避。
 //
-// 本函数只读 summary，绝不写 access_token/refresh_token，也不得调用 client.Sync
-// （全量同步会轮换 token，属另一条通道）。返回 ErrAntigravityQuotaSummaryIncomplete
-// 之外的错误一律不推进成功；Latest-Success-Wins 拒绝（applied=false）返回 nil，
-// 它是正常结果而不是失败，不得触发退避。
+// 观测本身只读 summary：绝不主动轮换 token，也不得调用 client.Sync（全量同步会轮换
+// token，属另一条通道）。但存量凭证失效时它必须自愈——预检发现 AT 已过期/缺失，或上游
+// 直接回 401，都走一次既有安全换票链路（forceRotate=false，内含 family lease 与
+// DB-first generation CAS）后重试；401 恢复只有一次机会，禁止循环重试（Spec §4.2、§5.1
+// 的「必要认证恢复例外」）。返回 ErrAntigravityQuotaSummaryIncomplete 之外的错误一律
+// 不推进成功；Latest-Success-Wins 拒绝（applied=false）返回 nil，它是正常结果而不是
+// 失败，不得触发退避。
 func (s *Store) RefreshAntigravityQuotaSummary(ctx context.Context, account *Account) error {
 	if s == nil || s.db == nil {
 		return errors.New("antigravity quota summary refresh requires a database-backed store")
@@ -106,6 +131,18 @@ func (s *Store) RefreshAntigravityQuotaSummary(ctx context.Context, account *Acc
 		return ErrAntigravityNoUsableProxy
 	}
 
+	// 预检换票（Spec §5.1「必要认证恢复例外」）：存量 AT 已过期或缺失时，直接拿它去
+	// 观测只会恒定 401——线上「调度器正确派发但 summary 全量 401」正是这个形态。换票
+	// 失败即返回：不预约、不联网，调度器据错误退避。
+	if account.NeedsRefresh() || strings.TrimSpace(row.GetCredential("access_token")) == "" {
+		if err := s.refreshAntigravityAccountDurable(ctx, account, false); err != nil {
+			return fmt.Errorf("recover Antigravity credential before quota summary account=%d: %w", dbID, err)
+		}
+		if row, familyScope, err = s.reloadAntigravityQuotaSummaryRow(ctx, dbID); err != nil {
+			return err
+		}
+	}
+
 	interval := time.Duration(ConfiguredAntigravitySettings().GetQuotaRefreshIntervalMinutes()) * time.Minute
 	ttlSeconds := antigravityQuotaSummaryTTLSeconds(interval)
 
@@ -122,6 +159,23 @@ func (s *Store) RefreshAntigravityQuotaSummary(ctx context.Context, account *Acc
 		return fmt.Errorf("build Antigravity client for account %d: %w", dbID, err)
 	}
 	groups, ok, failure := client.fetchQuotaSummary(ctx, row.GetCredential("access_token"), row.GetCredential("project_id"))
+	if !ok && failure.Status == http.StatusUnauthorized {
+		// 401 兜底（Spec §4.2 的认证恢复通道）：名义未过期、实际已被上游拒绝的凭证同样
+		// 要自愈。换一次票 → 按新代际重新预约（旧预约序号随代际一起作废，绝不复用）→
+		// 再观测一次；仍失败即返回错误。恢复只有一次机会，禁止循环重试。
+		if err := s.refreshAntigravityAccountDurable(ctx, account, false); err != nil {
+			return fmt.Errorf("recover Antigravity credential after quota summary 401 account=%d: %w", dbID, err)
+		}
+		if row, familyScope, err = s.reloadAntigravityQuotaSummaryRow(ctx, dbID); err != nil {
+			return err
+		}
+		if seq, epoch, err = s.db.ReserveAntigravityQuotaSource(ctx, row.ID, antigravityQuotaSummarySource, row.CredentialGeneration, familyScope); err != nil {
+			return fmt.Errorf("re-reserve Antigravity quota summary slot account=%d: %w", dbID, err)
+		}
+		// 重试观测是一次新的观测：时标随新的预约时刻重新取值，不复用被作废的那次预约。
+		observedAt = time.Now().UTC()
+		groups, ok, failure = client.fetchQuotaSummary(ctx, row.GetCredential("access_token"), row.GetCredential("project_id"))
+	}
 	if !ok {
 		// 只带状态码与已脱敏的消息：绝不把 token 或整段响应正文写进日志/错误。
 		return fmt.Errorf("fetch Antigravity quota summary account=%d status=%d message=%s", dbID, failure.Status, failure.Message)

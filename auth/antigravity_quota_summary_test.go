@@ -318,6 +318,269 @@ func TestRefreshAntigravityQuotaSummaryRejectedCommitReturnsNil(t *testing.T) {
 	}
 }
 
+// antigravityQuotaAuthFixture 是一个按 Authorization 判权的 Antigravity fixture：
+// 只有 newToken（/token 现换出来的那枚）才能通过 /userinfo、/load 与 /quota，其余一律
+// 401——与线上「DB 里存量 AT 已失效、summary 恒定 401」的真实形态一致。
+//
+// 计数口径：换票链路（refreshAntigravityAccountDurable → client.Sync）成功后自己也会
+// 读一次 summary，那是另一条通道（全量同步）的观测，混进 summaryCalls 会让「quota
+// summary 刷新到底观测了几次」失去意义。Sync 的观测必然发生在 /token 与 /credits 之间
+// （quota→summary→credits 是 Sync 的固定顺序），因此 fixture 用 inCredentialExchange
+// 标出这段换票窗口：窗口内的 /summary 照常服务（保证 Sync 成功），但不计入 summaryCalls。
+type antigravityQuotaAuthFixture struct {
+	server *httptest.Server
+	// newToken 是 /token 换出来的那枚；handle 以它判定请求是否已带上新凭证。
+	newToken string
+	// summaryAlwaysUnauthorized 让 /summary 无视 token 永远 401，用来验证不做循环重试。
+	summaryAlwaysUnauthorized bool
+	// inCredentialExchange 标记换票窗口（/token 起、/credits 止）。
+	inCredentialExchange atomic.Bool
+	tokenCalls           atomic.Int32
+	summaryCalls         atomic.Int32
+	// staleSummaryCalls 统计窗口外拿存量（已失效）令牌访问 summary 的次数。
+	staleSummaryCalls atomic.Int32
+	lastSummaryAuth   atomic.Value
+}
+
+func newAntigravityQuotaAuthFixture(t *testing.T, newToken string, summaryAlwaysUnauthorized bool) *antigravityQuotaAuthFixture {
+	t.Helper()
+	fixture := &antigravityQuotaAuthFixture{newToken: newToken, summaryAlwaysUnauthorized: summaryAlwaysUnauthorized}
+	fixture.lastSummaryAuth.Store("")
+	fixture.server = httptest.NewServer(http.HandlerFunc(fixture.handle))
+	t.Cleanup(fixture.server.Close)
+	return fixture
+}
+
+func (f *antigravityQuotaAuthFixture) lastSummaryAuthorization() string {
+	value, _ := f.lastSummaryAuth.Load().(string)
+	return value
+}
+
+func (f *antigravityQuotaAuthFixture) handle(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	authorized := r.Header.Get("Authorization") == "Bearer "+f.newToken
+	reject := func() { http.Error(w, `{"error":"invalid authentication credentials"}`, http.StatusUnauthorized) }
+	switch r.URL.Path {
+	case "/token":
+		f.tokenCalls.Add(1)
+		f.inCredentialExchange.Store(true)
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"access_token":%q,"refresh_token":"refresh-new","expires_in":3600}`, f.newToken))
+	case "/userinfo":
+		if !authorized {
+			reject()
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"subject-1","email":"user@example.com","verified_email":true}`)
+	case "/load":
+		if !authorized {
+			reject()
+			return
+		}
+		_, _ = io.WriteString(w, `{"cloudaicompanionProject":"project-old","paidTier":{"name":"Pro"}}`)
+	case "/quota":
+		if !authorized {
+			reject()
+			return
+		}
+		_, _ = io.WriteString(w, `{"models":{"gemini-test":{"quotaInfo":{"remainingFraction":0.9}}}}`)
+	case "/credits":
+		// credits 是 Sync 的最后一步：换票窗口到此结束，之后的 summary 观测都属于
+		// quota summary 刷新自己。
+		f.inCredentialExchange.Store(false)
+		_, _ = io.WriteString(w, `{"paidTier":{"availableCredits":[]}}`)
+	case "/summary":
+		inExchange := f.inCredentialExchange.Load()
+		if !inExchange {
+			f.summaryCalls.Add(1)
+			f.lastSummaryAuth.Store(r.Header.Get("Authorization"))
+			if !authorized {
+				f.staleSummaryCalls.Add(1)
+			}
+		}
+		if f.summaryAlwaysUnauthorized || !authorized {
+			reject()
+			return
+		}
+		_, _ = io.WriteString(w, antigravityQuotaSummaryBody(time.Now().UTC().Add(2*time.Hour)))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// TestRefreshAntigravityQuotaSummaryRefreshesExpiredTokenBeforeFetch 断言存量令牌已
+// 过期时，summary 刷新必须先走一次安全换票再观测（Spec §5.1「必要认证恢复例外」）：
+// 线上 4 账号全部 401 invalid authentication credentials 正是因为只读 summary、
+// 从不换票，自动刷新永远观测不到数据。
+func TestRefreshAntigravityQuotaSummaryRefreshesExpiredTokenBeforeFetch(t *testing.T) {
+	const newToken = "access-fresh-before-fetch"
+	fixture := newAntigravityQuotaAuthFixture(t, newToken, false)
+	useAntigravityTestEndpoints(t, fixture.server.URL)
+
+	store, db, account, accountID := newAntigravityRefreshTestAccount(t, map[string]any{
+		"expires_at": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	})
+	ctx := context.Background()
+	if !account.NeedsRefresh() {
+		t.Fatal("fixture account must be past its access-token expiry")
+	}
+	rowBefore, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("reload account row before refresh: %v", err)
+	}
+
+	if err := store.RefreshAntigravityQuotaSummary(ctx, account); err != nil {
+		t.Fatalf("RefreshAntigravityQuotaSummary: %v", err)
+	}
+	if calls := fixture.tokenCalls.Load(); calls != 1 {
+		t.Fatalf("an expired credential must be recovered by exactly one token exchange, token calls=%d", calls)
+	}
+	if calls := fixture.staleSummaryCalls.Load(); calls != 0 {
+		t.Fatalf("an expired credential must never be spent on a quota observation, stale summary calls=%d", calls)
+	}
+	if calls := fixture.summaryCalls.Load(); calls != 1 {
+		t.Fatalf("expected exactly one summary observation, got %d", calls)
+	}
+	if got := fixture.lastSummaryAuthorization(); got != "Bearer "+newToken {
+		t.Fatalf("the summary request must carry the freshly exchanged token, got %q", got)
+	}
+
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("reload account row: %v", err)
+	}
+	raw := row.GetCredential("antigravity_quota")
+	if !strings.Contains(raw, `"schema_version":2`) {
+		t.Fatalf("persisted snapshot must be V2, got %s", raw)
+	}
+	if !strings.Contains(raw, `"source_metadata"`) || !strings.Contains(raw, `"groups"`) {
+		t.Fatalf("persisted snapshot must carry groups source metadata, got %s", raw)
+	}
+	if got := row.GetCredential("access_token"); got != newToken {
+		t.Fatalf("the recovered credential must be durable, access_token=%q", got)
+	}
+	// 认证恢复必须留下一整代新凭据，且内存态与该代际同源：quota 观测的预约与提交都排在
+	// 换票之后，因此 durable 里的 groups 必然属于这一代——既不会被换票通道清空，也不是
+	// 旧代际的残留。
+	if row.CredentialGeneration != rowBefore.CredentialGeneration+1 {
+		t.Fatalf("the credential recovery must advance the generation exactly once: before=%d after=%d",
+			rowBefore.CredentialGeneration, row.CredentialGeneration)
+	}
+	account.mu.RLock()
+	runtimeGeneration := account.CredentialGeneration
+	runtimeAccessToken := account.AccessToken
+	runtimeGroups := len(account.AntigravityQuota.Groups)
+	account.mu.RUnlock()
+	if runtimeGeneration != row.CredentialGeneration || runtimeAccessToken != newToken {
+		t.Fatalf("runtime must be published from the recovered generation: runtime generation=%d access_token=%q, durable generation=%d",
+			runtimeGeneration, runtimeAccessToken, row.CredentialGeneration)
+	}
+	if runtimeGroups == 0 {
+		t.Fatalf("runtime projection must publish the observed groups on the recovered generation, snapshot=%+v", account.AntigravityQuota)
+	}
+}
+
+// TestRefreshAntigravityQuotaSummaryRetriesOnceAfter401 断言名义未过期但已被上游拒绝
+// 的令牌（401）能在同一次刷新里恢复：换票 → 按新代际重新预约 → 再观测一次即成功
+// （Spec §4.2 的 401 认证恢复）。
+func TestRefreshAntigravityQuotaSummaryRetriesOnceAfter401(t *testing.T) {
+	const newToken = "access-fresh-after-401"
+	fixture := newAntigravityQuotaAuthFixture(t, newToken, false)
+	useAntigravityTestEndpoints(t, fixture.server.URL)
+
+	store, db, account, accountID := newAntigravityRefreshTestAccount(t, nil)
+	ctx := context.Background()
+	if account.NeedsRefresh() {
+		t.Fatal("fixture credential must not need a proactive refresh")
+	}
+	rowBefore, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("reload account row before refresh: %v", err)
+	}
+
+	if err := store.RefreshAntigravityQuotaSummary(ctx, account); err != nil {
+		t.Fatalf("RefreshAntigravityQuotaSummary: %v", err)
+	}
+	if calls := fixture.summaryCalls.Load(); calls != 2 {
+		t.Fatalf("a 401 must be retried exactly once after recovery, summary calls=%d", calls)
+	}
+	if calls := fixture.tokenCalls.Load(); calls != 1 {
+		t.Fatalf("the 401 recovery must rotate the credential exactly once, token calls=%d", calls)
+	}
+	if got := fixture.lastSummaryAuthorization(); got != "Bearer "+newToken {
+		t.Fatalf("the retried summary request must carry the recovered token, got %q", got)
+	}
+	if calls := fixture.staleSummaryCalls.Load(); calls != 1 {
+		t.Fatalf("exactly one observation may be spent on the rejected credential before recovery, stale summary calls=%d", calls)
+	}
+	if calls := fixture.staleSummaryCalls.Load(); calls != 1 {
+		t.Fatalf("exactly one observation may be spent on the rejected credential before recovery, stale summary calls=%d", calls)
+	}
+
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("reload account row: %v", err)
+	}
+	raw := row.GetCredential("antigravity_quota")
+	if !strings.Contains(raw, `"schema_version":2`) || !strings.Contains(raw, `"groups"`) {
+		t.Fatalf("the retried observation must persist V2 groups facts, got %s", raw)
+	}
+	if got := row.GetCredential("access_token"); got != newToken {
+		t.Fatalf("the recovered credential must be durable, access_token=%q", got)
+	}
+	// 401 恢复同样必须留下整整一代新凭据，且 durable 的 groups 属于这一代（换票在预约与
+	// 提交之前完成，提交栅栏按新代际取值）。
+	if row.CredentialGeneration != rowBefore.CredentialGeneration+1 {
+		t.Fatalf("the 401 recovery must advance the generation exactly once: before=%d after=%d",
+			rowBefore.CredentialGeneration, row.CredentialGeneration)
+	}
+	account.mu.RLock()
+	runtimeGeneration := account.CredentialGeneration
+	runtimeAccessToken := account.AccessToken
+	runtimeGroups := len(account.AntigravityQuota.Groups)
+	account.mu.RUnlock()
+	if runtimeGeneration != row.CredentialGeneration || runtimeAccessToken != newToken {
+		t.Fatalf("runtime must be published from the recovered generation: runtime generation=%d access_token=%q, durable generation=%d",
+			runtimeGeneration, runtimeAccessToken, row.CredentialGeneration)
+	}
+	if runtimeGroups == 0 {
+		t.Fatalf("runtime projection must publish the retried groups on the recovered generation, snapshot=%+v", account.AntigravityQuota)
+	}
+}
+
+// TestRefreshAntigravityQuotaSummaryDoesNotLoopOnPersistent401 断言 401 恢复只有一次
+// 机会：换票后仍被拒绝即返回错误，绝不循环换票或循环观测（否则一个被吊销的账号会把
+// OAuth 端点与配额端点一起打死）。
+func TestRefreshAntigravityQuotaSummaryDoesNotLoopOnPersistent401(t *testing.T) {
+	const newToken = "access-still-rejected"
+	fixture := newAntigravityQuotaAuthFixture(t, newToken, true)
+	useAntigravityTestEndpoints(t, fixture.server.URL)
+
+	store, db, account, accountID := newAntigravityRefreshTestAccount(t, nil)
+	ctx := context.Background()
+
+	err := store.RefreshAntigravityQuotaSummary(ctx, account)
+	if err == nil {
+		t.Fatal("a persistently rejected summary must surface as a failure")
+	}
+	if calls := fixture.summaryCalls.Load(); calls > 2 {
+		t.Fatalf("a persistent 401 must never be retried in a loop, summary calls=%d", calls)
+	}
+	if calls := fixture.tokenCalls.Load(); calls > 1 {
+		t.Fatalf("a persistent 401 must trigger at most one credential recovery, token calls=%d", calls)
+	}
+
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("reload account row: %v", err)
+	}
+	// 预约协议自身会推进 current_attempt_seq，因此这里只断言「没有任何观测被提交」：
+	// applied_seq 仍为 0、observed_at 仍为空。
+	appliedSeq, observedAt := quotaSourceMetaFromPersisted(t, row.GetCredential("antigravity_quota"))
+	if appliedSeq != 0 || !observedAt.IsZero() {
+		t.Fatalf("a rejected observation must never be committed: applied_seq=%d observed_at=%v", appliedSeq, observedAt)
+	}
+}
+
 // TestRefreshAntigravityQuotaSummaryRejectsAccountWithoutFamilyScope 断言缺少凭据
 // family 身份时 fail-closed：OAuth 账号的正常路径必有 family，身份不明的账号一律不
 // 预约、不联网（否则配额观测会写进身份不明的 durable 行）。
