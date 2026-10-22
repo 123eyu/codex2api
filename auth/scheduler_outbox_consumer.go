@@ -746,6 +746,8 @@ func (s *Store) reloadAntigravityConfig(ctx context.Context) error {
 	}
 	// 重定向与门禁止血开关可能已变化，唤醒本地调度器立即按新配置重新求值。
 	s.notifySchedulerAvailability()
+	// quota_refresh_enabled / interval 可能已变化：唤醒配额巡检调度器立即按新配置重算槽位。
+	s.WakeAntigravityQuotaScheduler()
 	return nil
 }
 

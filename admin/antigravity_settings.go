@@ -296,5 +296,10 @@ func (h *Handler) UpdateAntigravitySettings(c *gin.Context) {
 		len(applied.ModelRedirects), applied.RedirectOverridesEffort, applied.ExposeThoughts,
 		applied.GetQuotaRefreshEnabled(), applied.GetQuotaRefreshIntervalMinutes(), applied.GetQuotaGateEnabled(),
 		applied.ConfigRevision, outcome)
+	// quota_refresh_enabled / interval 可能已变化：立即唤醒配额巡检调度器按新配置重算槽位，
+	// 不必等下一轮自然到点。
+	if h.store != nil {
+		h.store.WakeAntigravityQuotaScheduler()
+	}
 	c.JSON(http.StatusOK, buildAntigravitySettingsResponse(applied))
 }

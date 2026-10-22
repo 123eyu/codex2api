@@ -4002,12 +4002,17 @@ type Store struct {
 	// 惰性兜底，保证任何构造路径下手动同步都落入单账号 flight，不允许空转绕过。
 	antigravityCoordinatorMu sync.Once
 	antigravityCoordinator   *AntigravityCoordinator
-	stopCh                   chan struct{}
-	usageFramePersist        *usageFramePersistQueue
-	stopOnce                 sync.Once
-	backgroundCtx            context.Context
-	backgroundCancel         context.CancelFunc
-	wg                       sync.WaitGroup
+	// antigravityQuotaScheduler 是 Antigravity groups summary 的周期调度器
+	// （Spec §5.3）。由 StartAntigravityQuotaScheduler 幂等装配；Store.Stop 在
+	// close(stopCh) 之前先停它，保证停机不再派发新的 summary 请求。
+	antigravityQuotaSchedulerMu sync.Mutex
+	antigravityQuotaScheduler   *antigravityQuotaScheduler
+	stopCh                      chan struct{}
+	usageFramePersist           *usageFramePersistQueue
+	stopOnce                    sync.Once
+	backgroundCtx               context.Context
+	backgroundCancel            context.CancelFunc
+	wg                          sync.WaitGroup
 
 	// 代理池
 	proxyPoolReloadMu    sync.Mutex
@@ -6922,6 +6927,10 @@ func (s *Store) Stop() {
 				acc.transientRateLimitTimer = nil
 			}
 			acc.mu.Unlock()
+		}
+		// 先停 Antigravity 配额调度器：字段未装配（未启动）时安全跳过。
+		if scheduler := s.antigravityQuotaSchedulerRef(); scheduler != nil {
+			scheduler.Stop()
 		}
 		if s.stopCh != nil {
 			close(s.stopCh)
