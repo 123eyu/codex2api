@@ -130,6 +130,10 @@ func (s *Store) StartAntigravityQuotaScheduler() {
 	if backgroundCtx == nil {
 		backgroundCtx = context.Background()
 	}
+	// 运营可观测性：启动即打印生效参数，便于区分「巡检没跑」与「巡检跑了但被开关/资格集合挡住」。
+	settings := ConfiguredAntigravitySettings()
+	log.Printf("[Antigravity 配额巡检] 已启动: enabled=%v interval=%s",
+		settings.GetQuotaRefreshEnabled(), antigravityQuotaInterval(settings))
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -468,6 +472,10 @@ func (s *antigravityQuotaScheduler) dispatch(ctx context.Context, due []antigrav
 		// 联网一次——巡检频率凭空减半。
 		if observedAt, ok := s.observedAt(acc); ok && CheckCoverageWindow(slot.nominal, observedAt, interval) {
 			if !s.isAutoObserved(acc.DBID, observedAt) {
+				// 启动恢复：已有 fresh 观测覆盖本槽位，跳过联网但槽位已结算。
+				// 打一行便于区分「巡检没跑」与「巡检跑了但被覆盖窗吸收」。
+				log.Printf("[Antigravity 配额巡检] 账号 %d 已有覆盖本轮的观测(%s)，跳过本次联网",
+					acc.DBID, observedAt.UTC().Format(time.RFC3339))
 				continue
 			}
 		}
@@ -480,6 +488,9 @@ func (s *antigravityQuotaScheduler) dispatch(ctx context.Context, due []antigrav
 			continue
 		}
 		account := acc
+		// 运营可观测性：每次派发一行（正常 60min/账号，量级可控），便于确认巡检确实在跑。
+		log.Printf("[Antigravity 配额巡检] 派发账号 %d（名义槽位 %s）",
+			account.DBID, slot.nominal.UTC().Format(time.RFC3339))
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
