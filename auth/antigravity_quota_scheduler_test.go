@@ -40,6 +40,10 @@ type antigravityQuotaHarness struct {
 	mu         sync.Mutex
 	calls      []antigravityQuotaCall
 	refreshErr error
+	// onRefresh 模拟真实 refresh 成功后的副作用（把新观测写回账号内存快照）；在记录
+	// 调用时刻之后、返回调用方之前执行，与生产 RefreshAntigravityQuotaSummary 的
+	// 「网络成功 → 落库 → 投影内存」顺序一致。
+	onRefresh func(*Account)
 }
 
 func newAntigravityQuotaHarness(t *testing.T, accounts ...*Account) *antigravityQuotaHarness {
@@ -79,9 +83,29 @@ func (h *antigravityQuotaHarness) refresh(_ context.Context, acc *Account) error
 	h.mu.Lock()
 	h.calls = append(h.calls, antigravityQuotaCall{dbID: acc.DBID, at: h.clock.Now()})
 	err := h.refreshErr
+	onRefresh := h.onRefresh
 	h.mu.Unlock()
+	if err == nil && onRefresh != nil {
+		onRefresh(acc)
+	}
 	h.store.WakeAntigravityQuotaScheduler()
 	return err
+}
+
+// setOnRefresh 注入「刷新成功后」的账号内存投影，用于复现真实 refresh 的观测时标
+// 一定晚于名义槽位一个正 ε 这一事实。
+func (h *antigravityQuotaHarness) setOnRefresh(fn func(*Account)) {
+	h.mu.Lock()
+	h.onRefresh = fn
+	h.mu.Unlock()
+}
+
+// pendingSlot 读取调度器为该账号记录的挂起候选槽位。
+func (h *antigravityQuotaHarness) pendingSlot(dbID int64) (time.Time, bool) {
+	h.scheduler.mu.Lock()
+	defer h.scheduler.mu.Unlock()
+	slot, ok := h.scheduler.pending[dbID]
+	return slot, ok
 }
 
 // start 启动调度循环，并在用例结束时保证循环与已派发的一次性 goroutine 全部退出。
@@ -347,6 +371,222 @@ func TestAntigravityQuotaSchedulerCoverageWindow(t *testing.T) {
 	}
 	if first := calls[0].at.Sub(now); first < 60*time.Minute {
 		t.Fatalf("first refresh at +%v is still inside the covered slot, want > 60m", first)
+	}
+}
+
+// TestAntigravityQuotaSchedulerSteadyStateGapIsOneInterval 是「覆盖窗双跳」回归用例：
+// 真实 refresh 落库的观测时标取预约之后的 time.Now()，必然比名义槽位晚一个正 ε，
+// 于是下一轮名义槽位的覆盖窗 (nominal₂-I, nominal₂] 一定把这份观测判成「fresh 已覆盖」。
+// 若调度器照单跳过，同一份观测会被连续两轮消费，稳态退化为每 2I 才联网一次。
+//
+// 本用例注入与生产同行为的 refresh（观测时标 = 槽位 + 1ms），断言稳态相邻派发间隔
+// 恰好一个周期 I，绝不是 2I。
+func TestAntigravityQuotaSchedulerSteadyStateGapIsOneInterval(t *testing.T) {
+	previous := ConfiguredAntigravitySettings()
+	minutes := 60
+	SetConfiguredAntigravitySettings(AntigravitySettings{QuotaRefreshEnabled: ptr(true), QuotaRefreshIntervalMinutes: &minutes})
+	t.Cleanup(func() { SetConfiguredAntigravitySettings(previous) })
+
+	first := antigravityQuotaTestAccount(601)
+	second := antigravityQuotaTestAccount(602)
+	h := newAntigravityQuotaHarnessWithPhase(t, 0, true, first, second)
+
+	var seq int64
+	h.setOnRefresh(func(acc *Account) {
+		// 关键：观测时标晚于本次槽位一个正 ε（生产里它是 time.Now().UTC()）。
+		observedAt := h.clock.Now().Add(time.Millisecond)
+		seq++
+		acc.mu.Lock()
+		acc.AntigravityQuota = AntigravityQuotaSnapshot{
+			SchemaVersion: 2,
+			SourceMetadata: map[string]SourceMeta{
+				"groups": {AppliedSeq: seq, ObservedAt: observedAt, PresenceVerified: true},
+			},
+		}
+		acc.mu.Unlock()
+	})
+
+	h.start()
+	// 5 个完整周期（N=2、θ=0 时槽位落在 12:15 / 12:45，15m 步进与槽位对齐）。
+	h.advance(20, 15*time.Minute)
+
+	interval := time.Duration(ConfiguredAntigravitySettings().GetQuotaRefreshIntervalMinutes()) * time.Minute
+	expected := 5 * 2
+	if got := h.totalCalls(); got < expected-1 || got > expected+1 {
+		t.Fatalf("expected about %d refreshes in 5 intervals, got %d", expected, got)
+	}
+	for _, acc := range []*Account{first, second} {
+		calls := h.callsFor(acc.DBID)
+		if len(calls) < 4 {
+			t.Fatalf("account %d: expected at least 4 refreshes in 5 intervals, got %d", acc.DBID, len(calls))
+		}
+		for i := 1; i < len(calls); i++ {
+			gap := calls[i].at.Sub(calls[i-1].at)
+			if diff := gap - interval; diff > time.Second || diff < -time.Second {
+				t.Fatalf("account %d: steady-state gap between attempt %d and %d is %v, want exactly %v (double-skip regression)",
+					acc.DBID, i, i+1, gap, interval)
+			}
+		}
+	}
+}
+
+// TestAntigravityQuotaSchedulerRefreshesQuotaExhaustedAccount 断言硬门禁只挡调度、
+// 绝不断巡检：weekly known_zero（可信 metadata + 未来 resetAt，门禁确实为真）的账号
+// 必须继续被周期派发，否则它永远拿不到「配额已恢复」的新观测（Spec §5.3.1）。
+func TestAntigravityQuotaSchedulerRefreshesQuotaExhaustedAccount(t *testing.T) {
+	previous := ConfiguredAntigravitySettings()
+	minutes := 60
+	SetConfiguredAntigravitySettings(AntigravitySettings{
+		QuotaRefreshEnabled: ptr(true), QuotaRefreshIntervalMinutes: &minutes, QuotaGateEnabled: ptr(true),
+	})
+	t.Cleanup(func() { SetConfiguredAntigravitySettings(previous) })
+
+	zero := 0.0
+	observed := time.Now().UTC().Add(-time.Minute)
+	acc := antigravityQuotaTestAccount(701)
+	acc.AntigravityQuota = AntigravityQuotaSnapshot{
+		SchemaVersion:  2,
+		SourceMetadata: map[string]SourceMeta{"groups": {AppliedSeq: 5, ObservedAt: observed, PresenceVerified: true}},
+		Groups: []AntigravityQuotaGroup{{Buckets: []AntigravityQuotaBucket{{
+			Window:            "weekly",
+			RemainingFraction: &zero,
+			FractionPresent:   true,
+			ResetTime:         observed.Add(48 * time.Hour).Format(time.RFC3339),
+			ObservedAt:        observed,
+			ObservationSeq:    5,
+			TTLSeconds:        3600,
+		}}}},
+	}
+	// 先自证硬门禁确实为真，否则本用例什么也没保住。
+	if blocked, _ := antigravityAccountQuotaGateBlock(acc); !blocked {
+		t.Fatal("fixture must carry a live known_zero hard gate")
+	}
+
+	h := newAntigravityQuotaHarnessWithPhase(t, 0, true, acc)
+	h.start()
+	h.advance(5, 30*time.Minute)
+
+	calls := h.callsFor(acc.DBID)
+	if len(calls) < 2 {
+		t.Fatalf("a known_zero-gated account must keep being polled, got %d calls", len(calls))
+	}
+	interval := time.Duration(ConfiguredAntigravitySettings().GetQuotaRefreshIntervalMinutes()) * time.Minute
+	for i := 1; i < len(calls); i++ {
+		if gap := calls[i].at.Sub(calls[i-1].at); gap != interval {
+			t.Fatalf("account %d: gap between attempt %d and %d is %v, want %v", acc.DBID, i, i+1, gap, interval)
+		}
+	}
+}
+
+// TestAntigravityQuotaSchedulerExcludesPermanentlyIsolatedAccount 断言 RT 谱系断裂的
+// 永久失败标记（credentials 的 antigravity_permanent_refresh_error，运行时投影为
+// AntigravityHardBlocked + PermanentRefreshFailures 触顶）把账号踢出资格集合：这类
+// 账号无法靠再查一次 summary 恢复，派发只会空耗许可。
+func TestAntigravityQuotaSchedulerExcludesPermanentlyIsolatedAccount(t *testing.T) {
+	previous := ConfiguredAntigravitySettings()
+	minutes := 60
+	SetConfiguredAntigravitySettings(AntigravitySettings{QuotaRefreshEnabled: ptr(true), QuotaRefreshIntervalMinutes: &minutes})
+	t.Cleanup(func() { SetConfiguredAntigravitySettings(previous) })
+
+	healthy := antigravityQuotaTestAccount(801)
+	isolated := antigravityQuotaTestAccount(802)
+	isolated.AntigravityHardBlocked = true
+	isolated.AntigravityHardBlockReason = "Antigravity token refresh failed: invalid_grant"
+	isolated.PermanentRefreshFailures = permanentRefreshFailureTerminalLimit
+
+	h := newAntigravityQuotaHarnessWithPhase(t, 0, true, healthy, isolated)
+	h.start()
+	// 三小时 = 三个周期，任何错误派发都会留下记录。
+	h.advance(6, 30*time.Minute)
+
+	if got := len(h.callsFor(healthy.DBID)); got < 2 {
+		t.Fatalf("eligible account must keep being refreshed, got %d calls", got)
+	}
+	if got := h.callsFor(isolated.DBID); len(got) != 0 {
+		t.Fatalf("permanently isolated account must never be dispatched, got %d calls", len(got))
+	}
+}
+
+// TestAntigravityQuotaSchedulerResetsPendingOnIntervalChange 断言配置间隔变化时挂起
+// 候选被清空并按新间隔重算（注释承诺「让新间隔立即生效」）。
+func TestAntigravityQuotaSchedulerResetsPendingOnIntervalChange(t *testing.T) {
+	previous := ConfiguredAntigravitySettings()
+	defer func() { SetConfiguredAntigravitySettings(previous) }()
+
+	ten := 10
+	SetConfiguredAntigravitySettings(AntigravitySettings{QuotaRefreshEnabled: ptr(true), QuotaRefreshIntervalMinutes: &ten})
+
+	acc := antigravityQuotaTestAccount(811)
+	h := newAntigravityQuotaHarnessWithPhase(t, 0, true, acc)
+	base := h.clock.Now()
+	h.start()
+	h.advance(4, time.Minute)
+
+	if slot, ok := h.pendingSlot(acc.DBID); !ok || !slot.Equal(base.Add(5*time.Minute)) {
+		t.Fatalf("expected the pending candidate on the 10m grid (%v), got %v (ok=%v)", base.Add(5*time.Minute), slot, ok)
+	}
+
+	twentyFive := 25
+	SetConfiguredAntigravitySettings(AntigravitySettings{QuotaRefreshEnabled: ptr(true), QuotaRefreshIntervalMinutes: &twentyFive})
+	h.store.WakeAntigravityQuotaScheduler()
+	h.settle()
+
+	// 新间隔 I=25m 的网格落在 epoch + 12.5m；沿用旧候选（12:05）即为未清空。
+	want := base.Add(12*time.Minute + 30*time.Second)
+	slot, ok := h.pendingSlot(acc.DBID)
+	if !ok || !slot.Equal(want) {
+		t.Fatalf("changing the interval must recompute the pending candidate onto the new grid (%v), got %v (ok=%v)", want, slot, ok)
+	}
+
+	h.advance(7, time.Minute)
+	if got := h.totalCalls(); got != 0 {
+		t.Fatalf("the stale 10m slot must not be dispatched after the interval changed, calls=%d", got)
+	}
+}
+
+// TestAntigravityQuotaSchedulerResetsPendingOnReenable 断言 quota_refresh_enabled
+// 由 false 回到 true 时挂起候选被清空：关闭期间已过期、从未派发的陈旧槽位不得在
+// 启用瞬间补发一次（Spec §5.3 无历史补偿）。
+func TestAntigravityQuotaSchedulerResetsPendingOnReenable(t *testing.T) {
+	previous := ConfiguredAntigravitySettings()
+	defer func() { SetConfiguredAntigravitySettings(previous) }()
+
+	minutes := 10
+	enabled := true
+	SetConfiguredAntigravitySettings(AntigravitySettings{QuotaRefreshEnabled: &enabled, QuotaRefreshIntervalMinutes: &minutes})
+
+	acc := antigravityQuotaTestAccount(812)
+	h := newAntigravityQuotaHarnessWithPhase(t, 0, true, acc)
+	h.start()
+	h.advance(6, time.Minute)
+
+	if got := len(h.callsFor(acc.DBID)); got != 1 {
+		t.Fatalf("expected exactly one refresh by 12:06, got %d", got)
+	}
+	if slot, ok := h.pendingSlot(acc.DBID); !ok || slot.After(h.clock.Now().Add(10*time.Minute)) {
+		t.Fatalf("expected a pending candidate queued while enabled, got %v (ok=%v)", slot, ok)
+	}
+
+	disabled := false
+	SetConfiguredAntigravitySettings(AntigravitySettings{QuotaRefreshEnabled: &disabled, QuotaRefreshIntervalMinutes: &minutes})
+	h.store.WakeAntigravityQuotaScheduler()
+	h.settle()
+	// 关闭期间跨过 12:15 这个挂起槽位：不得派发。
+	h.advance(11, time.Minute)
+	if got := len(h.callsFor(acc.DBID)); got != 1 {
+		t.Fatalf("quota_refresh_enabled=false must not dispatch, got %d calls", got)
+	}
+
+	SetConfiguredAntigravitySettings(AntigravitySettings{QuotaRefreshEnabled: &enabled, QuotaRefreshIntervalMinutes: &minutes})
+	h.store.WakeAntigravityQuotaScheduler()
+	h.settle()
+
+	if got := len(h.callsFor(acc.DBID)); got != 1 {
+		t.Fatalf("re-enabling must not replay the stale pending slot, got %d calls", got)
+	}
+	slot, ok := h.pendingSlot(acc.DBID)
+	if !ok || !slot.After(h.clock.Now()) {
+		t.Fatalf("re-enabling must recompute the pending candidate into the future, got %v (ok=%v, now=%v)", slot, ok, h.clock.Now())
 	}
 }
 

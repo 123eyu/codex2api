@@ -153,8 +153,9 @@ func (db *DB) mutateAntigravityQuotaCredentials(ctx context.Context, accountID i
 }
 
 // ReserveAntigravityQuotaSource 在该 source 自己的子请求联网前预约一枚序号：短事务内
-// 锁定账号行，校验未删除、expectedGen 与 family/scope 匹配，仅递增该 source 的
-// `current_attempt_seq` 并记录真实尝试时间，返回序号与其绑定的 quota_epoch。
+// 锁定账号行，校验未删除、expectedGen 匹配、expectedScope 非空时身份必须相等（为空表示
+// 调用方不做身份校验），仅递增该 source 的 `current_attempt_seq` 并记录真实尝试时间，
+// 返回序号与其绑定的 quota_epoch。
 // 未取得执行资格的调用方不得调用本函数空耗序号（Spec §4.1 #1）。
 func (db *DB) ReserveAntigravityQuotaSource(ctx context.Context, accountID int64, source string, expectedGen int64, expectedScope string) (int64, int64, error) {
 	source = strings.TrimSpace(source)
@@ -167,8 +168,10 @@ func (db *DB) ReserveAntigravityQuotaSource(ctx context.Context, accountID int64
 		if row.generation != expectedGen {
 			return false, fmt.Errorf("antigravity quota reservation rejected: generation fence account=%d expected=%d current=%d", accountID, expectedGen, row.generation)
 		}
-		// scope fence 严格化：期望身份非空时 durable 身份必须完全相等，空身份（family
-		// 列未回填）同样拒绝——不得把配额观测写进身份不明的账号。
+		// scope fence：expectedScope 非空时 durable 身份必须与之完全相等，否则拒绝；
+		// expectedScope 为空表示调用方不做身份校验（本函数不替调用方兜底身份，只认
+		// 它给的期望值）。只认自己身份的调用方（如 groups summary）必须在 expectedScope
+		// 为空时自行放弃，不得传空串放行。
 		if expectedScope != "" && row.familyID != expectedScope {
 			return false, fmt.Errorf("antigravity quota reservation rejected: identity scope fence account=%d expected=%s current=%q", accountID, expectedScope, row.familyID)
 		}
@@ -188,9 +191,9 @@ func (db *DB) ReserveAntigravityQuotaSource(ctx context.Context, accountID int64
 }
 
 // CommitAntigravityQuotaSource 以 Latest-Success-Wins 契约提交一个 source 的成功观测：
-// 短事务内复验 epoch/gen/scope，并要求 `mySeq > applied_seq`；**不得**要求
-// `current_attempt_seq == mySeq`（后发失败不得否决先发成功，验收 #28）。任一 fence
-// 不匹配只返回 applied=false 且不报错——它是写入栅栏，不是网络去重证明。
+// 短事务内复验 epoch/gen 以及（expectedScope 非空时的）身份，并要求 `mySeq > applied_seq`；
+// **不得**要求 `current_attempt_seq == mySeq`（后发失败不得否决先发成功，验收 #28）。任一
+// fence 不匹配只返回 applied=false 且不报错——它是写入栅栏，不是网络去重证明。
 func (db *DB) CommitAntigravityQuotaSource(ctx context.Context, accountID int64, source string, mySeq int64, epoch int64, expectedGen int64, expectedScope string, snapshotJSON string) (bool, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {

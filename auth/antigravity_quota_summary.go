@@ -92,6 +92,14 @@ func (s *Store) RefreshAntigravityQuotaSummary(ctx context.Context, account *Acc
 	if reason, _ := antigravityPersistedHardFence(row); reason != "" {
 		return fmt.Errorf("Antigravity account %d carries a durable hard fence: %s", dbID, reason)
 	}
+	// 身份栅栏 fail-closed：OAuth 账号的正常路径必有 credential family，缺 family 属
+	// 异常状态。database 侧的 scope fence 在 expectedScope 为空时不做身份校验（那是
+	// 调用方的责任），因此校验必须由本调用方在预约与联网之前完成——绝不把配额观测写进
+	// 身份不明的 durable 行。
+	familyScope := strings.TrimSpace(row.GetCredential("credential_family_id"))
+	if familyScope == "" {
+		return fmt.Errorf("Antigravity account %d has no credential family for quota summary identity fence", dbID)
+	}
 
 	proxyURL, ok := s.ResolveUsableProxyForAccount(account)
 	if !ok {
@@ -100,7 +108,6 @@ func (s *Store) RefreshAntigravityQuotaSummary(ctx context.Context, account *Acc
 
 	interval := time.Duration(ConfiguredAntigravitySettings().GetQuotaRefreshIntervalMinutes()) * time.Minute
 	ttlSeconds := antigravityQuotaSummaryTTLSeconds(interval)
-	familyScope := strings.TrimSpace(row.GetCredential("credential_family_id"))
 
 	seq, epoch, err := s.db.ReserveAntigravityQuotaSource(ctx, row.ID, antigravityQuotaSummarySource, row.CredentialGeneration, familyScope)
 	if err != nil {

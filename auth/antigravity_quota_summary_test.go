@@ -188,3 +188,163 @@ func TestRefreshAntigravityQuotaSummarySkipsDisabledAccount(t *testing.T) {
 		t.Fatalf("disabled account must not reach the network, summary calls=%d", calls)
 	}
 }
+
+// quotaSourceMetaFromPersisted 解析落库 antigravity_quota 里 groups 来源的 applied_seq
+// 与 observed_at，用于直接断言 durable 行的协议簿记。
+func quotaSourceMetaFromPersisted(t *testing.T, raw string) (int64, time.Time) {
+	t.Helper()
+	var doc struct {
+		SourceMetadata struct {
+			Groups struct {
+				AppliedSeq int64     `json:"applied_seq"`
+				ObservedAt time.Time `json:"observed_at"`
+			} `json:"groups"`
+		} `json:"source_metadata"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &doc); err != nil {
+		t.Fatalf("decode persisted antigravity_quota %q: %v", raw, err)
+	}
+	return doc.SourceMetadata.Groups.AppliedSeq, doc.SourceMetadata.Groups.ObservedAt
+}
+
+// TestRefreshAntigravityQuotaSummaryObservedAtIsReservationTime 断言观测时标取自预约
+// 事务（Spec §3.1）：慢响应（这里 1.2s）绝不把它一起拖后，否则 TTL/reset 基线与覆盖窗
+// 判定都会随网络延迟漂移。
+func TestRefreshAntigravityQuotaSummaryObservedAtIsReservationTime(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/summary" {
+			http.NotFound(w, r)
+			return
+		}
+		time.Sleep(1200 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, antigravityQuotaSummaryBody(time.Now().UTC().Add(2*time.Hour)))
+	}))
+	defer server.Close()
+	useAntigravityTestEndpoints(t, server.URL)
+
+	store, db, account, accountID := newAntigravityRefreshTestAccount(t, nil)
+	ctx := context.Background()
+
+	started := time.Now().UTC()
+	if err := store.RefreshAntigravityQuotaSummary(ctx, account); err != nil {
+		t.Fatalf("RefreshAntigravityQuotaSummary: %v", err)
+	}
+	completed := time.Now().UTC()
+	if elapsed := completed.Sub(started); elapsed < time.Second {
+		t.Fatalf("the slow-response fixture did not take effect (elapsed=%v); this guard would be vacuous", elapsed)
+	}
+
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("reload account row: %v", err)
+	}
+	_, observedAt := quotaSourceMetaFromPersisted(t, row.GetCredential("antigravity_quota"))
+	if observedAt.IsZero() {
+		t.Fatal("persisted groups metadata must carry observed_at")
+	}
+	if observedAt.After(completed) {
+		t.Fatalf("observed_at %v is later than the response completion %v", observedAt, completed)
+	}
+	if lag := completed.Sub(observedAt); lag < time.Second {
+		t.Fatalf("observed_at must be the reservation instant, not the response instant: observed_at=%v sits only %v before completion %v",
+			observedAt, lag, completed)
+	}
+	if early := started.Sub(observedAt); early > time.Second {
+		t.Fatalf("observed_at %v predates the refresh call %v by %v", observedAt, started, early)
+	}
+}
+
+// TestRefreshAntigravityQuotaSummaryRejectedCommitReturnsNil 断言 Latest-Success-Wins
+// 拒绝（applied=false）是正常结局而不是失败：本方观测被更晚预约的观测覆盖时返回 nil，
+// 调用方据此绝不触发退避。
+func TestRefreshAntigravityQuotaSummaryRejectedCommitReturnsNil(t *testing.T) {
+	store, db, account, accountID := newAntigravityRefreshTestAccount(t, nil)
+	ctx := context.Background()
+
+	var hijacked atomic.Bool
+	var hijackSeq atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/summary" {
+			http.NotFound(w, r)
+			return
+		}
+		// 在 refresh 仍停留于网络阶段时，抢先预约并提交一枚更晚序号的观测：refresh
+		// 自己随后拿着更小的序号提交，必然被 applied_seq 栅栏拒绝。
+		if !hijacked.Swap(true) {
+			row, err := db.GetAccountByID(context.Background(), accountID)
+			if err != nil {
+				t.Errorf("reload account row inside the summary window: %v", err)
+				http.Error(w, "fixture reload failed", http.StatusInternalServerError)
+				return
+			}
+			family := row.GetCredential("credential_family_id")
+			seq, epoch, err := db.ReserveAntigravityQuotaSource(context.Background(), accountID, "groups", row.CredentialGeneration, family)
+			if err != nil {
+				t.Errorf("fixture reservation: %v", err)
+				http.Error(w, "fixture reservation failed", http.StatusInternalServerError)
+				return
+			}
+			applied, err := db.CommitAntigravityQuotaSource(context.Background(), accountID, "groups", seq, epoch, row.CredentialGeneration, family, `{"schema_version":2}`)
+			if err != nil || !applied {
+				t.Errorf("fixture commit applied=%v err=%v", applied, err)
+				http.Error(w, "fixture commit failed", http.StatusInternalServerError)
+				return
+			}
+			hijackSeq.Store(seq)
+		}
+		// 让被抢提交真正先于本方提交落库。
+		time.Sleep(300 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, antigravityQuotaSummaryBody(time.Now().UTC().Add(2*time.Hour)))
+	}))
+	defer server.Close()
+	useAntigravityTestEndpoints(t, server.URL)
+
+	if err := store.RefreshAntigravityQuotaSummary(ctx, account); err != nil {
+		t.Fatalf("a Latest-Success-Wins rejection must not surface as a failure, got %v", err)
+	}
+	if seq := hijackSeq.Load(); seq == 0 {
+		t.Fatal("the fixture never hijacked the commit window")
+	}
+
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("reload account row: %v", err)
+	}
+	appliedSeq, _ := quotaSourceMetaFromPersisted(t, row.GetCredential("antigravity_quota"))
+	if appliedSeq != hijackSeq.Load() {
+		t.Fatalf("the rejected commit must not move applied_seq: durable=%d winner=%d", appliedSeq, hijackSeq.Load())
+	}
+}
+
+// TestRefreshAntigravityQuotaSummaryRejectsAccountWithoutFamilyScope 断言缺少凭据
+// family 身份时 fail-closed：OAuth 账号的正常路径必有 family，身份不明的账号一律不
+// 预约、不联网（否则配额观测会写进身份不明的 durable 行）。
+func TestRefreshAntigravityQuotaSummaryRejectsAccountWithoutFamilyScope(t *testing.T) {
+	var summaryCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		summaryCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, antigravityQuotaSummaryBody(time.Now().UTC().Add(2*time.Hour)))
+	}))
+	defer server.Close()
+	useAntigravityTestEndpoints(t, server.URL)
+
+	store, db, account, accountID := newAntigravityRefreshTestAccount(t, map[string]any{"credential_family_id": ""})
+	row, err := db.GetAccountByID(context.Background(), accountID)
+	if err != nil {
+		t.Fatalf("reload account row: %v", err)
+	}
+	if family := strings.TrimSpace(row.GetCredential("credential_family_id")); family != "" {
+		t.Fatalf("fixture must carry no credential family, got %q", family)
+	}
+
+	err = store.RefreshAntigravityQuotaSummary(context.Background(), account)
+	if err == nil {
+		t.Fatal("an account without a credential family must be rejected fail-closed")
+	}
+	if calls := summaryCalls.Load(); calls != 0 {
+		t.Fatalf("the fail-closed path must not reach the network, summary calls=%d", calls)
+	}
+}
