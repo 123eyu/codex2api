@@ -3776,6 +3776,8 @@ export interface OfficialPricingSyncResult {
 	sources: string[]
 	warnings?: string[]
 	synced_at: string
+	fallbacks?: Record<string, string>
+	notices?: string[]
 }
 
 /**

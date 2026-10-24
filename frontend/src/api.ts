@@ -1583,6 +1583,7 @@ export const api = {
       sync_url: string
       default_sync_url: string
       models_dev_url: string
+      litellm_url: string
 		official_openai_url: string
 		official_xai_url: string
 		official_claude_url: string
