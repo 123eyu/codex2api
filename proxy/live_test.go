@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,7 +15,6 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
-	"github.com/codex2api/proxy/liveattestation"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
@@ -63,60 +61,6 @@ func TestEncryptLiveAttestationRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPrepareLiveAttestationPassthrough(t *testing.T) {
-	previous := generateLiveAttestation
-	t.Cleanup(func() { generateLiveAttestation = previous })
-	generateLiveAttestation = func(context.Context) (string, error) {
-		t.Fatal("should not generate when the client already sent attestation")
-		return "", errors.New("unused")
-	}
-	handler := NewHandler(nil, nil, &config.Config{AdminSecret: "secret"}, nil)
-	plain, cipher, err := handler.prepareLiveAttestation(context.Background(), `{"v":1,"s":0,"t":"client"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plain != `{"v":1,"s":0,"t":"client"}` {
-		t.Fatalf("plain=%q", plain)
-	}
-	got, err := decryptLiveAttestation(cipher, "secret")
-	if err != nil || got != plain {
-		t.Fatalf("decrypt=%q err=%v", got, err)
-	}
-}
-
-func TestPrepareLiveAttestationMissingOnUnsupported(t *testing.T) {
-	previous := generateLiveAttestation
-	t.Cleanup(func() { generateLiveAttestation = previous })
-	generateLiveAttestation = func(context.Context) (string, error) {
-		return "", liveattestation.ErrUnsupportedPlatform
-	}
-	handler := NewHandler(nil, nil, &config.Config{AdminSecret: "secret"}, nil)
-	_, _, err := handler.prepareLiveAttestation(context.Background(), "")
-	if err == nil {
-		t.Fatal("expected attestation error")
-	}
-	var attErr *liveAttestationError
-	if !errors.As(err, &attErr) {
-		t.Fatalf("err=%v", err)
-	}
-	if !strings.Contains(attErr.Error(), "X-Oai-Attestation") {
-		t.Fatalf("message=%q", attErr.Error())
-	}
-}
-
-func TestPrepareLiveAttestationGenerate(t *testing.T) {
-	previous := generateLiveAttestation
-	t.Cleanup(func() { generateLiveAttestation = previous })
-	generateLiveAttestation = func(context.Context) (string, error) {
-		return `{"v":1,"s":0,"t":"generated"}`, nil
-	}
-	handler := NewHandler(nil, nil, &config.Config{AdminSecret: "secret"}, nil)
-	plain, _, err := handler.prepareLiveAttestation(context.Background(), "")
-	if err != nil || plain != `{"v":1,"s":0,"t":"generated"}` {
-		t.Fatalf("plain=%q err=%v", plain, err)
-	}
-}
-
 func TestLiveCreateRequiresAllowLive(t *testing.T) {
 	handler := NewHandler(auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1}), nil, nil, nil)
 	c, rec := liveTestContext(t, http.MethodPost, "/v1/live", []byte(`{"sdp":"v=0","session":{}}`), &database.APIKeyRow{ID: 9})
@@ -145,15 +89,10 @@ func TestLiveCreateForwardsSDPAndLocation(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	previousURL := liveCallsURLForTest
-	previousGen := generateLiveAttestation
 	t.Cleanup(func() {
 		liveCallsURLForTest = previousURL
-		generateLiveAttestation = previousGen
 	})
 	liveCallsURLForTest = upstream.URL
-	generateLiveAttestation = func(context.Context) (string, error) {
-		return `{"v":1,"s":0,"t":"generated"}`, nil
-	}
 
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
 	account := &auth.Account{DBID: 1, AccessToken: "at", PlanType: "plus", AccountID: "acct-live"}
@@ -165,6 +104,7 @@ func TestLiveCreateForwardsSDPAndLocation(t *testing.T) {
 	c, rec := liveTestContext(t, http.MethodPost, "/v1/live", body, &database.APIKeyRow{
 		ID: 11, Limits: database.APIKeyLimits{AllowLive: true},
 	})
+	c.Request.Header.Set(liveAttestationHeader, `{"v":1,"s":0,"t":"generated"}`)
 	handler.LiveCreate(c)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -196,36 +136,15 @@ func TestLiveCreateForwardsSDPAndLocation(t *testing.T) {
 
 func TestLiveCreateRejectsRelayAccounts(t *testing.T) {
 	previousURL := liveCallsURLForTest
-	previousGen := generateLiveAttestation
 	t.Cleanup(func() {
 		liveCallsURLForTest = previousURL
-		generateLiveAttestation = previousGen
 	})
 	liveCallsURLForTest = "http://127.0.0.1:1/unused"
-	generateLiveAttestation = func(context.Context) (string, error) {
-		return `{"v":1}`, nil
-	}
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
 	store.AddAccount(&auth.Account{DBID: 2, UpstreamType: auth.UpstreamGrok, APIKey: "xai"})
 	handler := NewHandler(store, nil, &config.Config{AdminSecret: "secret"}, nil)
 	c, rec := liveTestContext(t, http.MethodPost, "/v1/live", []byte(`{"sdp":"v=0","session":{}}`), &database.APIKeyRow{
 		ID: 3, Limits: database.APIKeyLimits{AllowLive: true},
-	})
-	handler.LiveCreate(c)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestLiveCreateMissingAttestationIs503(t *testing.T) {
-	previous := generateLiveAttestation
-	t.Cleanup(func() { generateLiveAttestation = previous })
-	generateLiveAttestation = func(context.Context) (string, error) {
-		return "", liveattestation.ErrUnsupportedPlatform
-	}
-	handler := NewHandler(auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1}), nil, nil, nil)
-	c, rec := liveTestContext(t, http.MethodPost, "/v1/live", []byte(`{"sdp":"v=0","session":{}}`), &database.APIKeyRow{
-		ID: 4, Limits: database.APIKeyLimits{AllowLive: true},
 	})
 	handler.LiveCreate(c)
 	if rec.Code != http.StatusServiceUnavailable {

@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +17,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
+	"github.com/codex2api/proxy/attestation"
 	"github.com/gin-gonic/gin"
 )
 
@@ -200,5 +204,74 @@ func TestSyncCodexClientVersionsSharedRunSurvivesFirstCallerCancel(t *testing.T)
 	}
 	if got := runErr.Load(); got != "<nil>" {
 		t.Fatalf("shared run ctx err = %v", got)
+	}
+}
+
+func TestLiveAttestationPassthrough(t *testing.T) {
+	handler := NewHandler(nil, nil, &config.Config{AdminSecret: "secret"}, nil)
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/live", nil)
+	proof := `{"v":1,"s":0,"t":"client"}`
+	err := handler.applyLiveUpstreamHeaders(req, liveUpstreamHeaderInput{
+		Account: &auth.Account{DBID: 42}, Downstream: http.Header{liveAttestationHeader: {proof}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := encryptLiveAttestation(req.Header.Get(liveAttestationHeader), "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decryptLiveAttestation(cipher, "secret")
+	if err != nil || proof != got {
+		t.Fatalf("decrypt=%q err=%v", got, err)
+	}
+}
+
+func TestLiveAttestationLinuxPreservesAbsence(t *testing.T) {
+	handler := NewHandler(nil, nil, &config.Config{AdminSecret: "secret"}, nil)
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/live", nil)
+	err := handler.applyLiveUpstreamHeaders(req, liveUpstreamHeaderInput{
+		Account:    &auth.Account{DBID: 42},
+		Downstream: http.Header{"User-Agent": {"codex-tui/0.164.0 (Linux Unknown; x86_64) unknown"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := encryptLiveAttestation(req.Header.Get(liveAttestationHeader), "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := handler.decryptLiveAttestation(&liveCallRecord{AttestationCiphertext: cipher})
+	if err != nil || "" != got {
+		t.Fatalf("decrypt=%q err=%v", got, err)
+	}
+}
+
+func TestLiveAttestationMacFailureUsesToken(t *testing.T) {
+	previous := codexAttestationService
+	t.Cleanup(func() { codexAttestationService = previous })
+	codexAttestationService = attestation.NewService(func(context.Context) (attestation.NativeResult, error) {
+		return attestation.NativeResult{}, errors.New("native runtime unavailable")
+	})
+	handler := NewHandler(nil, nil, nil, nil)
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/live", nil)
+	err := handler.applyLiveUpstreamHeaders(req, liveUpstreamHeaderInput{
+		Account:    &auth.Account{DBID: 42},
+		Downstream: http.Header{"User-Agent": {"codex-tui/0.164.0 (Mac OS 15.5.0; arm64) unknown"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Version int    `json:"v"`
+		Status  int    `json:"s"`
+		Token   string `json:"t"`
+	}
+	if err := json.Unmarshal([]byte(req.Header.Get(liveAttestationHeader)), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(envelope.Token, "v1."))
+	if err != nil || envelope.Version != 1 || envelope.Status != 0 || !bytes.Contains(payload, append([]byte("error_code"), byte(attestation.GenerationFailed))) {
+		t.Fatalf("missing DeviceCheck failure state: %q / %v", payload, err)
 	}
 }

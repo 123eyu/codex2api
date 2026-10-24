@@ -153,7 +153,9 @@ func (h *Handler) liveSidebandHeaders(ctx context.Context, record *liveCallRecor
 	if err != nil {
 		return nil, err
 	}
-	if err := h.applyLiveUpstreamHeaders(req, account, attestation, nil, ""); err != nil {
+	if err := h.applyLiveUpstreamHeaders(req, liveUpstreamHeaderInput{
+		Account: account, Identity: record.OutboundIdentity, Attestation: &attestation,
+	}); err != nil {
 		return nil, err
 	}
 	req.Header.Del("Content-Type")
