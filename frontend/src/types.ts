@@ -628,6 +628,26 @@ export interface AccountLiveStateResponse {
     // 调度器当前实际执行的并发上限与配置值；旧后端不返回时保留列表里的值。
     dynamic_concurrency_limit?: number
     base_concurrency_effective?: number
+    // 运行时用量投影：旧后端缺 key 时保留列表值；显式 null 表示窗口已失效。
+    status?: AccountStatus
+    using_credits?: boolean
+    plan_type?: string
+    credits_valid?: boolean
+    credits_balance?: string | null
+    credits_has_credits?: boolean | null
+    credits_unlimited?: boolean | null
+    credits_overage_limit_reached?: boolean | null
+    credits_spend_control_reached?: boolean | null
+    credits_rate_limit_reached_type?: string | null
+    usage_percent_5h?: number | null
+    reset_5h_at?: ISODateString | null
+    codex_5h_usage_updated_at?: ISODateString | null
+    usage_percent_7d?: number | null
+    reset_7d_at?: ISODateString | null
+    codex_usage_updated_at?: ISODateString | null
+    // 最近一次被应用的 WS 配额帧；旧后端不返回，仅用于观测帧摄入。
+    codex_usage_frame_at?: ISODateString
+    codex_usage_frame_kind?: string
   }>
   session_slot_buffer_enabled: boolean
 }

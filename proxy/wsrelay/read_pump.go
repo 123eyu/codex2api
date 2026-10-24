@@ -203,6 +203,9 @@ func (wc *WsConnection) runReadPump() {
 			// 只在"丢弃元数据"与"销毁连接"之间裁决，不延长业务空闲窗口。
 			eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
 			if isIdleDroppableMetadataFrame(eventType) {
+				// 连接级元数据帧不属于任何请求，但其中的 codex.rate_limits 是
+				// 上一轮结束后的权威用量信号；在丢弃前交给只做内存更新的 observer。
+				notifyIdleMetadataObserver(wc.account, eventType, payload)
 				wc.endIdleSniff()
 				wc.touchInbound()
 				continue

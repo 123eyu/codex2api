@@ -25,7 +25,12 @@ const (
 	openAIResponsesWebsocketBetaHeader = "responses_websockets=2026-02-06"
 	openAIResponsesWSMaxConns          = 8
 	openAIResponsesWSMaxAge            = 30 * time.Minute
+	// gorilla 的 SetReadLimit 按压缩后的帧字节计数；解压后的消息大小必须
+	// 单独限制，否则小体积 deflate 炸弹可以放大成 GB 级内存。
+	openAIResponsesWSMaxMessageBytes = 32 << 20
 )
+
+var errOpenAIResponsesWSMessageTooLarge = fmt.Errorf("upstream websocket message exceeds %d bytes", openAIResponsesWSMaxMessageBytes)
 
 // openAIResponsesRelayUsesUpstreamWebsocket 判断这一次出站是否拨中转账号自己的
 // Responses WebSocket。生图仍走 HTTP。全局 codex_force_websocket 不参与这个判断。
@@ -321,11 +326,18 @@ func openAIResponsesWSStream(ctx context.Context, pool *openAIResponsesWSPool, c
 }
 
 func readOpenAIResponsesWS(conn *websocket.Conn, emit func([]byte) bool) error {
-	conn.SetReadLimit(32 << 20)
+	conn.SetReadLimit(openAIResponsesWSMaxMessageBytes)
 	for {
-		_, data, err := conn.ReadMessage()
+		_, reader, err := conn.NextReader()
 		if err != nil {
 			return err
+		}
+		data, err := io.ReadAll(io.LimitReader(reader, openAIResponsesWSMaxMessageBytes+1))
+		if err != nil {
+			return err
+		}
+		if len(data) > openAIResponsesWSMaxMessageBytes {
+			return errOpenAIResponsesWSMessageTooLarge
 		}
 		if len(bytes.TrimSpace(data)) == 0 {
 			continue

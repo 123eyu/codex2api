@@ -166,6 +166,9 @@ func parsePublicAPIKeyUsageLogPagination(pageRaw, pageSizeRaw string) (int, int,
 		if err != nil || parsed < 1 {
 			return 0, 0, errors.New("page 参数无效，需要正整数")
 		}
+		if parsed > maxAdminPage {
+			return 0, 0, errors.New("page 参数过大")
+		}
 		page = parsed
 	}
 

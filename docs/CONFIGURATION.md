@@ -87,6 +87,8 @@ Codex2API 采用三层配置架构：
 | `USE_WEBSOCKET` | 否 | `false` | 旧版开关；未设置 `CODEX_UPSTREAM_TRANSPORT` 时，`true` 等价于 `CODEX_UPSTREAM_TRANSPORT=ws` |
 | `CODEX_TRANSPORT_MODE` | 否 | `standard` | Codex HTTP transport：默认标准 Go TLS；`utls_chrome` 可回滚旧 Chrome uTLS 行为 |
 | `CODEX_WS_SEND_USER_AGENT` | 否 | `true` | WS 握手是否发送 Codex `User-Agent`/`Version`；设为 `false` 可关闭 |
+| `CODEX_WS_USAGE_FRAME_PERSIST_SECONDS` | 否 | `30` | WS 逐帧用量快照落库的最小间隔（秒），正整数，重启生效。内存快照每帧更新；落库由每账号合并的异步 worker 执行，不阻塞上游响应流；跨自动暂停阈值、5pp 变化或 100% 时仍强制落库。大号池可按数据库承压调大 |
+| `CODEX_WS_USAGE_FRAME_INGEST` | 否 | `true` | 是否消费 WS 上游每轮及终态后连接级 `codex.rate_limits` / `codex.response.metadata` 配额帧；设为 `false` 时回退到 WHAM 探针与 HTTP 响应头，重启生效 |
 | `CODEX_SESSION_AFFINITY_TTL` | 否 | `1h` | Codex 会话到账号/代理的黏性 TTL，支持 `1h`、`90m` 或秒数 |
 | `CODEX_COMPACTION_AFFINITY_TTL` | 否 | `168h` | 加密压缩状态的来源亲和 TTL。缓存仅保存密文的 SHA-256 摘要、来源账号和兼容域；已知状态不会跨 Codex 官方、不同 Responses 中转或 Grok 上游流转 |
 | `CODEX_FINGERPRINT_DEBUG` | 否 | `false` | 输出脱敏指纹策略诊断日志，不记录 token |
@@ -99,7 +101,19 @@ Codex2API 采用三层配置架构：
 | `DOWNSTREAM_HTTP_KEEPALIVE_INTERVAL` | 否 | `30s` | 下游 HTTP/SSE 保活周期，使用 Go duration；`0` 关闭。流式端点从首个心跳起建立 SSE 200，发送注释或 Messages ping；非流式端点发送 HTTP 102 |
 | `DOWNSTREAM_WS_KEEPALIVE_INTERVAL` | 否 | `45s` | 下游 WebSocket Ping 周期，使用 Go duration；`0` 关闭。覆盖 Responses、Realtime 与 Live Sideband |
 
+配额帧读路径只更新内存和调度器；用量、credits、套餐及冷却的写库共用后台合并路径。并发观测锁争用时，每账号最多保留 64 个待应用 partial 帧，按原始时间顺序处理；溢出保留最新的有界尾部，并通过已有探针补齐权威快照。停机丢弃未完成的缓存写，重启后由探针重建。冷却写失败会在后续观测重试，不重复计入失败次数。
+
 > `CODEX_UPSTREAM_TRANSPORT` 只控制 HTTP 入站请求转发到 Codex 上游时使用 `http` 还是 `ws`。客户端侧 WebSocket 入口独立可用：使用 `GET ws://<host>/v1/responses` 建连，首帧发送 `response.create` JSON，服务端会通过 Codex 上游 WS 返回 Responses 事件帧。
+>
+> WS 传输下，服务端会消费上游每轮下发的 `codex.rate_limits` 帧，以及响应终态后 1–2 秒补发的连接级用量帧，实时更新账号的 5h/7d 用量快照；自动暂停阈值不再需要等待 WHAM 探针周期即可生效。这些帧随对话本身下发，不产生额外上游请求。
+
+### Antigravity 调度开关
+
+Antigravity 渠道的首绑 / Fresh 选号默认启用加权避险：候选账号按并发占用、已用配额与近期限流惩罚打分，刚被上游 429 的账号排到队尾，从而把新会话摊到健康账号上。
+
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ANTIGRAVITY_BALANCED_AFFINITY` | 否 | `true` | 加权避险开关。取 `0` / `false` / `off` / `none` / `no`（大小写不敏感）时关闭，回退为原有 round-robin；其它值按开启处理。进程启动时读取一次，改动需重启生效。冷却正确性修复不受该开关影响、始终生效：public / wire 冷却写入（Gemini 配额耗尽时追加 family 键）、共享 wire / family 冷却不被更短事件缩短、跨实例冷却过滤（Antigravity 候选查三键） |
 
 ### 数据库配置
 
@@ -199,7 +213,7 @@ CLI/应用版本留空使用自动配对；手填字段独立覆盖。`auto` 模
 
 #### 窗口用量与连接池
 
-API Key 启用多个 RPM/RPD/费用/Token 窗口时，Redis 会通过一次 `MGET` 读取这些窗口的统计缓存；缺失、损坏或读取失败仍按原有顺序回源数据库。自然日和滑动窗口的定义、60 秒统计缓存 TTL、错误码均保持不变。Memory 驱动提供同等批量读取语义。
+API Key 启用多个 RPM/RPD/费用/Token 窗口时，Redis 会通过一次 `MGET` 读取这些窗口的统计缓存；缺失、损坏或读取失败仍按原有顺序回源数据库。自然日和滑动窗口的定义、60 秒统计缓存 TTL 均保持不变。Memory 驱动提供同等批量读取语义。RPM/RPD 的准入点在缓存值之外另有进程内原子计数：RPM 按秒桶计数，RPD 按滑动 24 小时计数，同一分钟内的记录合并到最后一次准入过期（最多保守多保留不到一分钟）。该计数不依赖当前请求是否写用量日志，但按进程独立且不持久化；多实例或重启后的历史额度仍需共享、持久的计量方案。最多保留 8,192 个 Key，满表且无可回收记录时新 Key 返回 `503`，不淘汰仍有效的计数。
 
 分组/账号预算的三个共享分钟桶通过 Pipeline 一起读取，同一个 Key 的并发回源合并为一次，继续复用原有 5 秒本地快照。共享增量最多启动 16 个后台写入，槽位满时由调用方同步写入并承受背压；Redis 故障时仍以数据库用量聚合为后备。
 
