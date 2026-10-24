@@ -35,8 +35,9 @@ const (
 )
 
 var (
-	chatGPTLiveCallsURL        = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
-	chatGPTLiveSidebandBaseURL = "wss://chatgpt.com/backend-api/codex"
+	chatGPTLiveCallsURL = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
+	// Codex v3 的 sideband 使用独立端点，仍携带建连账号的 OAuth 和 account ID。
+	liveSidebandUpstreamBaseURL = "wss://api.openai.com/v1/live"
 	// liveCallsURLForTest 仅测试替换上游 POST URL。
 	liveCallsURLForTest    = ""
 	liveMaxSessionDuration = defaultLiveMaxSessionDuration

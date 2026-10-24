@@ -68,3 +68,10 @@ Live 在选定账号后装配身份和证明；切换账号重试时重新解析
 sideband 使用建连账号、冻结身份和解密后的证明，不重新生成，也不受随后修改的
 身份或自定义请求头影响。已有会话缺少身份快照时沿用原身份解析；原有证明密文格式兼容。
 API Key 仍须开启“允许 ChatGPT Live”，长会话并发与租约沿用现有规则。
+
+上游建连使用 `https://chatgpt.com/backend-api/codex/realtime/calls`，v3 sideband 使用
+`wss://api.openai.com/v1/live/<call_id>`。两步均使用池中同一个 Codex 账号的 OAuth
+access token 和 account ID；sideband 域名不同不代表切换为平台 API Key。
+此行为对应 [Codex 0.164.0 的鉴权说明](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/core/src/client.rs#L525)
+及 [ChatGPT provider 的端点测试](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs#L2497)。
+拨号失败时服务端记录 HTTP 握手状态、上游 request ID 与调用映射哈希；不记录证明或鉴权头。

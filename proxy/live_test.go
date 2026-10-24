@@ -195,6 +195,12 @@ func TestLiveFinalizeIdempotent(t *testing.T) {
 func TestLiveSidebandForwardsTextAndBinary(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if "/v1/live/rtc_ws" != r.URL.Path || "Bearer at" != r.Header.Get("Authorization") ||
+			"acct-sideband" != r.Header.Get("chatgpt-account-id") || `{"v":1}` != r.Header.Get(liveAttestationHeader) {
+			t.Errorf("unexpected sideband path or account identity: path=%q", r.URL.Path)
+			http.Error(w, "unexpected sideband request", http.StatusBadRequest)
+			return
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
@@ -212,15 +218,12 @@ func TestLiveSidebandForwardsTextAndBinary(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	previousDial := liveSidebandDialForTest
-	t.Cleanup(func() { liveSidebandDialForTest = previousDial })
-	liveSidebandDialForTest = func(ctx context.Context, _ *liveCallRecord, _ http.Header) (*websocket.Conn, error) {
-		conn, _, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(upstream.URL, "http"), nil)
-		return conn, err
-	}
+	previousBaseURL := liveSidebandUpstreamBaseURL
+	t.Cleanup(func() { liveSidebandUpstreamBaseURL = previousBaseURL })
+	liveSidebandUpstreamBaseURL = "ws" + strings.TrimPrefix(upstream.URL, "http") + "/v1/live"
 
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
-	account := &auth.Account{DBID: 9, AccessToken: "at"}
+	account := &auth.Account{DBID: 9, AccessToken: "at", AccountID: "acct-sideband"}
 	store.AddAccount(account)
 	handler := NewHandler(store, nil, &config.Config{AdminSecret: "secret"}, nil)
 	handler.SetRuntimeCache(cache.NewMemory(1))
