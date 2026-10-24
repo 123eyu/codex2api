@@ -76,3 +76,44 @@ func TestParseAnthropicOfficialPricingHTMLIncludesCacheWriteAndRead(t *testing.T
 		t.Fatalf("Fable 5 pricing = %+v", fable5)
 	}
 }
+
+// 2026-10: OpenAI moved output before cached input and added 30m / 12h write
+// columns. Fixed positions read output as cached input and the 30m write as
+// output (gpt-6-astra synced as output 12.5, cached 50); columns must be read
+// by header name, both for single-row and grouped (colspan) headers.
+func TestParseOpenAIOfficialPricingHTMLReadsReorderedColumnsByHeader(t *testing.T) {
+	flat := []byte(`
+<section data-pricing-tier="standard"><table><thead><tr><th>Model</th><th>Short context input</th><th>Short context output</th><th>Short context cached input</th><th>Short context 30m write</th><th>Short context 12h write</th><th>Long context input</th><th>Long context output</th><th>Long context cached input</th><th>Long context 30m write</th><th>Long context 12h write</th></tr></thead><tbody>
+<tr><td>gpt-6-astra</td><td>$10.00</td><td>$50.00</td><td>$1.00</td><td>$12.50</td><td>$25.00</td><td>$20.00</td><td>$75.00</td><td>$2.00</td><td>$25.00</td><td>$50.00</td></tr>
+<tr><td>gpt-6-sol</td><td>$2.00</td><td>$10.00</td><td>$0.20</td><td>$2.50</td><td>$5.00</td><td>$4.00</td><td>$15.00</td><td>$0.40</td><td>$5.00</td><td>$10.00</td></tr>
+</tbody></table></section>
+`)
+	grouped := []byte(`
+<section data-pricing-tier="standard"><table><thead>
+<tr><th rowspan="2">Model</th><th colspan="5">Short context</th><th colspan="5">Long context</th></tr>
+<tr><th>Input</th><th>Output</th><th>Cached input</th><th>30m write</th><th>12h write</th><th>Input</th><th>Output</th><th>Cached input</th><th>30m write</th><th>12h write</th></tr>
+</thead><tbody>
+<tr><td>gpt-6-astra</td><td>$10.00</td><td>$50.00</td><td>$1.00</td><td>$12.50</td><td>$25.00</td><td>$20.00</td><td>$75.00</td><td>$2.00</td><td>$25.00</td><td>$50.00</td></tr>
+<tr><td>gpt-6-sol</td><td>$2.00</td><td>$10.00</td><td>$0.20</td><td>$2.50</td><td>$5.00</td><td>$4.00</td><td>$15.00</td><td>$0.40</td><td>$5.00</td><td>$10.00</td></tr>
+</tbody></table></section>
+`)
+	for name, body := range map[string][]byte{"flat": flat, "grouped": grouped} {
+		got, err := ParseOpenAIOfficialPricingHTML(body)
+		if err != nil {
+			t.Fatalf("%s: parse official OpenAI pricing: %v", name, err)
+		}
+		astra := got["gpt-6-astra"]
+		if astra.Input != 10 || astra.Output != 50 || astra.CachedInput != 1 {
+			t.Fatalf("%s: standard prices = %+v", name, astra)
+		}
+		if astra.InputLong != 20 || astra.OutputLong != 75 || astra.CachedInputLong != 2 {
+			t.Fatalf("%s: long prices = %+v", name, astra)
+		}
+		if astra.LongContextThresholdTokens != 272000 {
+			t.Fatalf("%s: threshold = %d", name, astra.LongContextThresholdTokens)
+		}
+		if sol := got["gpt-6-sol"]; sol.Input != 2 || sol.Output != 10 || sol.CachedInput != 0.2 || sol.OutputLong != 15 {
+			t.Fatalf("%s: gpt-6-sol = %+v", name, sol)
+		}
+	}
+}
