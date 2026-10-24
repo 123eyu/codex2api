@@ -4796,6 +4796,10 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 		return
 	}
 	proxy.RecordResponsesLiteSupportFromManifest(manifest.Body)
+	if err := manifest.SaveCapabilities(ctx, h.db); err != nil {
+		writeError(c, http.StatusBadGateway, "保存 Codex 能力快照失败: "+err.Error())
+		return
+	}
 	if err := (proxy.DaybreakObservation{Account: account, Snapshot: daybreakSnapshot, Body: manifest.Body}).Save(ctx, h.db); err != nil {
 		writeError(c, http.StatusBadGateway, "保存 Daybreak 能力失败: "+err.Error())
 		return
