@@ -67,7 +67,9 @@ Live 在选定账号后装配身份和证明；切换账号重试时重新解析
 
 sideband 使用建连账号、冻结身份和解密后的证明，不重新生成，也不受随后修改的
 身份或自定义请求头影响。已有会话缺少身份快照时沿用原身份解析；原有证明密文格式兼容。
-API Key 仍须开启“允许 ChatGPT Live”，长会话并发与租约沿用现有规则。
+API Key 的“自动”和 Codex 渠道均可设置“允许 ChatGPT Live”，新建 Key 在这两个渠道下
+默认开启，也可手动关闭。创建接口省略 `limits.allow_live` 时采用相同默认值，显式
+`false` 仍关闭；已有 Key 保留已保存的选择。长会话并发与租约沿用现有规则。
 
 上游建连使用 `https://chatgpt.com/backend-api/codex/realtime/calls`，v3 sideband 使用
 `wss://api.openai.com/v1/live/<call_id>`。两步均使用池中同一个 Codex 账号的 OAuth
