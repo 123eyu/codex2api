@@ -313,6 +313,8 @@ OpenAI Responses 中转账号默认仍用 HTTP POST `/v1/responses`。账号设�
 
 **说明:** OpenAI Images 兼容入口。外部请求使用 `gpt-image-2`、`gpt-image-2.5-flare` 或 `gpt-image-2.5-sunburst`（支持日期快照及 `-2k` / `-4k` 档位后缀），内部按 `CLIProxyAPI/` 与 `sub2api/` 的链路转换为 Codex `/responses`：主模型默认 `gpt-5.6-luna`（优先使用「系统设置 → Codex → 生图设置」中的文本模型，未配置时沿用环境变量 `CODEX_IMAGES_MAIN_MODEL`；被上游拒绝时按 `gpt-5.5` → `gpt-5.6-terra` → `gpt-5.6-sol` → `gpt-6-astra` 顺序换驱动重试），图像模型写入 `tools[0].model`。
 
+Codex/GPT 图片生成与编辑在 `stream=false` 或省略 `stream` 时，只返回最终 JSON，不发送 HTTP `102 Processing` 或提前提交 HTTP 200；`stream=true` 仍使用原有 SSE 心跳。`DOWNSTREAM_HTTP_KEEPALIVE_INTERVAL` 不再为这两个入口的 Codex/GPT 非流式分支提供保活。客户端和反向代理仍需给完整生成时长足够的等待/空闲超时；需要异步调用时可使用下文的图片任务接口。Grok 图片分支不受此例外影响，仍保留既有 102 行为。
+
 GPT Image 2.5 支持 `auto`、`low`、`medium`、`high`、`xhigh`、`max`。质量参数原样传给图片工具；工作台切回旧型号时会将 `xhigh` / `max` 调整为 `high`。省略模型仍默认使用 `gpt-image-2`。`-2k` / `-4k` 是本项目的尺寸与超分别名，发往上游前会剥掉该后缀。
 
 直接使用 `/v1/responses` 时，文本主控放在顶层 `model`，图片模型放在 `tools[].model`；显式文本主控优先于后台生图设置及 `CODEX_IMAGES_MAIN_MODEL`。顶层 `model` 直接填图像模型时，则使用后台配置的文本主控。工具模型省略时仍补为 `gpt-image-2`。
@@ -2200,7 +2202,7 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
 
 `continuous_retry_catch_all` 是默认关闭的超级开关。请求同时提交 `continuous_retry_enabled=true` 与 `continuous_retry_catch_all=true` 后，除明确的上游 `cyber_policy` 外，所有被代理识别为真实上游失败的 HTTP 状态、传输/读取失败、`error` 帧、`response.failed` 以及以后出现的未知失败都会进入持续重试，不依赖当前已知错误码清单；永久额度、余额、鉴权、无效请求和其他结构化安全策略错误也包含在内。明确的上游 `cyber_policy` 始终终止当前请求，不换号、不重放。文本推理请求只把上游 HTTP `200` 及协议正常终态视为可提交结果；201、202、204、重定向、`response.failed`、独立 `error` 帧及无终态 EOF 都会丢弃整次尝试并继续重试。无状态请求会轮换可用账号；持有账号绑定加密状态的请求只有在能够安全展开为自包含请求时才换号，否则沿用相应协议的绑定语义。`continuous_retry_enabled=false` 会规范化为 `continuous_retry_catch_all=false`。
 
-开启持续重试后，流式上游尝试会先完整暂存，只有正常终态才一次性回放给客户端。因此失败尝试的半截文本、工具调用和错误帧不会泄漏，但客户端也不再实时逐 token 收到该次结果。SSE 路径在退避、等待账号、等待响应头和读取暂存流时写注释心跳并 flush；Responses WebSocket 使用 Ping。非流式 JSON（包括 Grok 图片/视频创建）在已进入无限重试后，会在退避、等待账号、等待响应头和读取响应体时发送标准 HTTP `102 Processing` 信息响应；它不会提交最终 JSON 的状态码或响应体，但中间代理可能丢弃 1xx，因此仍需依赖墙钟上限和客户端超时。`retry_interval_ms` 是本地等待下限；实际等待取该值、带抖动的指数退避（250ms 起步、30 秒封顶）和有效 `Retry-After`（最多 5 分钟）中的较大值。
+开启持续重试后，流式上游尝试会先完整暂存，只有正常终态才一次性回放给客户端。因此失败尝试的半截文本、工具调用和错误帧不会泄漏，但客户端也不再实时逐 token 收到该次结果。SSE 路径在退避、等待账号、等待响应头和读取暂存流时写注释心跳并 flush；Responses WebSocket 使用 Ping。非流式 JSON（包括 Grok 图片/视频创建，但不包括 Codex/GPT Images）在已进入无限重试后，会在退避、等待账号、等待响应头和读取响应体时发送标准 HTTP `102 Processing` 信息响应；它不会提交最终 JSON 的状态码或响应体，但中间代理可能丢弃 1xx，因此仍需依赖墙钟上限和客户端超时。Codex/GPT Images 的非流式生成与编辑即使进入无限重试，也只等待最终 JSON，不发送 102；其重试截止时间和取消行为保持不变。`retry_interval_ms` 是本地等待下限；实际等待取该值、带抖动的指数退避（250ms 起步、30 秒封顶）和有效 `Retry-After`（最多 5 分钟）中的较大值。
 
 `continuous_retry_max_duration_seconds`（默认 600，范围 1-900）是无限预算的墙钟上限，从请求第一次进入 `retryLimit=-1` 时开始，后续尝试不会重置。到期会取消正在进行的上游请求，并返回最近一次真实上游失败；已提交的 SSE 将该失败转换为协议错误事件，Responses WebSocket 使用错误帧并以 1013 关闭。若尚无上游失败可返回，才回退到 504 `upstream_timeout`。Grok 图片/视频创建保持非流式 JSON；无限重试期间使用 HTTP `102 Processing` 保活，不把 SSE 注释混入最终 JSON。该信息响应是 best-effort 的，中间代理仍可能过滤它。
 
