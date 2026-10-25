@@ -37,7 +37,8 @@ Antigravity 模型仍使用「刷新全部模型」。「立即同步官方价�
 
 Codex HTTP、WebSocket 和 Live 共用出站证明服务，按最终 User-Agent 选择平台：
 Windows 自动发送平台不可用状态，Linux 不自动补头，macOS 尝试原生 DeviceCheck，
-生成失败时发送桌面端对应的内层错误状态。账号自定义证明和客户端证明优先于自动生成。
+生成失败时发送桌面端对应的内层错误状态。证明统一由本项目生成，忽略客户端及账号
+自定义请求头中的 `X-Oai-Attestation`；Live sideband 复用服务端冻结的建连结果。
 无需新增环境变量或数据库设置；详见 [平台矩阵、Mac 依赖与 Live 快照](CODEX_ATTESTATION.md)。
 
 ## 配置层级

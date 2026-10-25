@@ -207,17 +207,24 @@ func TestSyncCodexClientVersionsSharedRunSurvivesFirstCallerCancel(t *testing.T)
 	}
 }
 
-func TestLiveAttestationPassthrough(t *testing.T) {
+func TestLiveAttestationIgnoresSuppliedHeaders(t *testing.T) {
 	handler := NewHandler(nil, nil, &config.Config{AdminSecret: "secret"}, nil)
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/live", nil)
-	proof := `{"v":1,"s":0,"t":"client"}`
 	err := handler.applyLiveUpstreamHeaders(req, liveUpstreamHeaderInput{
-		Account: &auth.Account{DBID: 42}, Downstream: http.Header{liveAttestationHeader: {proof}},
+		Account: &auth.Account{DBID: 42, CustomHeaders: map[string]string{liveAttestationHeader: "account-proof"}},
+		Downstream: http.Header{
+			"User-Agent":          {"codex-tui/0.164.0 (Windows 11; x86_64) unknown"},
+			liveAttestationHeader: {"client-proof"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cipher, err := encryptLiveAttestation(req.Header.Get(liveAttestationHeader), "secret")
+	proof := req.Header.Get(liveAttestationHeader)
+	if !strings.HasPrefix(proof, `{"v":1,"s":0,"t":"v1.`) {
+		t.Fatalf("expected project-generated proof, got %q", proof)
+	}
+	cipher, err := encryptLiveAttestation(proof, "secret")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,8 +238,11 @@ func TestLiveAttestationLinuxPreservesAbsence(t *testing.T) {
 	handler := NewHandler(nil, nil, &config.Config{AdminSecret: "secret"}, nil)
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/live", nil)
 	err := handler.applyLiveUpstreamHeaders(req, liveUpstreamHeaderInput{
-		Account:    &auth.Account{DBID: 42},
-		Downstream: http.Header{"User-Agent": {"codex-tui/0.164.0 (Linux Unknown; x86_64) unknown"}},
+		Account: &auth.Account{DBID: 42, CustomHeaders: map[string]string{liveAttestationHeader: "account-proof"}},
+		Downstream: http.Header{
+			"User-Agent":          {"codex-tui/0.164.0 (Linux Unknown; x86_64) unknown"},
+			liveAttestationHeader: {"client-proof"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -256,8 +266,11 @@ func TestLiveAttestationMacFailureUsesToken(t *testing.T) {
 	handler := NewHandler(nil, nil, nil, nil)
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/live", nil)
 	err := handler.applyLiveUpstreamHeaders(req, liveUpstreamHeaderInput{
-		Account:    &auth.Account{DBID: 42},
-		Downstream: http.Header{"User-Agent": {"codex-tui/0.164.0 (Mac OS 15.5.0; arm64) unknown"}},
+		Account: &auth.Account{DBID: 42, CustomHeaders: map[string]string{liveAttestationHeader: "account-proof"}},
+		Downstream: http.Header{
+			"User-Agent":          {"codex-tui/0.164.0 (Mac OS 15.5.0; arm64) unknown"},
+			liveAttestationHeader: {"client-proof"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

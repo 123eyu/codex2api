@@ -391,8 +391,6 @@ var codexAllowedForwardHeaders = []string{
 	"X-Client-Request-Id",
 	"X-Codex-Beta-Features",
 	codexResponsesLiteHeader,
-	// 下游证明先透传，最终身份和账号自定义头装配后由统一服务补充平台状态。
-	"X-Oai-Attestation",
 }
 
 func codexResponsesLiteRequested(requestBody []byte, headers http.Header) bool {

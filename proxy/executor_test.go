@@ -485,24 +485,26 @@ func TestApplyCodexRequestHeadersAppliesAccountCustomHeadersLast(t *testing.T) {
 	}
 }
 
-// TestApplyCodexRequestHeadersForwardsAttestationOnlyWhenPresent 验证证明透传，
-// 以及 Linux 出站身份缺少证明时不自动补头。
-func TestApplyCodexRequestHeadersForwardsAttestationOnlyWhenPresent(t *testing.T) {
-	acc := &auth.Account{DBID: 42, AccountID: "acct-42"}
+// TestApplyCodexRequestHeadersUsesProjectAttestation 验证证明仅由本项目生成。
+func TestApplyCodexRequestHeadersUsesProjectAttestation(t *testing.T) {
+	acc := &auth.Account{DBID: 42, AccountID: "acct-42", CustomHeaders: map[string]string{
+		"X-Oai-Attestation": "v1.account-override",
+	}}
 
-	// 下游携带真实 token → 原样透传
 	withToken, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
 	applyCodexRequestHeaders(withToken, acc, "token-123", "cache-key-1", "api-key-1", nil, http.Header{
+		"User-Agent":        {"codex-tui/0.164.0 (Windows 11; x86_64) unknown"},
 		"X-Oai-Attestation": []string{"v1.real-devicecheck-token"},
 	})
-	if got := withToken.Header.Get("X-Oai-Attestation"); got != "v1.real-devicecheck-token" {
-		t.Fatalf("X-Oai-Attestation = %q, want passthrough of downstream token", got)
+	if got := withToken.Header.Get("X-Oai-Attestation"); !strings.HasPrefix(got, `{"v":1,"s":0,"t":"v1.`) {
+		t.Fatalf("X-Oai-Attestation = %q, want project-generated envelope", got)
 	}
 
-	// Linux 出站身份未携带证明时不自动生成。
+	// Linux 出站身份清除所有外部证明。
 	without, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
 	applyCodexRequestHeaders(without, acc, "token-123", "cache-key-1", "api-key-1", nil, http.Header{
-		"User-Agent": {"codex-tui/0.164.0 (Linux Unknown; x86_64) unknown"},
+		"User-Agent":        {"codex-tui/0.164.0 (Linux Ubuntu 24.04; x86_64) unknown"},
+		"X-Oai-Attestation": {"v1.real-devicecheck-token"},
 	})
 	if got := without.Header.Get("X-Oai-Attestation"); got != "" {
 		t.Fatalf("X-Oai-Attestation = %q, want empty for Linux", got)

@@ -411,8 +411,8 @@ func (e *Executor) prepareWebsocketHeadersChecked(ctx context.Context, accessTok
 	} else {
 		headers.Set("Originator", proxy.Originator)
 	}
-	// 下游证明先透传，统一服务在账号自定义头之后按最终出站身份补充。
-	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics", "X-Oai-Attestation"} {
+	// attestation 由本项目统一生成，不透传下游值。
+	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics"} {
 		if value := strings.TrimSpace(ginHeaders.Get(name)); value != "" {
 			headers.Set(name, value)
 		}

@@ -105,6 +105,7 @@ func TestLiveCreateForwardsSDPAndLocation(t *testing.T) {
 		ID: 11, Limits: database.APIKeyLimits{AllowLive: true},
 	})
 	c.Request.Header.Set(liveAttestationHeader, `{"v":1,"s":0,"t":"generated"}`)
+	c.Request.Header.Set("User-Agent", "codex-tui/0.164.0 (Windows 11; x86_64) unknown")
 	handler.LiveCreate(c)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -115,7 +116,7 @@ func TestLiveCreateForwardsSDPAndLocation(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "v=0") {
 		t.Fatalf("sdp body=%q", rec.Body.String())
 	}
-	if gotAttestation != `{"v":1,"s":0,"t":"generated"}` {
+	if !strings.HasPrefix(gotAttestation, `{"v":1,"s":0,"t":"v1.`) {
 		t.Fatalf("attestation=%q", gotAttestation)
 	}
 	if gotAlpha != "quicksilver=v2" || gotAccept != "application/sdp" || gotBeta != "" {
@@ -127,6 +128,14 @@ func TestLiveCreateForwardsSDPAndLocation(t *testing.T) {
 	record, _, err := handler.liveCalls().get(context.Background(), "rtc_test_1")
 	if err != nil || record == nil || record.Model != "gpt-live-1" {
 		t.Fatalf("record=%+v err=%v", record, err)
+	}
+	proof, err := handler.decryptLiveAttestation(record)
+	if err != nil || gotAttestation != proof {
+		t.Fatalf("saved proof=%q err=%v", proof, err)
+	}
+	headers, err := handler.liveSidebandHeaders(context.Background(), record)
+	if err != nil || gotAttestation != headers.Get(liveAttestationHeader) {
+		t.Fatalf("sideband did not restore generated proof: %v", err)
 	}
 	handler.liveCalls().finalize(record)
 	if account.ActiveRequests.Load() != 0 {

@@ -19,7 +19,7 @@ type CodexAttestationInput struct {
 	FrozenValue *string
 }
 
-// ApplyCodexAttestation 在最终身份和自定义头装配后，统一补充或恢复证明。
+// ApplyCodexAttestation 在最终身份装配后，仅使用本项目生成或冻结的证明。
 func ApplyCodexAttestation(ctx context.Context, input CodexAttestationInput) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -30,11 +30,12 @@ func ApplyCodexAttestation(ctx context.Context, input CodexAttestationInput) err
 	if input.Headers == nil {
 		return nil
 	}
+	setCodexAttestation(input.Headers, "")
 	if input.FrozenValue != nil {
 		setCodexAttestation(input.Headers, *input.FrozenValue)
 		return nil
 	}
-	if strings.TrimSpace(input.Headers.Get(attestation.HeaderName)) != "" || input.Account == nil {
+	if input.Account == nil {
 		return nil
 	}
 	request := codexAttestationRequest(input.Headers.Get("User-Agent"))
@@ -64,9 +65,13 @@ func codexAttestationRequest(userAgent string) attestation.Request {
 }
 
 func setCodexAttestation(headers http.Header, value string) {
-	if value == "" {
-		headers.Del(attestation.HeaderName)
-		return
+	// 同时清理非规范大小写的残留，避免同名头被重复发送。
+	for name := range headers {
+		if strings.EqualFold(name, attestation.HeaderName) {
+			delete(headers, name)
+		}
 	}
-	headers.Set(attestation.HeaderName, value)
+	if value != "" {
+		headers.Set(attestation.HeaderName, value)
+	}
 }
