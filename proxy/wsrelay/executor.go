@@ -490,8 +490,12 @@ type WsResponse struct {
 	// connBroken 时才归还连接复用；其余情况(下游断开、ctx 取消、上游关闭、
 	// 握手失败后未读流等)上游可能仍在该连接上推送残留帧，归还复用会把上一个
 	// 请求的响应串给下一个用户(issue #308)，必须销毁。受 mu 保护。
-	streamCompleted bool
-	mu              sync.Mutex
+	streamCompleted       bool
+	mu                    sync.Mutex
+	interruptResponseID   string
+	interruptTerminalID   string
+	interruptTerminalSeen bool
+	interruptTimer        *time.Timer
 }
 
 // ReadStream 读取 SSE 流
@@ -530,7 +534,12 @@ func (r *WsResponse) ReadStream(callback func(data []byte) bool) error {
 		}
 
 		// 解析并处理消息
-		if err := r.handleMessage(payload, callback); err != nil {
+		payload = normalizeCompletionEvent(payload)
+		handled, interruptErr := r.handleInterruptMessage(payload, callback)
+		if !handled {
+			interruptErr = r.handleMessage(payload, callback)
+		}
+		if err := interruptErr; err != nil {
 			if err == io.EOF {
 				// 到达终止边界(完成/失败/错误帧)。若中途下游写入失败已标记
 				// connBroken，Close() 仍会销毁连接。
@@ -697,6 +706,9 @@ func (r *WsResponse) Close() error {
 	}
 
 	r.closed = true
+	if r.interruptTimer != nil {
+		r.interruptTimer.Stop()
+	}
 
 	// 移除等待请求
 	if r.conn != nil && r.conn.session != nil && r.pendingReq != nil {
@@ -710,7 +722,7 @@ func (r *WsResponse) Close() error {
 	//     * 下游写入失败 / ctx 取消 / 上游正常关闭 / 握手失败后未读流 → 流没消费到边界，
 	//       上游可能仍在推送残留帧，复用会串会话(issue #308)。
 	if r.conn != nil {
-		if !r.connBroken && r.streamCompleted && !r.shouldDiscardOneShotConn() {
+		if !r.connBroken && r.streamCompleted && r.interruptResponseID == "" && !r.shouldDiscardOneShotConn() {
 			r.manager.ReleaseConnection(r.conn)
 		} else {
 			reason := closeUnconsumed
@@ -819,6 +831,7 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	unregisterInterrupt := proxy.RegisterResponsesWSInterrupt(ctx, wsResp.interrupt)
 
 	pr, pw := io.Pipe()
 	resp := &http.Response{
@@ -871,6 +884,7 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 		defer close(done)
 		defer pw.Close()
 		defer wsResp.Close()
+		defer unregisterInterrupt()
 
 		err := wsResp.ReadStream(func(data []byte) bool {
 			// 上游回带的 turn state 只在帧里（握手头是建连时的旧快照），逐帧观测记进追踪。
