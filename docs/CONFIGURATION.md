@@ -9,6 +9,7 @@
 - [系统设置（数据库）](#系统设置数据库)
 - [模型与价格自动更新](#模型与价格自动更新)
 - [API Key 模型周请求次数预算](#api-key-模型周请求次数预算)
+- [Codex 出站 attestation](#codex-出站-attestation)
 - [配置文件示例](#配置文件示例)
 - [配置优先级](#配置优先级)
 
@@ -31,6 +32,14 @@ Codex 注册表中管理员禁用的模型不会重新启用，账号清单学�
 Daybreak 派生别名（如 `gpt-6-sol-daybreak-blue`、`gpt-6.1-sol-daybreak-blue`）按基础型号同步完整标准、Fast 和长上下文价格，不要求参考 JSON 单独收录别名。别名有精确价目时优先采用；别名自定义价优先，基础模型自定义价也不会被别名同步价压过。未查到基础型号价格时继续按既定来源顺序回退。官方 `gpt-daybreak-blue-latest`、`gpt-daybreak-red-latest` 的默认快照目前分别是 `gpt-5.6-sol`、`gpt-5.6-cyber`；Cyber 使用独立公开定价，不再按 Sol 兜底。来源：[Daybreak 指南](https://developers.openai.com/api/docs/guides/daybreak)、[官方价格页](https://developers.openai.com/api/docs/pricing)。
 
 Antigravity 模型仍使用「刷新全部模型」。「立即同步官方价」保持仅同步价格，模型发现由定时轮询执行。新协议、特殊权限或特殊计费规则仍可能需要更新程序。
+
+## Codex 出站 attestation
+
+Codex HTTP、WebSocket 和 Live 共用出站证明服务，按最终 User-Agent 选择平台：
+Windows 自动发送平台不可用状态，Linux 不自动补头，macOS 尝试原生 DeviceCheck，
+生成失败时发送桌面端对应的内层错误状态。证明统一由本项目生成，忽略客户端及账号
+自定义请求头中的 `X-Oai-Attestation`；Live sideband 复用服务端冻结的建连结果。
+无需新增环境变量或数据库设置；详见 [平台矩阵、Mac 依赖与 Live 快照](CODEX_ATTESTATION.md)。
 
 ## 配置层级
 

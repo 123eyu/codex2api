@@ -1932,6 +1932,10 @@ HTTP `/v1/*` 响应的 `X-Codex2API-Request-ID` 对应下方可检索的 `reques
 
 创建新 API 密钥。
 
+创建时，自动渠道（省略 `limits.upstream_channel` 或设为 `auto`）和 Codex 渠道的
+`limits.allow_live` 默认 `true`；显式设为 `false` 可关闭 ChatGPT Live。
+管理台创建和编辑时均可在这两个渠道下调整开关，已有 Key 的设置不自动变更。
+
 **请求:**
 
 ```json

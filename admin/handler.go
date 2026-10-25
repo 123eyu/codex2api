@@ -8642,14 +8642,14 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 }
 
 type createKeyReq struct {
-	Name            string                 `json:"name"`
-	Key             string                 `json:"key"`
-	QuotaLimit      *float64               `json:"quota_limit"`
-	Quota           *float64               `json:"quota"`
-	ExpiresAt       string                 `json:"expires_at"`
-	ExpiresInDays   *int                   `json:"expires_in_days"`
-	AllowedGroupIDs json.RawMessage        `json:"allowed_group_ids"`
-	Limits          *database.APIKeyLimits `json:"limits"`
+	Name            string              `json:"name"`
+	Key             string              `json:"key"`
+	QuotaLimit      *float64            `json:"quota_limit"`
+	Quota           *float64            `json:"quota"`
+	ExpiresAt       string              `json:"expires_at"`
+	ExpiresInDays   *int                `json:"expires_in_days"`
+	AllowedGroupIDs json.RawMessage     `json:"allowed_group_ids"`
+	Limits          *createAPIKeyLimits `json:"limits"`
 }
 
 // generateKey 生成随机 API Key
@@ -8748,9 +8748,8 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 		}
 	}
 
-	var limits database.APIKeyLimits
+	limits := sanitizeAPIKeyLimits(req.Limits.withDefaults())
 	if req.Limits != nil {
-		limits = sanitizeAPIKeyLimits(*req.Limits)
 		limits.ModelRequestLimits, err = normalizeAdminAPIKeyModelRequestLimits(req.Limits.ModelRequestLimits, nil)
 		if err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())

@@ -39,6 +39,7 @@ import type {
   SystemSettings,
 } from "../types";
 import { canStartAPIKeyBulkReset } from "../lib/apiKeyOperationState";
+import { supportsChatGPTLive } from "../lib/apiKeyLive";
 import {
   modelRequestLimitsFromAPIKey,
   modelRequestLimitsToPayload,
@@ -273,7 +274,7 @@ const initialCreateForm: CreateKeyFormState = {
   expireMode: "never",
   expiresAt: "",
   allowedGroupIds: [],
-  limits: emptyLimitsForm,
+  limits: { ...emptyLimitsForm, allowLive: true },
 };
 
 const initialEditForm: EditKeyFormState = {
@@ -2284,7 +2285,7 @@ export default function APIKeys() {
                 onChange={updateCreateUpstreamChannel}
               />
             </FormField>
-            {createForm.limits.upstreamChannel === "codex" ? (
+            {supportsChatGPTLive(createForm.limits.upstreamChannel) ? (
               <AllowLiveField
                 checked={createForm.limits.allowLive}
                 onCheckedChange={(allowLive) =>
@@ -2475,7 +2476,7 @@ export default function APIKeys() {
                       onChange={updateEditUpstreamChannel}
                     />
                   </FormField>
-                  {editForm.limits.upstreamChannel === "codex" ? (
+                  {supportsChatGPTLive(editForm.limits.upstreamChannel) ? (
                     <AllowLiveField
                       checked={editForm.limits.allowLive}
                       onCheckedChange={(allowLive) =>
@@ -2885,7 +2886,6 @@ function applyUpstreamChannel(
   return {
     ...limits,
     upstreamChannel,
-    allowLive: upstreamChannel === "codex" ? limits.allowLive : false,
     planAllow: prunePlanAllow(limits.planAllow, upstreamChannel),
   };
 }
@@ -2994,7 +2994,7 @@ function limitsFormToPayload(form: LimitsFormState, t: Translator): APIKeyLimits
     // 兼容旧字段：block 时同步置位，其余留空由后端按 policy 归一。
     disable_image_generation:
       form.imageGenerationPolicy === "block" || undefined,
-    allow_live: form.upstreamChannel === "codex" && form.allowLive,
+    allow_live: supportsChatGPTLive(form.upstreamChannel) && form.allowLive,
     upstream_channel:
       form.upstreamChannel === "auto" ? undefined : form.upstreamChannel,
     model_request_limits: modelRequestLimitsToPayload(form.modelRequestLimits, t),
