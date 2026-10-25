@@ -12882,16 +12882,10 @@ func (h *Handler) grokChannelModels() []string {
 }
 
 func (h *Handler) antigravityChannelModels() []string {
-	if h == nil || h.store == nil {
-		return proxy.AntigravityPublishedModelIDs(auth.AntigravityDefaultModelIDs())
-	}
 	seen := make(map[string]struct{})
 	models := make([]string, 0)
-	for _, account := range h.store.Accounts() {
-		if account == nil || !account.IsAntigravityAPI() {
-			continue
-		}
-		for _, model := range proxy.AntigravityPublishedModelIDs(account.AntigravityModels()) {
+	collect := func(list []string) {
+		for _, model := range list {
 			key := strings.ToLower(strings.TrimSpace(model))
 			if key == "" {
 				continue
@@ -12903,9 +12897,20 @@ func (h *Handler) antigravityChannelModels() []string {
 			models = append(models, model)
 		}
 	}
-	if len(models) == 0 {
-		models = proxy.AntigravityPublishedModelIDs(auth.AntigravityDefaultModelIDs())
+
+	if h != nil && h.store != nil {
+		for _, account := range h.store.Accounts() {
+			if account == nil || !account.IsAntigravityAPI() {
+				continue
+			}
+			collect(proxy.AntigravityPublishedModelIDs(account.AntigravityModels()))
+		}
 	}
+	if len(models) == 0 {
+		collect(proxy.AntigravityPublishedModelIDs(auth.AntigravityDefaultModelIDs()))
+	}
+	// 无论是否有账号，逻辑模型（裸名如 gemini-3.8-flash）均需暴露给定价管理
+	collect(proxy.AntigravityLogicalModelIDs())
 	sort.Strings(models)
 	return models
 }
