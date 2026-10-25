@@ -9105,6 +9105,9 @@ var knownAPIKeyPlanFilters = map[string]struct{}{
 	// labels so a Claude-bound key's plan gate survives normalization.
 	"claude": {}, "max": {}, "max-5x": {}, "max-20x": {},
 	"enterprise": {}, "business": {},
+	// Antigravity keys derived from Google tier ids (g1-ultra-tier → ultra,
+	// standard-tier → standard); free/pro/api are shared with the lists above.
+	"ultra": {}, "standard": {},
 }
 
 // cleanPlanAllow 归一账号套餐白名单:小写去空白、丢弃未知值并去重。

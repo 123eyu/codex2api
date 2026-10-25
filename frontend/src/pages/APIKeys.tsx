@@ -3958,22 +3958,30 @@ const CLAUDE_PLAN_FILTER_OPTIONS = [
   "business",
 ] as const;
 
-const PLAN_FILTER_OPTIONS = [
-  ...CODEX_PLAN_FILTER_OPTIONS,
-  ...GROK_PLAN_FILTER_OPTIONS.filter(
-    (plan) => !(CODEX_PLAN_FILTER_OPTIONS as readonly string[]).includes(plan),
-  ),
-  ...CLAUDE_PLAN_FILTER_OPTIONS.filter(
-    (plan) =>
-      !(CODEX_PLAN_FILTER_OPTIONS as readonly string[]).includes(plan) &&
-      !(GROK_PLAN_FILTER_OPTIONS as readonly string[]).includes(plan),
-  ),
-];
+// Antigravity 套餐键由 Google tier id 折叠而来(g1-pro-tier → pro,
+// g1-ultra-tier → ultra,standard-tier → standard);API Key 账号为 api。
+const ANTIGRAVITY_PLAN_FILTER_OPTIONS = [
+  "free",
+  "pro",
+  "ultra",
+  "standard",
+  "api",
+] as const;
+
+const PLAN_FILTER_OPTIONS: readonly string[] = Array.from(
+  new Set<string>([
+    ...CODEX_PLAN_FILTER_OPTIONS,
+    ...GROK_PLAN_FILTER_OPTIONS,
+    ...CLAUDE_PLAN_FILTER_OPTIONS,
+    ...ANTIGRAVITY_PLAN_FILTER_OPTIONS,
+  ]),
+);
 
 function planOptionsForChannel(channel: UpstreamChannel): readonly string[] {
   if (channel === "codex") return CODEX_PLAN_FILTER_OPTIONS;
   if (channel === "grok") return GROK_PLAN_FILTER_OPTIONS;
   if (channel === "claude") return CLAUDE_PLAN_FILTER_OPTIONS;
+  if (channel === "antigravity") return ANTIGRAVITY_PLAN_FILTER_OPTIONS;
   return PLAN_FILTER_OPTIONS;
 }
 

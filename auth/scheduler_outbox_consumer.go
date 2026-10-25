@@ -476,6 +476,7 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	// pointers (retainUnavailable). Without this gate, every 429-driven
 	// cooldown event would wipe the whole per-key cache each poll tick.
 	routingChanged := dst.PlanType != src.PlanType ||
+		dst.AntigravityPlanKey != src.AntigravityPlanKey ||
 		dst.UpstreamType != src.UpstreamType ||
 		dst.GrokLivePlan != src.GrokLivePlan ||
 		!slices.Equal(dst.GroupIDs, src.GroupIDs) ||
@@ -488,6 +489,7 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	dst.AccountID = src.AccountID
 	dst.Email = src.Email
 	dst.PlanType = src.PlanType
+	dst.AntigravityPlanKey = src.AntigravityPlanKey
 	dst.ProxyURL = src.ProxyURL
 	dst.CustomHeaders = cloneStringMap(src.CustomHeaders)
 	dst.UpstreamType = src.UpstreamType
