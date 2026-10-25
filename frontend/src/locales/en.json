@@ -5807,7 +5807,7 @@
         "block": "Requests that touch image generation (gpt-image-* models, /v1/images endpoints, or an image_generation tool/intent) return 403."
       },
       "allowLive": "Allow ChatGPT Live",
-      "allowLiveHint": "Enabled by default for new keys on Auto and Codex channels. Allows /v1/live and Codex realtime/calls and uses long-lived concurrency. Availability depends on the upstream.",
+      "allowLiveHint": "Allows /v1/live and Codex realtime/calls and uses long-lived concurrency.",
       "rpm": "Requests per minute",
       "rpmSuffix": "/min",
       "rpd": "Requests per day",
